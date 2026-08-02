@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -107,6 +108,18 @@ def _wait_socket(path: Path, timeout: float = 30.0) -> None:
         if time.monotonic() >= deadline:
             raise ControllerError(f"journal socket did not appear: {path}")
         time.sleep(0.1)
+
+
+def _persisted_run_state(config: dict) -> str:
+    try:
+        uri = f"file:{Path(config['database']).resolve()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.2) as database:
+            row = database.execute(
+                "SELECT state FROM runs WHERE run_id = ?", (config["run_id"],)
+            ).fetchone()
+        return str(row[0]) if row else "running"
+    except sqlite3.Error:
+        return "running"
 
 
 def _paint(text: str, color: str, enabled: bool) -> str:
@@ -387,7 +400,7 @@ def command_observe(arguments: argparse.Namespace) -> int:
                     "run"
                 ]["state"]
             except (JournalError, OSError, ProtocolError, TimeoutError):
-                state = "running"
+                state = _persisted_run_state(config)
             if state in {"complete", "failed", "stopped"}:
                 time.sleep(0.2)
                 remainder = stream.read()
@@ -446,3 +459,5 @@ def main(argv: list[str] | None = None) -> int:
     except (ControllerError, OSError, ValueError) as error:
         print(f"swarmctl: {error}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        return 130

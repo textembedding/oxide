@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 from swarm_harness import cli
@@ -46,3 +47,34 @@ def test_observer_renders_codex_events_with_terminal_syntax() -> None:
     assert "command:\n" in plain
     assert "+added" in plain
     assert "\x1b[" in colored
+
+
+def test_completed_observer_exits_after_replaying_log(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(cli, "RUNS", runs)
+    run = runs / "pilot"
+    (run / "logs").mkdir(parents=True)
+    (run / "logs" / "orchestrator.log").write_text("complete log\n", encoding="utf-8")
+    database = run / "journal.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE runs(run_id TEXT, state TEXT)")
+        connection.execute("INSERT INTO runs VALUES ('pilot-test', 'complete')")
+    (run / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "pilot-test",
+                "run_dir": str(run),
+                "database": str(database),
+                "socket": str(run / "missing.sock"),
+                "workers": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = cli.command_observe(
+        argparse.Namespace(workload="pilot", slot="orchestrator", no_follow=False)
+    )
+    assert result == 0
+    assert capsys.readouterr().out == "complete log\n"
