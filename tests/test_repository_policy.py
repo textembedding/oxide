@@ -74,8 +74,14 @@ def test_non_goals_remain_explicit() -> None:
         assert term in text
 
 
-def test_production_stages_are_disabled_until_reviewed() -> None:
-    for number in range(4):
+def test_stage_zero_is_enabled_for_pilot() -> None:
+    text = (ROOT / "stages" / "stage0.yaml").read_text(encoding="utf-8")
+    assert "enabled: true" in text
+    assert "S0-SEAL" in text
+
+
+def test_later_stages_remain_disabled() -> None:
+    for number in range(1, 4):
         text = (ROOT / "stages" / f"stage{number}.yaml").read_text(encoding="utf-8")
         assert "enabled: false" in text
         assert "tasks: []" in text

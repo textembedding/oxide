@@ -7,7 +7,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
-if sys.version_info < (3, 11) and VENV_PYTHON.is_file():
+if VENV_PYTHON.is_file() and Path(sys.prefix).resolve() != (ROOT / ".venv").resolve():
     os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 sys.path.insert(0, str(ROOT / "src"))
 

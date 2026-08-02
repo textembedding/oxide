@@ -1,5 +1,18 @@
 stage: 0
-enabled: false
-goal: REPLACE_WITH_HUMAN_REVIEWED_STAGE_0_GOAL
-tasks: []
-stage_gate: []
+enabled: true
+goal: Run and seal the complete native Stage 0 verifier scaffold.
+tasks:
+  - id: S0-SEAL
+    title: Verify and seal Stage 0
+    prompt: Run CARGO_TARGET_DIR=/tmp/swarm-stage0-pilot-cargo python3 tools/verify_stage0_demo.py and confirm that all 16 milestones and all 74 commands pass. Then edit docs/ROADMAP.md so its Current stage is exactly Stage 1 — durable admission and exact vertical slice, and change exactly the sixteen Stage 0 milestone checkboxes from [ ] to [x]. Preserve stage0/completion.json and every generated Cargo.lock. Do not modify .stage0-inputs, generated verifier source, fixtures, mutants, or weaken any verifier.
+    depends_on: []
+    checks:
+      - CARGO_TARGET_DIR=/tmp/swarm-stage0-pilot-cargo python3 tools/verify_stage0_demo.py
+      - python3 -c "import json,pathlib; value=json.loads(pathlib.Path('stage0/completion.json').read_text()); assert value['result']=='pass' and value['milestone_count']==16 and value['command_count']==74"
+      - test "$(grep -c '^| \[x\] \*\*S0-' docs/ROADMAP.md)" = "16"
+      - grep -Fq '**Current stage:** Stage 1 — durable admission and exact vertical slice.' docs/ROADMAP.md
+stage_gate:
+  - CARGO_TARGET_DIR=/tmp/swarm-stage0-pilot-cargo python3 tools/verify_stage0_demo.py
+  - python3 -c "import json,pathlib; value=json.loads(pathlib.Path('stage0/completion.json').read_text()); assert value['result']=='pass' and value['milestone_count']==16 and value['command_count']==74"
+  - test "$(grep -c '^| \[x\] \*\*S0-' docs/ROADMAP.md)" = "16"
+  - grep -Fq '**Current stage:** Stage 1 — durable admission and exact vertical slice.' docs/ROADMAP.md
