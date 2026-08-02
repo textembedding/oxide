@@ -12,6 +12,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
+[project.scripts]
+swarmctl = "swarm_harness.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/swarm_harness"]
 
