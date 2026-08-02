@@ -21,7 +21,11 @@ from pygments.util import ClassNotFound
 
 from .controller import Controller, ControllerError, load_stage
 from .journal_client import JournalClient
-from .protocol import JournalError, ProtocolError
+from .live_observer import (
+    JournalSlotFollower,
+    ObserverSlot,
+)
+from .live_observer import _render_line as render_observer_line
 from .sqlite_service import serve_in_thread
 from .worker import Worker
 
@@ -231,40 +235,23 @@ def _render_event(event: dict, color: bool) -> str:
 
 
 def highlight_stream_line(line: str, *, color: bool, raw: bool = False) -> str:
-    """Highlight one persisted stream line without changing its plain-text bytes."""
+    """Render one timestamped log record with the original observer renderer."""
 
     if raw:
         return line
     match = TIMESTAMP.match(line)
     timestamp, body = (match.group(1), match.group(2)) if match else ("", line)
-    prefix = _paint(timestamp, "dim", color) + (" " if timestamp else "")
-    if body.startswith("{"):
-        try:
-            event = json.loads(body)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if isinstance(event, dict):
-                rendered = _render_event(event, color)
-                return prefix + rendered.replace("\n", "\n" + " " * (len(timestamp) + 1))
-    lowered = body.casefold()
-    if "complete" in lowered or "accepted " in lowered or "submitted " in lowered:
-        selected = "green"
-    elif "failed" in lowered or "rejected " in lowered or "error" in lowered:
-        selected = "red"
-    elif "warn" in lowered:
-        selected = "yellow"
-    elif "claimed " in lowered or "prepared " in lowered or "launched " in lowered:
-        selected = "blue"
-    else:
-        selected = "reset"
-    return prefix + _paint(body, selected, color) if selected != "reset" else prefix + body
+    rendered = render_observer_line("stdout", body, color=color).rstrip("\n")
+    if not timestamp:
+        return rendered
+    prefix = _paint(timestamp, "dim", color) + " "
+    return prefix + rendered.replace("\n", "\n" + " " * (len(timestamp) + 1))
 
 
 def _observer_color(mode: str) -> bool:
     if mode == "always":
         return True
-    if mode == "never" or "NO_COLOR" in os.environ:
+    if mode == "never":
         return False
     return sys.stdout.isatty()
 
@@ -374,41 +361,91 @@ def command_observe(arguments: argparse.Namespace) -> int:
         raise ControllerError(f"unknown slot {arguments.slot!r}; choose one of {sorted(allowed)}")
     path = Path(config["run_dir"]) / "logs" / f"{arguments.slot}.log"
     color = _observer_color(getattr(arguments, "color", "auto"))
-
-    def emit(line: str) -> None:
-        print(
-            highlight_stream_line(
-                line.rstrip("\n"), color=color, raw=getattr(arguments, "raw", False)
-            ),
-            flush=True,
-        )
-
-    while not path.exists():
-        if arguments.no_follow:
-            raise ControllerError(f"slot log has not started: {path}")
-        time.sleep(0.1)
-    with path.open("r", encoding="utf-8") as stream:
-        while True:
-            line = stream.readline()
-            if line:
-                emit(line)
-                continue
-            if arguments.no_follow:
-                return 0
-            try:
-                state = JournalClient(config["socket"], timeout=1).run_status(config["run_id"])[
-                    "run"
-                ]["state"]
-            except (JournalError, OSError, ProtocolError, TimeoutError):
+    no_follow = bool(arguments.no_follow)
+    if getattr(arguments, "raw", False):
+        while not path.exists():
+            if no_follow:
+                raise ControllerError(f"slot log has not started: {path}")
+            time.sleep(0.1)
+        with path.open("r", encoding="utf-8") as stream:
+            while True:
+                line = stream.readline()
+                if line:
+                    print(line, end="", flush=True)
+                    continue
                 state = _persisted_run_state(config)
-            if state in {"complete", "failed", "stopped"}:
+                if no_follow or state in {"complete", "failed", "stopped"}:
+                    return 0 if state != "failed" else 1
                 time.sleep(0.2)
-                remainder = stream.read()
-                if remainder:
-                    for line in remainder.splitlines():
-                        emit(line)
-                return 0 if state == "complete" else 1
-            time.sleep(0.2)
+
+    slot = ObserverSlot.parse(arguments.slot)
+    stop = threading.Event()
+    try:
+        uri = f"file:{Path(config['database']).resolve()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.2) as database:
+            row = database.execute(
+                "SELECT task_id FROM tasks WHERE run_id = ? ORDER BY ordinal LIMIT 1",
+                (config["run_id"],),
+            ).fetchone()
+        task_id = str(row[0]) if row else None
+    except sqlite3.Error:
+        task_id = None
+
+    def load_rows(selected: ObserverSlot, after: int, limit: int) -> list[dict]:
+        rows: list[dict] = []
+        if after < 1:
+            rows.append(
+                {
+                    "event_id": 1,
+                    "observer_slot": selected.index,
+                    "invocation_id": f"{config['run_id']}:{selected.actor}",
+                    "stream_kind": "lifecycle",
+                    "kind": "start",
+                    "payload": b"",
+                    "actor_kind": "orchestrator" if selected.index == 0 else "worker",
+                    "task_id": task_id,
+                    "role": "orchestrator" if selected.index == 0 else "worker",
+                }
+            )
+        if path.is_file():
+            for event_id, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), 2
+            ):
+                if event_id <= after:
+                    continue
+                match = TIMESTAMP.match(line)
+                body = match.group(2) if match else line
+                rows.append(
+                    {
+                        "event_id": event_id,
+                        "observer_slot": selected.index,
+                        "invocation_id": f"{config['run_id']}:{selected.actor}",
+                        "stream_kind": "stdout",
+                        "kind": "chunk",
+                        "payload": body + "\n",
+                    }
+                )
+                if len(rows) >= limit:
+                    break
+        if not rows and _persisted_run_state(config) in {"complete", "failed", "stopped"}:
+            stop.set()
+        return rows
+
+    def load_state(_selected: ObserverSlot) -> str:
+        state = _persisted_run_state(config)
+        if state == "complete":
+            return "COMPLETE"
+        if state in {"failed", "stopped"}:
+            return "FAILED"
+        return "ACTIVE" if path.exists() else "WAITING"
+
+    JournalSlotFollower(
+        slot,
+        load_rows,
+        load_state=load_state,
+        color=color,
+    ).run(follow=not no_follow, stop_event=stop)
+    return 1 if _persisted_run_state(config) == "failed" else 0
 
 
 def command_status(arguments: argparse.Namespace) -> int:
