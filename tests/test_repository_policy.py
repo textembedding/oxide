@@ -121,6 +121,7 @@ def test_stage_zero_is_enabled_for_pilot() -> None:
             closure.add(dependency)
             pending.extend(dependencies[dependency])
     assert closure == set(expected[:-1])
+    assert [task["id"] for task in stage["tasks"] if not task["depends_on"]] == expected[:-1]
 
     task_checks = [check for task in stage["tasks"] for check in task["checks"]]
     assert task_checks == stage["stage_gate"]
@@ -130,7 +131,7 @@ def test_stage_zero_is_enabled_for_pilot() -> None:
     assert sum("stage0_readiness" in command for command in commands) == 11
     assert sum("verify-feasibility" in command for command in commands) == 5
     assert sum("reference_profile_cycle" in command for command in commands) == 1
-    assert sum(command.startswith("python -m research.verify ") for command in commands) == 10
+    assert sum(command.startswith("python3 -m research.verify ") for command in commands) == 10
 
 
 def test_later_stages_remain_disabled() -> None:

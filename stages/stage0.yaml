@@ -11,69 +11,56 @@ tasks:
   - id: S0-PROSPECTIVE-PROFILE
     title: Freeze the prospective release cohort
     prompt: Implement S0-PROSPECTIVE-PROFILE from docs/spec/development.md sections 4 and 14.1. Check in one finite prospective cohort manifest with one reference profile, every distinct ordered profile/catalog/compatible-EnginePolicy-domain entry used by the transition corpus, and every directed ActivationEdgeV1 with endpoints resolved inside that set. Bind the canonical prospective_cohort_catalog_set_hash. Keep operational limits explicitly provisional and ineligible for release claims. Add complete good fixtures and unknown-endpoint, omitted-profile, catalog/policy mismatch, duplicate, ordering, hash, and falsely-final limit mutants. Seal stage0/manifests/readiness/S0-PROSPECTIVE-PROFILE.json and emit the required content-addressed readiness evidence. Do not edit roadmap checkboxes.
-    depends_on:
-      - S0-STABLE-SEAMS
+    depends_on: []
     checks:
       - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-PROSPECTIVE-PROFILE.json
   - id: S0-STORAGE-FEASIBILITY
     title: Prove reference storage feasibility
     prompt: Implement FEAS-STORAGE exactly as docs/spec/development.md section 14.2 specifies, against a pinned real PostgreSQL and extension build rather than an in-memory substitute. Cover every prospective profile's selected storage capability and work bound, coherent owner-plus-activation cuts across connections, least-privilege roles, cancellation of bounded blocking statements, mutation ordering, and crash recovery. Reject unsupported primitives, one-over work, cross-owner access, mixed cuts, uncancelled work, and partial commits. Emit canonical FeasibilityEvidenceV1 with complete subject constraints and mutant results at its specified content-addressed destination from stage0/manifests/feasibility/FEAS-STORAGE.json. Do not implement production storage or edit roadmap checkboxes.
-    depends_on:
-      - S0-PROSPECTIVE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-feasibility --test feas_storage -- stage0/manifests/feasibility/FEAS-STORAGE.json
   - id: S0-EXECUTOR-FEASIBILITY
     title: Prove native executor feasibility
     prompt: Implement FEAS-EXECUTOR exactly as docs/spec/development.md section 14.2 specifies. Use independent fake lanes to prove overlap within the native cap, bounded cancellation within one quantum, completed-peer preservation, coherent-cut propagation, and request-correlated accounting. Reject mixed-cut, over-cap, late-result, orphan-accounting, and incomplete-cleanup mutants. Emit canonical FeasibilityEvidenceV1 with complete constraints and mutant results from stage0/manifests/feasibility/FEAS-EXECUTOR.json. This is a feasibility harness, not the production executor; do not edit roadmap checkboxes.
-    depends_on:
-      - S0-PROSPECTIVE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-feasibility --test feas_executor -- stage0/manifests/feasibility/FEAS-EXECUTOR.json
   - id: S0-MODEL-FEASIBILITY
     title: Prove local model artifact feasibility
     prompt: Implement FEAS-MODEL exactly as docs/spec/development.md section 14.2 specifies. Inventory every cataloged extraction, fallback, decoder, embedding, tokenizer, schema, quantization, pooling, and dimension artifact required by every prospective cohort profile; pin its identity and license; load it with network denied; and measure it against that profile's provisional resource envelope. Reject missing, substituted, wrong-hash, wrong-protocol, network-dependent, incompatible, and over-envelope artifacts. Emit complete canonical FeasibilityEvidenceV1 from stage0/manifests/feasibility/FEAS-MODEL.json. Do not add a serving model path or edit roadmap checkboxes.
-    depends_on:
-      - S0-PROSPECTIVE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-feasibility --test feas_model -- stage0/manifests/feasibility/FEAS-MODEL.json
   - id: S0-STATE-FEASIBILITY
     title: Prove lifecycle state-machine feasibility
     prompt: Implement FEAS-STATE exactly as docs/spec/development.md sections 5 through 7, 11.3, and 14.2 specify. Build exhaustive machine-checkable models for crash-safe ADD, stable and resolved Initial acquisition and suppression, surplus/full release, extraction and fallback, target claims, bounded finalization and recovery, query-only activation, representation activation and abort/drain, forward rollback, DELETE/REPLACE mutation dominance in both lock orders, restart, and finite prior-epoch obligation drain before another edge. Cover every frozen edge and emit the exact nonempty class-qualified supported_edges list. Reject every leak, duplicate/lost obligation, omitted source, ambiguous terminal, class mismatch, illegal overlap, and bad transition. Emit canonical evidence from stage0/manifests/feasibility/FEAS-STATE.json; add no production lifecycle and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-PROSPECTIVE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-feasibility --test feas_state_models -- stage0/manifests/feasibility/FEAS-STATE.json
   - id: S0-RENDER-FEASIBILITY
     title: Prove deterministic isolated rendering
     prompt: Implement FEAS-RENDER exactly as docs/spec/development.md sections 9.2, 9.4, and 14.2 specify. Exercise the reference Markdown renderer over the frozen ArtifactSpec golden corpus in a capability-denied environment and prove byte-deterministic preservation of semantics and lineage. Deny network, database, secret, source, search, mutation, and control capabilities and reject every capability and semantic-loss mutant. Emit canonical FeasibilityEvidenceV1 from stage0/manifests/feasibility/FEAS-RENDER.json. Do not implement a production presentation surface or edit roadmap checkboxes.
-    depends_on:
-      - S0-PROSPECTIVE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-feasibility --test feas_render -- stage0/manifests/feasibility/FEAS-RENDER.json
   - id: S0-REFERENCE-PROFILE
     title: Freeze the supported reference profile cycle
     prompt: Implement S0-REFERENCE-PROFILE exactly as docs/spec/development.md section 14.1 specifies. Consume one exact passing FEAS-STORAGE, FEAS-EXECUTOR, FEAS-MODEL, FEAS-STATE, and FEAS-RENDER artifact bound to the same prospective cohort and catalog-set hash. Apply the complete Stage0FieldOwnerRegistryV1 contract-fixed versus feasibility-governed intersection rules; derive, never caller-supply, the finalized release cohort and ordered transition fixture. Cover query-only, representation-compatible, basis-incompatible, and forward-rollback edges and every cataloged available edge, each matching FEAS-STATE's exact class-qualified support. Reject missing, extra, stale, substituted, wrong-class, uncovered, empty-intersection, stronger-claim, and prospective-for-final mutants. Seal stage0/manifests/reference-profile/S0-REFERENCE-PROFILE.json and stage0/manifests/readiness/S0-REFERENCE-PROFILE.json, emit both cycle and readiness evidence, and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-STORAGE-FEASIBILITY
-      - S0-EXECUTOR-FEASIBILITY
-      - S0-MODEL-FEASIBILITY
-      - S0-STATE-FEASIBILITY
-      - S0-RENDER-FEASIBILITY
+    depends_on: []
     checks:
       - cargo test -p verify-manifest --test reference_profile_cycle -- stage0/manifests/reference-profile/S0-REFERENCE-PROFILE.json
       - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-REFERENCE-PROFILE.json
   - id: S0-RESEARCH-BASIS
     title: Freeze research basis and threshold registries
     prompt: Implement S0-RESEARCH-BASIS from docs/spec/research.md sections 2 through 5 and docs/spec/development.md section 14.1. Check in immutable evaluation-basis and threshold registries with canonical schemas/codecs/hashes, access partitions, complete attempt identity, comparator protocols, evidence identity, and successor-only mutation rules. Include a Stage 0 pilot basis whose provisional case-count or threshold reference cannot open validation, immutable zero-tolerance entries, legal provisional decision-threshold successors, and the Stage 1 Exact basis controls and accounting rules. Add mutants for leakage, reassociation, rewritten entries, provisional validation, insufficient sample, split crossing, comparator substitution, attempt reuse, and threshold/engine changes. Seal stage0/manifests/readiness/S0-RESEARCH-BASIS.json and emit readiness evidence. Do not run an outcome-bearing study or edit roadmap checkboxes.
-    depends_on:
-      - S0-STABLE-SEAMS
+    depends_on: []
     checks:
       - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-RESEARCH-BASIS.json
   - id: S0-API-LEDGER-VERIFIERS
     title: Build API, ledger, control, isolation, and capacity verifiers
     prompt: Implement the complete S0-API-LEDGER-VERIFIERS membership from docs/spec/development.md section 14.3: DEV-API, DEV-NATIVE-SAFETY, DEV-ADD, DEV-AUTHORITY, DEV-SCREENING, DEV-STATUS, DEV-CONTROL, DEV-ISOLATION, and DEV-CAPACITY. For every gate check in the exact command, gate contract, inducing worked fixture, imported seam doubles, exact oracle, evidence schema and destination, and a known-bad implementation or mutant that is demonstrably rejected. Use strict sealed DevelopmentGateInputV1 identities and scope variants; do not substitute prose, snapshots, production implementations, or another gate's evidence. Seal the nine development manifests and stage0/manifests/readiness/S0-API-LEDGER-VERIFIERS.json; its VerifierReadinessEvidenceV1 must contain exactly these nine records with passing good results and rejecting mutant results. Do not edit roadmap checkboxes.
-    depends_on:
-      - S0-REFERENCE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-api --test dev_api -- stage0/manifests/development/DEV-API.json
       - cargo test -p verify-api --test dev_native_safety -- stage0/manifests/development/DEV-NATIVE-SAFETY.json
@@ -88,8 +75,7 @@ tasks:
   - id: S0-BLOCK-LANE-VERIFIERS
     title: Build block, extraction, lane, lifecycle, and publication verifiers
     prompt: Implement the complete S0-BLOCK-LANE-VERIFIERS membership from docs/spec/development.md sections 6, 7, and 14.3: DEV-BLOCKS, DEV-SEMANTIC-BLOCKS, DEV-EXTRACTION-PASS, all six concrete DEV-INDEX gates, six separately component-bound DEV-INDEX-LIFECYCLE fixtures, and DEV-PUBLICATION. Each exact command must own its worked fixture, seam doubles, exact oracle, evidence schema and content-addressed destination, and rejecting known-bad mutant. Every concrete lane fixture must independently meter at-bound, one-over, pre-cancelled, and deadline-at-next-quantum work; lifecycle must cover Exact, Lexical, Dense, Entity, Temporal, and Graph separately. Seal all sixteen development manifests and stage0/manifests/readiness/S0-BLOCK-LANE-VERIFIERS.json; readiness membership remains the roadmap's eleven gate IDs while retaining all six lifecycle component scopes. Do not implement blocks or lanes and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-REFERENCE-PROFILE
+    depends_on: []
     checks:
       - cargo test -p verify-encoder --test dev_blocks -- stage0/manifests/development/DEV-BLOCKS.json
       - cargo test -p verify-encoder --test dev_semantic_blocks -- stage0/manifests/development/DEV-SEMANTIC-BLOCKS.json
@@ -111,9 +97,7 @@ tasks:
   - id: S0-POLICY-SEARCH-VERIFIERS
     title: Build policy, transition, executor, and SEARCH verifiers
     prompt: Implement the complete S0-POLICY-SEARCH-VERIFIERS membership from docs/spec/development.md sections 8, 11, and 14.3: DEV-POLICY; DEV-ACTIVATION separately for ReleaseCohortV1 and PolicyPairV1; DEV-ROLLBACK; DEV-RETRIEVAL-EXECUTOR; DEV-COHERENT-CUT; DEV-CANCELLATION; DEV-LANE-ACCOUNTING; DEV-FUSION; DEV-POLICY-EFFECT; DEV-EXPANSION; DEV-EGRESS; DEV-PACKING; and DEV-SEARCH. Every command needs its worked fixture, exact seam doubles and oracle, evidence schema/destination, and a rejected known-bad mutant. Activation fixtures must bind their exact class payloads and reject substitution in both directions even when cases coincide; rollback accepts only the release cohort. Cover bounded native overlap/cleanup, one coherent cut, truthful accounting, deterministic fusion, live all-or-error egress, atomic packing, and SEARCH precedence. Seal fourteen development manifests and stage0/manifests/readiness/S0-POLICY-SEARCH-VERIFIERS.json with exactly the roadmap membership and both activation scopes. Add no production runtime and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-API-LEDGER-VERIFIERS
-      - S0-BLOCK-LANE-VERIFIERS
+    depends_on: []
     checks:
       - cargo test -p verify-policy --test dev_policy -- stage0/manifests/development/DEV-POLICY.json
       - cargo test -p verify-runtime --test dev_activation -- stage0/manifests/development/DEV-ACTIVATION-RELEASE-COHORT.json
@@ -133,10 +117,7 @@ tasks:
   - id: S0-PRESENTATION-VERIFIERS
     title: Build wire, decoder, render, and disclosure verifiers
     prompt: Implement the complete S0-PRESENTATION-VERIFIERS membership from docs/spec/development.md sections 9, 10, and 14.3: DEV-WIRE, DEV-DECODER, DEV-RENDER, and DEV-DISCLOSURE. Give every exact command a sealed worked fixture, imported seam doubles, exact oracle, evidence schema and content-addressed destination, and a rejecting known-bad mutant. Prove immutable model-visible bytes and nested payload identity, complete live-lineage artifact decoding with no direct decoder operation, deterministic capability-free rendering, and fresh bounded authority/capacity disclosure across restart. Seal the four development manifests and stage0/manifests/readiness/S0-PRESENTATION-VERIFIERS.json with exactly four readiness records. Implement no production adapter, decoder, or renderer and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-API-LEDGER-VERIFIERS
-      - S0-BLOCK-LANE-VERIFIERS
-      - S0-POLICY-SEARCH-VERIFIERS
+    depends_on: []
     checks:
       - cargo test -p verify-wire --test dev_wire -- stage0/manifests/development/DEV-WIRE.json
       - cargo test -p verify-decoder --test dev_decoder -- stage0/manifests/development/DEV-DECODER.json
@@ -146,8 +127,7 @@ tasks:
   - id: S0-COMPOSITION-VERIFIERS
     title: Build origin, end-to-end, private-runtime, and portability verifiers
     prompt: Implement the complete S0-COMPOSITION-VERIFIERS membership from docs/spec/development.md sections 13 through 15: DEV-ORIGIN-PARITY, DEV-E2E, DEV-PRIVATE-API, and DEV-PORTABILITY. Give each exact command a sealed worked fixture, exact dependency doubles and oracle, immutable evidence schema/destination, and a rejected known-bad mutant. Cover byte-equal origin parity, the complete ordinary LIST/ADD/status/SEARCH/artifact/replace/delete/restart loop, two isolated private runtimes with content canaries and no privileged controls, full handle destruction, clean offline installation, and network denial. Seal four development manifests and stage0/manifests/readiness/S0-COMPOSITION-VERIFIERS.json. These are verifier subjects and seam doubles only; implement no production loop or runtime and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-PRESENTATION-VERIFIERS
+    depends_on: []
     checks:
       - cargo test -p verify-compose --test dev_origin_parity -- stage0/manifests/development/DEV-ORIGIN-PARITY.json
       - cargo test -p verify-compose --test dev_e2e -- stage0/manifests/development/DEV-E2E.json
@@ -157,27 +137,39 @@ tasks:
   - id: S0-RESEARCH-CORE-VERIFIERS
     title: Build data, reproducibility, metric, and performance verifiers
     prompt: Implement the complete S0-RESEARCH-CORE-VERIFIERS membership from docs/spec/research.md sections 3 through 5, 8.1, and 11: RES-DATA, RES-REPRO, RES-METRICS, and RES-PERFORMANCE. Implement the strict research.contracts canonical schemas and Stage0WorkedFixtureV1 mode without creating study or release evidence. Each exact Python command must consume one sealed ResearchGateInputV1, run its worked fixture, reject label leakage, split crossing, dependency reassociation, invalid reuse, projection mutation, grouping/statistical identity changes, and build/profile/policy/environment substitutions, and emit complete immutable ResearchGateEvidenceV1 plus all named payloads. Seal four research manifests and stage0/manifests/readiness/S0-RESEARCH-CORE-VERIFIERS.json with exactly four records. Do not execute an outcome-bearing study and do not edit roadmap checkboxes.
-    depends_on:
-      - S0-RESEARCH-BASIS
-      - S0-COMPOSITION-VERIFIERS
+    depends_on: []
     checks:
-      - python -m research.verify data stage0/manifests/research/RES-DATA.json
-      - python -m research.verify metrics stage0/manifests/research/RES-METRICS.json
-      - python -m research.verify reproducibility stage0/manifests/research/RES-REPRO.json
-      - python -m research.verify performance stage0/manifests/research/RES-PERFORMANCE.json
+      - python3 -m research.verify data stage0/manifests/research/RES-DATA.json
+      - python3 -m research.verify metrics stage0/manifests/research/RES-METRICS.json
+      - python3 -m research.verify reproducibility stage0/manifests/research/RES-REPRO.json
+      - python3 -m research.verify performance stage0/manifests/research/RES-PERFORMANCE.json
       - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-RESEARCH-CORE-VERIFIERS.json
   - id: S0-RESEARCH-DECISION-VERIFIERS
     title: Build decision verifiers and close Stage 0
     prompt: Implement the complete S0-RESEARCH-DECISION-VERIFIERS membership from docs/spec/research.md sections 6 through 11: RES-AX, RES-COMPONENT, RES-POLICY, RES-PORTABILITY, RES-BENCHMARK, and RES-RELEASE. Each exact Python command must consume Stage0WorkedFixtureV1 through a sealed ResearchGateInputV1, use only exact resolved dependency refs, run its worked fixture, reject threshold/comparator/class/build/profile/policy/evidence-slot substitutions and incomplete attempt domains, and emit complete immutable ResearchGateEvidenceV1 plus named payloads without granting activation authority. Seal six research manifests and stage0/manifests/readiness/S0-RESEARCH-DECISION-VERIFIERS.json with exactly six records. Then run every Stage 0 command in this contract, require all sixteen exact evidence sets, change exactly the sixteen Stage 0 roadmap checkboxes to checked, and change Current stage to exactly Stage 1 — durable admission and exact vertical slice. Do not claim any DEV or RES candidate result and do not add production implementation.
     depends_on:
+      - S0-STABLE-SEAMS
+      - S0-PROSPECTIVE-PROFILE
+      - S0-STORAGE-FEASIBILITY
+      - S0-EXECUTOR-FEASIBILITY
+      - S0-MODEL-FEASIBILITY
+      - S0-STATE-FEASIBILITY
+      - S0-RENDER-FEASIBILITY
+      - S0-REFERENCE-PROFILE
+      - S0-RESEARCH-BASIS
+      - S0-API-LEDGER-VERIFIERS
+      - S0-BLOCK-LANE-VERIFIERS
+      - S0-POLICY-SEARCH-VERIFIERS
+      - S0-PRESENTATION-VERIFIERS
+      - S0-COMPOSITION-VERIFIERS
       - S0-RESEARCH-CORE-VERIFIERS
     checks:
-      - python -m research.verify ax stage0/manifests/research/RES-AX.json
-      - python -m research.verify component stage0/manifests/research/RES-COMPONENT.json
-      - python -m research.verify policy stage0/manifests/research/RES-POLICY.json
-      - python -m research.verify portability stage0/manifests/research/RES-PORTABILITY.json
-      - python -m research.verify benchmark stage0/manifests/research/RES-BENCHMARK.json
-      - python -m research.verify release stage0/manifests/research/RES-RELEASE.json
+      - python3 -m research.verify ax stage0/manifests/research/RES-AX.json
+      - python3 -m research.verify component stage0/manifests/research/RES-COMPONENT.json
+      - python3 -m research.verify policy stage0/manifests/research/RES-POLICY.json
+      - python3 -m research.verify portability stage0/manifests/research/RES-PORTABILITY.json
+      - python3 -m research.verify benchmark stage0/manifests/research/RES-BENCHMARK.json
+      - python3 -m research.verify release stage0/manifests/research/RES-RELEASE.json
       - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-RESEARCH-DECISION-VERIFIERS.json
       - test "$(grep -c '^| \[x\] \*\*S0-' docs/ROADMAP.md)" = "16"
       - grep -Fq '**Current stage:** Stage 1 — durable admission and exact vertical slice.' docs/ROADMAP.md
@@ -244,17 +236,17 @@ stage_gate:
   - cargo test -p verify-api --test dev_private_api -- stage0/manifests/development/DEV-PRIVATE-API.json
   - cargo test -p verify-compose --test dev_portability -- stage0/manifests/development/DEV-PORTABILITY.json
   - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-COMPOSITION-VERIFIERS.json
-  - python -m research.verify data stage0/manifests/research/RES-DATA.json
-  - python -m research.verify metrics stage0/manifests/research/RES-METRICS.json
-  - python -m research.verify reproducibility stage0/manifests/research/RES-REPRO.json
-  - python -m research.verify performance stage0/manifests/research/RES-PERFORMANCE.json
+  - python3 -m research.verify data stage0/manifests/research/RES-DATA.json
+  - python3 -m research.verify metrics stage0/manifests/research/RES-METRICS.json
+  - python3 -m research.verify reproducibility stage0/manifests/research/RES-REPRO.json
+  - python3 -m research.verify performance stage0/manifests/research/RES-PERFORMANCE.json
   - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-RESEARCH-CORE-VERIFIERS.json
-  - python -m research.verify ax stage0/manifests/research/RES-AX.json
-  - python -m research.verify component stage0/manifests/research/RES-COMPONENT.json
-  - python -m research.verify policy stage0/manifests/research/RES-POLICY.json
-  - python -m research.verify portability stage0/manifests/research/RES-PORTABILITY.json
-  - python -m research.verify benchmark stage0/manifests/research/RES-BENCHMARK.json
-  - python -m research.verify release stage0/manifests/research/RES-RELEASE.json
+  - python3 -m research.verify ax stage0/manifests/research/RES-AX.json
+  - python3 -m research.verify component stage0/manifests/research/RES-COMPONENT.json
+  - python3 -m research.verify policy stage0/manifests/research/RES-POLICY.json
+  - python3 -m research.verify portability stage0/manifests/research/RES-PORTABILITY.json
+  - python3 -m research.verify benchmark stage0/manifests/research/RES-BENCHMARK.json
+  - python3 -m research.verify release stage0/manifests/research/RES-RELEASE.json
   - cargo test -p verify-manifest --test stage0_readiness -- stage0/manifests/readiness/S0-RESEARCH-DECISION-VERIFIERS.json
   - test "$(grep -c '^| \[x\] \*\*S0-' docs/ROADMAP.md)" = "16"
   - grep -Fq '**Current stage:** Stage 1 — durable admission and exact vertical slice.' docs/ROADMAP.md
