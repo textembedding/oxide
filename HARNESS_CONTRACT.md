@@ -15,7 +15,7 @@ Workers receive exactly two tools.
 Request:
 
 ```json
-{"worker_id": "worker-1"}
+{"worker_id": "worker-1", "ownership_mode": "observable"}
 ```
 
 Response when work is available:
@@ -28,7 +28,8 @@ Response when work is available:
   "prompt": "Implement the requested task.",
   "worktree_path": "/absolute/path",
   "acceptance_checks": ["cargo test --workspace"],
-  "lease_expires_at": "RFC3339 timestamp"
+  "ownership_mode": "observable",
+  "lease_expires_at": null
 }
 ```
 
@@ -79,7 +80,7 @@ The journal persists only externally meaningful orchestration state:
 
 - runs
 - tasks and dependencies
-- claims and lease expiry
+- claims, ownership mode, and optional lease expiry
 - submissions and acceptance state
 - append-only operator/controller events
 - worker-proposed blockers and follow-up work
@@ -88,9 +89,18 @@ Subprocess implementation details are not journal state.
 
 ## Ownership and recovery
 
-Claims use an opaque token and expiry time. Only the active token may submit.
-After expiry, the task becomes claimable again. Controller restart
-reconstructs state from the journal.
+Claims use an opaque token. Only the active token may submit. Local macOS
+workers use `observable` ownership with no expiry: the controller directly
+observes each worker process, atomically fences its claim when that process
+disappears, terminates any orphaned Codex child for the task worktree, and
+immediately starts a replacement worker. A successful submission releases
+ownership before controller verification begins.
+
+An expiry exists only when a caller explicitly requests `lease` ownership for
+a distributed or otherwise ambiguous worker whose liveness cannot be directly
+observed, supplying both `"ownership_mode": "lease"` and a positive
+`lease_seconds`. Controller restart reconstructs ownership from the journal and
+reconciles it against the currently observed local worker processes.
 
 ## Planning authority
 

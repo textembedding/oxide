@@ -45,8 +45,8 @@ CREATE TABLE IF NOT EXISTS dependencies (
 CREATE TABLE IF NOT EXISTS claims (
   claim_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
   task_id TEXT NOT NULL, worker_id TEXT NOT NULL, token TEXT NOT NULL UNIQUE,
-  claimed_at REAL NOT NULL, expires_at REAL NOT NULL, state TEXT NOT NULL,
-  submission_json TEXT
+  claimed_at REAL NOT NULL, ownership_mode TEXT NOT NULL,
+  expires_at REAL, state TEXT NOT NULL, submission_json TEXT
 );
 CREATE TABLE IF NOT EXISTS followups (
   followup_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
@@ -71,6 +71,41 @@ class SQLiteJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_claims(connection)
+
+    @staticmethod
+    def _migrate_claims(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"]): row for row in connection.execute("PRAGMA table_info(claims)")
+        }
+        if "ownership_mode" in columns and not int(columns["expires_at"]["notnull"]):
+            return
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE claims RENAME TO claims_fixed_lease")
+        connection.execute(
+            """
+            CREATE TABLE claims (
+              claim_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+              task_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+              token TEXT NOT NULL UNIQUE, claimed_at REAL NOT NULL,
+              ownership_mode TEXT NOT NULL, expires_at REAL,
+              state TEXT NOT NULL, submission_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO claims(
+              claim_id,run_id,task_id,worker_id,token,claimed_at,
+              ownership_mode,expires_at,state,submission_json
+            )
+            SELECT claim_id,run_id,task_id,worker_id,token,claimed_at,
+              'observable',NULL,state,submission_json
+            FROM claims_fixed_lease
+            """
+        )
+        connection.execute("DROP TABLE claims_fixed_lease")
+        connection.execute("COMMIT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
@@ -177,7 +212,11 @@ class SQLiteJournal:
     def _expire(self, connection: sqlite3.Connection, run_id: str) -> None:
         now = self.clock()
         rows = connection.execute(
-            "SELECT claim_id,task_id FROM claims WHERE run_id=? AND state='active' AND expires_at<=?",
+            """
+            SELECT claim_id,task_id FROM claims
+            WHERE run_id=? AND state='active' AND ownership_mode='lease'
+              AND expires_at IS NOT NULL AND expires_at<=?
+            """,
             (run_id, now),
         ).fetchall()
         for row in rows:
@@ -228,8 +267,19 @@ class SQLiteJournal:
     def op_claim_task(self, values: dict[str, Any]) -> dict:
         run_id = require_string(values, "run_id")
         worker_id = require_string(values, "worker_id")
-        lease_seconds = require_number(values, "lease_seconds")
-        if lease_seconds <= 0:
+        raw_mode = values.get("ownership_mode")
+        if raw_mode is None:
+            return {"status": "stopped"}
+        ownership_mode = require_string(values, "ownership_mode")
+        if ownership_mode not in {"observable", "lease"}:
+            raise ProtocolError("ownership_mode must be observable or lease")
+        raw_lease = values.get("lease_seconds")
+        lease_seconds = None if raw_lease is None else require_number(values, "lease_seconds")
+        if ownership_mode == "lease" and lease_seconds is None:
+            raise ProtocolError("lease ownership requires lease_seconds")
+        if ownership_mode == "observable" and lease_seconds is not None:
+            raise ProtocolError("observable ownership cannot have lease_seconds")
+        if lease_seconds is not None and lease_seconds <= 0:
             raise ProtocolError("lease_seconds must be positive")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -254,16 +304,37 @@ class SQLiteJournal:
                 return {"status": "complete" if state and state[0] == "complete" else "idle"}
             token = secrets.token_urlsafe(32)
             now = self.clock()
-            expires = now + lease_seconds
+            expires = None if lease_seconds is None else now + lease_seconds
             connection.execute(
-                "INSERT INTO claims(run_id,task_id,worker_id,token,claimed_at,expires_at,state) VALUES(?,?,?,?,?,?,?)",
-                (run_id, row["task_id"], worker_id, token, now, expires, "active"),
+                """
+                INSERT INTO claims(
+                  run_id,task_id,worker_id,token,claimed_at,
+                  ownership_mode,expires_at,state
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    run_id,
+                    row["task_id"],
+                    worker_id,
+                    token,
+                    now,
+                    ownership_mode,
+                    expires,
+                    "active",
+                ),
             )
             connection.execute(
                 "UPDATE tasks SET state='claimed' WHERE run_id=? AND task_id=? AND state='pending'",
                 (run_id, row["task_id"]),
             )
-            self._event(connection, run_id, "task_claimed", row["task_id"], worker_id=worker_id)
+            self._event(
+                connection,
+                run_id,
+                "task_claimed",
+                row["task_id"],
+                worker_id=worker_id,
+                ownership_mode=ownership_mode,
+            )
         return {
             "status": "claimed",
             "task_id": row["task_id"],
@@ -272,8 +343,57 @@ class SQLiteJournal:
             "title": row["title"],
             "worktree_path": row["worktree_path"],
             "acceptance_checks": json.loads(row["checks_json"]),
+            "ownership_mode": ownership_mode,
             "lease_expires_at": expires,
         }
+
+    def op_reclaim_worker(self, values: dict[str, Any]) -> dict:
+        run_id = require_string(values, "run_id")
+        worker_id = require_string(values, "worker_id")
+        reason = require_string(values, "reason")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run_state = self._run_state(connection, run_id)
+            if run_state != "running":
+                return {"run_state": run_state, "reclaimed": []}
+            claims = connection.execute(
+                """
+                SELECT c.claim_id,c.task_id,t.worktree_path
+                FROM claims c JOIN tasks t
+                  ON t.run_id=c.run_id AND t.task_id=c.task_id
+                WHERE c.run_id=? AND c.worker_id=? AND c.state='active'
+                ORDER BY c.claim_id
+                """,
+                (run_id, worker_id),
+            ).fetchall()
+            reclaimed: list[dict[str, Any]] = []
+            for claim in claims:
+                connection.execute(
+                    "UPDATE claims SET state='reclaimed' WHERE claim_id=?",
+                    (claim["claim_id"],),
+                )
+                connection.execute(
+                    """
+                    UPDATE tasks SET state='pending'
+                    WHERE run_id=? AND task_id=? AND state='claimed'
+                    """,
+                    (run_id, claim["task_id"]),
+                )
+                self._event(
+                    connection,
+                    run_id,
+                    "task_reclaimed",
+                    claim["task_id"],
+                    worker_id=worker_id,
+                    reason=reason,
+                )
+                reclaimed.append(
+                    {
+                        "task_id": claim["task_id"],
+                        "worktree_path": claim["worktree_path"],
+                    }
+                )
+        return {"run_state": "running", "reclaimed": reclaimed}
 
     def op_submit_result(self, values: dict[str, Any]) -> dict:
         run_id = require_string(values, "run_id")
@@ -299,7 +419,13 @@ class SQLiteJournal:
                 "SELECT * FROM claims WHERE run_id=? AND task_id=? AND token=? AND state='active'",
                 (run_id, task_id, token),
             ).fetchone()
-            if claim is None or claim["expires_at"] <= self.clock():
+            expired = (
+                claim is not None
+                and claim["ownership_mode"] == "lease"
+                and claim["expires_at"] is not None
+                and claim["expires_at"] <= self.clock()
+            )
+            if claim is None or expired:
                 raise JournalError("stale_claim", "claim token is incorrect, stale, or expired")
             task = connection.execute(
                 "SELECT state FROM tasks WHERE run_id=? AND task_id=?", (run_id, task_id)

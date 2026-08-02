@@ -15,6 +15,7 @@ import sys
 import textwrap
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from pygments import highlight as pygments_highlight
@@ -141,11 +142,17 @@ def _queue_snapshot(config: dict) -> dict | None:
             ).fetchone()
             if run is None:
                 return None
+            claim_columns = {
+                str(row[1]) for row in database.execute("PRAGMA table_info(claims)")
+            }
+            ownership_mode = (
+                "c.ownership_mode" if "ownership_mode" in claim_columns else "'lease'"
+            )
             tasks = database.execute(
-                """
+                f"""
                 SELECT t.task_id,t.title,t.state,t.branch,t.accepted_commit,t.last_error,
                   c.worker_id,c.claimed_at,c.expires_at,c.state AS claim_state,
-                  c.submission_json,
+                  c.submission_json,{ownership_mode} AS ownership_mode,
                   (SELECT COUNT(*) FROM dependencies d JOIN tasks parent
                      ON parent.run_id=d.run_id AND parent.task_id=d.dependency_id
                    WHERE d.run_id=t.run_id AND d.task_id=t.task_id
@@ -274,9 +281,12 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
         add(task["task_id"], "1;37")
         if state in {"WORKING", "EXPIRED"}:
             add(task.get("worker_id") or "unassigned", prefix="owner: ")
-            expires = task.get("expires_at")
-            lease = "unknown" if expires is None else _queue_duration(float(expires) - now)
-            add("expired" if state == "EXPIRED" else lease, prefix="lease: ")
+            if task.get("ownership_mode") == "observable":
+                add("observed", prefix="liveness: ")
+            else:
+                expires = task.get("expires_at")
+                lease = "unknown" if expires is None else _queue_duration(float(expires) - now)
+                add("expired" if state == "EXPIRED" else lease, prefix="lease: ")
         commit = _queue_commit(task)
         if commit and state in {"VERIFYING", "ACCEPTED"}:
             add(commit, prefix="commit: ")
@@ -452,6 +462,128 @@ def _run_processes(config: dict) -> list[tuple[int, str]]:
     return rows
 
 
+def _live_worker_slots(config: dict) -> dict[str, set[int]]:
+    workload = re.escape(str(config["workload"]))
+    swarmctl = re.escape(str(ROOT / "swarmctl"))
+    pattern = re.compile(
+        rf"{swarmctl} harness worker --workload {workload} --slot ([^ ]+)"
+    )
+    slots: dict[str, set[int]] = {}
+    for pid, command in _process_table():
+        match = pattern.search(command)
+        if match:
+            slots.setdefault(match.group(1), set()).add(pid)
+    return slots
+
+
+def _worker_argv(workload: str, slot: str) -> list[str]:
+    return [
+        str(ROOT / "swarmctl"),
+        "harness",
+        "worker",
+        "--workload",
+        workload,
+        "--slot",
+        slot,
+    ]
+
+
+def _terminate_orphan_codex(worktrees: list[str]) -> None:
+    paths = {str(Path(path).resolve()) for path in worktrees if path}
+    if not paths:
+        return
+
+    def matching() -> list[int]:
+        return [
+            pid
+            for pid, command in _process_table()
+            if "codex exec -C " in command and any(path in command for path in paths)
+        ]
+
+    for pid in matching():
+        _signal_process(pid, "codex", signal.SIGTERM)
+    deadline = time.monotonic() + 2
+    remaining = matching()
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.05)
+        remaining = matching()
+    for pid in remaining:
+        _signal_process(pid, "codex", signal.SIGKILL)
+    deadline = time.monotonic() + 1
+    remaining = matching()
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.05)
+        remaining = matching()
+    if remaining:
+        raise ControllerError(
+            "orphaned Codex process did not stop: "
+            + ", ".join(str(pid) for pid in remaining)
+        )
+
+
+class _LocalWorkerSupervisor:
+    def __init__(
+        self,
+        config: dict,
+        client: JournalClient,
+        log: Callable[[str], None],
+        *,
+        launch_timeout: float = 5.0,
+    ) -> None:
+        self.config = config
+        self.client = client
+        self.log = log
+        self.launch_timeout = launch_timeout
+        self.expected = {f"worker-{index}" for index in range(int(config["workers"]))}
+        self.alive: set[str] = set()
+        self.starting: dict[str, float] = {}
+
+    def _launch(self, slot: str) -> None:
+        _launch_terminal(_worker_argv(str(self.config["workload"]), slot))
+        self.starting[slot] = time.monotonic() + self.launch_timeout
+        self.log(f"launched {slot}")
+
+    def _recover(self, slot: str, reason: str) -> None:
+        result = self.client.call(
+            "reclaim_worker",
+            run_id=self.config["run_id"],
+            worker_id=slot,
+            reason=reason,
+        )
+        reclaimed = list(result["reclaimed"])
+        _terminate_orphan_codex(
+            [str(item.get("worktree_path") or "") for item in reclaimed]
+        )
+        self.alive.discard(slot)
+        self.starting.pop(slot, None)
+        if result["run_state"] != "running":
+            return
+        if reclaimed:
+            tasks = ", ".join(str(item["task_id"]) for item in reclaimed)
+            self.log(f"reclaimed {tasks} after {slot} process loss")
+        self._launch(slot)
+
+    def start(self) -> None:
+        current = set(_live_worker_slots(self.config)) & self.expected
+        self.alive = set(current)
+        for slot in sorted(self.expected - current):
+            self._recover(slot, "controller_start_observed_worker_absent")
+        for slot in sorted(current):
+            self.log(f"adopted live {slot}")
+
+    def tick(self) -> None:
+        current = set(_live_worker_slots(self.config)) & self.expected
+        for slot in current:
+            self.alive.add(slot)
+            self.starting.pop(slot, None)
+        for slot in sorted(self.alive - current):
+            self._recover(slot, "worker_process_exited")
+        now = time.monotonic()
+        for slot, deadline in sorted(self.starting.items()):
+            if slot not in current and now >= deadline:
+                self._recover(slot, "worker_launch_not_observed")
+
+
 def _signal_process(pid: int, kind: str, signal_number: int) -> None:
     try:
         if kind == "codex":
@@ -507,8 +639,8 @@ def _start_run(config: dict, *, foreground: bool) -> int:
 def _resume_run(workload: str, *, foreground: bool) -> int:
     config = _load_config(workload)
     processes = _run_processes(config)
-    if processes:
-        raise ControllerError(f"{workload} already has live processes; pause it first")
+    if any(kind == "orchestrator" for _, kind in processes):
+        raise ControllerError(f"{workload} already has a live orchestrator")
     try:
         _offline_journal(config).op_resume_run({"run_id": config["run_id"]})
     except JournalError as error:
@@ -568,20 +700,10 @@ def command_orchestrate(arguments: argparse.Namespace) -> int:
         if initial_state != "running":
             return 0 if initial_state in {"paused", "stopped", "complete"} else 1
         controller.prepare_runnable()
-        for index in range(int(config["workers"])):
-            slot = f"worker-{index}"
-            argv = [
-                str(ROOT / "swarmctl"),
-                "harness",
-                "worker",
-                "--workload",
-                arguments.workload,
-                "--slot",
-                slot,
-            ]
-            _launch_terminal(argv)
-            log(f"launched {slot}")
+        supervisor = _LocalWorkerSupervisor(config, client, log)
+        supervisor.start()
         while True:
+            supervisor.tick()
             state = controller.tick()
             if state in {"complete", "paused", "failed", "stopped"}:
                 return 0 if state in {"complete", "paused", "stopped"} else 1

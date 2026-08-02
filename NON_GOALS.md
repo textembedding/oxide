@@ -24,6 +24,7 @@ The disposable native macOS harness will not implement:
 - terminal multiplexing
 - a production-quality Python kernel
 
-A worker crash, normal exit, cancellation, or timeout is represented as a
-task-attempt outcome or an expired lease. The prototype does not model every
-operating-system action that led to it.
+A local worker crash or exit is detected from process liveness and immediately
+fences its task ownership. Lease expiry is reserved for an explicitly
+unobservable worker. The prototype does not model every operating-system
+action that led to cancellation or timeout.

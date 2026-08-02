@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import threading
 from pathlib import Path
@@ -114,6 +115,12 @@ def test_stale_token_rejects_and_valid_submission_survives_restart(journal) -> N
         proposed_followups=[{"title": "not executable"}],
     )
     assert client.run_status("run")["tasks"][0]["state"] == "submitted"
+    assert client.call(
+        "reclaim_worker",
+        run_id="run",
+        worker_id="worker",
+        reason="worker_process_exited_after_submission",
+    ) == {"run_state": "running", "reclaimed": []}
     status = client.run_status("run")
     assert status["proposed_followups"] == [
         {"task_id": "A", "proposal": {"title": "not executable"}}
@@ -142,6 +149,84 @@ def test_expired_lease_is_reclaimed_and_old_token_stays_invalid(journal) -> None
             blockers=[],
             proposed_followups=[],
         )
+
+
+def test_observable_owner_has_no_expiry_and_is_reclaimed_by_process_loss(journal) -> None:
+    client, clock, _ = journal
+    seed(client)
+    prepare(client)
+    original = client.claim_task("run", "worker-0")
+
+    assert original["ownership_mode"] == "observable"
+    assert original["lease_expires_at"] is None
+    clock.now += 1_000_000
+    assert client.call("runnable_unprepared", run_id="run") == []
+
+    reclaimed = client.call(
+        "reclaim_worker",
+        run_id="run",
+        worker_id="worker-0",
+        reason="worker_process_exited",
+    )
+    assert reclaimed == {
+        "run_state": "running",
+        "reclaimed": [{"task_id": "A", "worktree_path": "/worktrees/A"}],
+    }
+    with pytest.raises(JournalError, match="stale"):
+        client.submit_result(
+            run_id="run",
+            task_id="A",
+            claim_token=original["claim_token"],
+            outcome="completed",
+            summary="late",
+            commit_sha="a" * 40,
+            blockers=[],
+            proposed_followups=[],
+        )
+    replacement = client.claim_task("run", "worker-1")
+    assert replacement["status"] == "claimed"
+    assert replacement["worktree_path"] == "/worktrees/A"
+
+
+def test_legacy_fixed_lease_client_is_retired_before_another_claim(journal) -> None:
+    client, _, _ = journal
+    seed(client)
+    prepare(client)
+
+    assert client.call(
+        "claim_task",
+        run_id="run",
+        worker_id="legacy-worker",
+        lease_seconds=3600,
+    ) == {"status": "stopped"}
+    assert client.run_status("run")["tasks"][0]["state"] == "pending"
+
+
+def test_legacy_fixed_leases_migrate_to_observable_ownership(tmp_path: Path) -> None:
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE claims (
+              claim_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+              task_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+              token TEXT NOT NULL UNIQUE, claimed_at REAL NOT NULL,
+              expires_at REAL NOT NULL, state TEXT NOT NULL, submission_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO claims(run_id,task_id,worker_id,token,claimed_at,expires_at,state) VALUES(?,?,?,?,?,?,?)",
+            ("run", "A", "worker-0", "token", 10.0, 3610.0, "active"),
+        )
+
+    SQLiteJournal(database)
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT ownership_mode,expires_at,state FROM claims"
+        ).fetchone()
+    assert row == ("observable", None, "active")
 
 
 def test_dependencies_hold_downstream_until_acceptance(journal) -> None:

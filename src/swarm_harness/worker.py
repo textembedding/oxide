@@ -36,7 +36,7 @@ class Worker:
         run_id: str,
         worker_id: str,
         *,
-        lease_seconds: float = 3600,
+        lease_seconds: float | None = None,
         codex_argv: Sequence[str] = ("codex", "exec"),
         model: str | None = None,
         log: Callable[[str], None] = print,
@@ -91,7 +91,8 @@ class Worker:
             start_new_session=True,
         )
         output: list[str] = []
-        deadline = min(float(envelope["lease_expires_at"]), time.time() + self.lease_seconds)
+        raw_deadline = envelope.get("lease_expires_at")
+        deadline = None if raw_deadline is None else float(raw_deadline)
         assert process.stdout is not None
         try:
             while process.poll() is None:
@@ -100,7 +101,7 @@ class Worker:
                     line = line.rstrip("\n")
                     output.append(line)
                     self.log(line)
-                if time.time() >= deadline:
+                if deadline is not None and time.time() >= deadline:
                     raise TimeoutError("worker lease deadline reached")
             for line in process.stdout:
                 line = line.rstrip("\n")

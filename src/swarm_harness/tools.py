@@ -14,7 +14,7 @@ def claim_task(
     *,
     run_id: str,
     worker_id: str,
-    lease_seconds: float,
+    lease_seconds: float | None = None,
 ) -> dict[str, Any]:
     return client.claim_task(run_id, worker_id, lease_seconds)
 

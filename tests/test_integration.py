@@ -5,7 +5,6 @@ import json
 import re
 import sqlite3
 import subprocess
-import time
 from pathlib import Path
 
 from swarm_harness import cli
@@ -151,7 +150,6 @@ def test_auto_color_is_on_for_a_tty_even_with_no_color(monkeypatch) -> None:
 
 
 def test_queue_renderer_hides_blocked_tasks_and_keeps_work_in_progress_first() -> None:
-    now = time.time()
     snapshot = {
         "run_id": "pilot-20260802-very-long-run-identifier",
         "state": "running",
@@ -172,7 +170,8 @@ def test_queue_renderer_hides_blocked_tasks_and_keeps_work_in_progress_first() -
                 "state": "claimed",
                 "claim_state": "active",
                 "worker_id": "worker-0",
-                "expires_at": now + 60,
+                "expires_at": None,
+                "ownership_mode": "observable",
                 "blocked_count": 0,
                 "accepted_commit": None,
                 "submission_json": None,
@@ -186,6 +185,8 @@ def test_queue_renderer_hides_blocked_tasks_and_keeps_work_in_progress_first() -
 
     assert "WORKING\n" in plain
     assert "owner: worker-0\n" in plain
+    assert "liveness: observed\n" in plain
+    assert "lease:" not in plain
     assert "BLOCKED" not in plain
     assert "S0-02" not in plain
     assert "|" not in plain
@@ -234,7 +235,12 @@ def test_observe_queue_reads_working_tasks_without_dependency_blocked_tasks(
         }
     )
     journal.op_claim_task(
-        {"run_id": "pilot-test", "worker_id": "worker-0", "lease_seconds": 60}
+        {
+            "run_id": "pilot-test",
+            "worker_id": "worker-0",
+            "ownership_mode": "lease",
+            "lease_seconds": 60,
+        }
     )
     (run / "run.json").write_text(
         json.dumps(
@@ -283,7 +289,12 @@ def test_pause_and_resume_commands_preserve_run_configuration(
         }
     )
     journal.op_claim_task(
-        {"run_id": config["run_id"], "worker_id": "worker-0", "lease_seconds": 60}
+        {
+            "run_id": config["run_id"],
+            "worker_id": "worker-0",
+            "ownership_mode": "lease",
+            "lease_seconds": 60,
+        }
     )
     monkeypatch.setattr(cli, "_stop_run_processes", lambda _: None)
 
@@ -355,3 +366,50 @@ def test_lifecycle_parser_selects_native_handlers() -> None:
             ["harness", command, "--workload", "stage0"]
         )
         assert arguments.handler is handler
+
+
+def test_local_supervisor_reclaims_and_replaces_a_vanished_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = {
+        "run_id": "stage0-test",
+        "workload": "stage0",
+        "workers": 2,
+    }
+    current: dict[str, set[int]] = {}
+    launched: list[list[str]] = []
+    terminated: list[list[str]] = []
+    calls: list[dict] = []
+
+    class Client:
+        @staticmethod
+        def call(operation: str, **arguments):
+            assert operation == "reclaim_worker"
+            calls.append(arguments)
+            reclaimed = (
+                [{"task_id": "S0-01", "worktree_path": str(tmp_path / "task")}]
+                if arguments["reason"] == "worker_process_exited"
+                else []
+            )
+            return {"run_state": "running", "reclaimed": reclaimed}
+
+    monkeypatch.setattr(cli, "_live_worker_slots", lambda _: current)
+    monkeypatch.setattr(cli, "_launch_terminal", lambda argv: launched.append(argv))
+    monkeypatch.setattr(
+        cli,
+        "_terminate_orphan_codex",
+        lambda worktrees: terminated.append(worktrees),
+    )
+    supervisor = cli._LocalWorkerSupervisor(config, Client(), lambda _: None)
+    supervisor.start()
+    assert len(launched) == 2
+
+    current = {"worker-0": {100}, "worker-1": {101}}
+    supervisor.tick()
+    current = {"worker-1": {101}}
+    supervisor.tick()
+
+    assert calls[-1]["worker_id"] == "worker-0"
+    assert calls[-1]["reason"] == "worker_process_exited"
+    assert terminated[-1] == [str(tmp_path / "task")]
+    assert launched[-1][-1] == "worker-0"
