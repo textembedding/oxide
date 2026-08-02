@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import threading
@@ -67,6 +68,33 @@ def prepare(client: JournalClient, task_id: str = "A") -> None:
     )
 
 
+def complete_worker_protocol(
+    client: JournalClient,
+    claim: dict,
+    *,
+    run_id: str = "run",
+    worker_id: str = "worker",
+    task_id: str = "A",
+) -> None:
+    binding = {
+        "run_id": run_id,
+        "worker_id": worker_id,
+        "task_id": task_id,
+        "claim_token": claim["claim_token"],
+    }
+    client.call("journal_search", **binding, query=f"task:{task_id}")
+    client.call(
+        "journal_add",
+        **binding,
+        text=f"checkpoint: task:{task_id}\nstate: durable",
+    )
+    client.call(
+        "journal_add",
+        **binding,
+        text=f"handoff: task:{task_id}\nstate: complete",
+    )
+
+
 def test_concurrent_workers_cannot_claim_the_same_task(journal) -> None:
     client, _, socket_path = journal
     seed(client)
@@ -104,6 +132,7 @@ def test_stale_token_rejects_and_valid_submission_survives_restart(journal) -> N
             blockers=[],
             proposed_followups=[],
         )
+    complete_worker_protocol(client, claim)
     client.submit_result(
         run_id="run",
         task_id="A",
@@ -126,6 +155,179 @@ def test_stale_token_rejects_and_valid_submission_survives_restart(journal) -> N
         {"task_id": "A", "proposal": {"title": "not executable"}}
     ]
     assert len(status["tasks"]) == 1
+
+
+def test_submission_requires_exact_two_tool_protocol(journal) -> None:
+    client, _, _ = journal
+    seed(client)
+    prepare(client)
+    claim = client.claim_task("run", "worker")
+    submission = {
+        "run_id": "run",
+        "task_id": "A",
+        "claim_token": claim["claim_token"],
+        "outcome": "completed",
+        "summary": "done",
+        "commit_sha": "a" * 40,
+        "blockers": [],
+        "proposed_followups": [],
+    }
+    with pytest.raises(JournalError, match="journal_search"):
+        client.submit_result(**submission)
+    binding = {
+        "run_id": "run",
+        "worker_id": "worker",
+        "task_id": "A",
+        "claim_token": claim["claim_token"],
+    }
+    client.call("journal_search", **binding, query="not-the-task-handle")
+    client.call("journal_add", **binding, text="checkpoint: task:A\ndurable")
+    client.call("journal_add", **binding, text="handoff: task:A\ncomplete")
+    with pytest.raises(JournalError, match="exact task journal_search"):
+        client.submit_result(**submission)
+    client.call("journal_search", **binding, query="task:A")
+    assert client.submit_result(**submission)["recorded"] is True
+
+
+def test_open_pre_tool_candidate_is_requeued_on_cutover(tmp_path: Path) -> None:
+    database = tmp_path / "cutover.db"
+    journal = SQLiteJournal(database)
+    journal.op_create_run(
+        {
+            "run_id": "run",
+            "workload": "test",
+            "target_repo": "/target",
+            "integration_branch": "main",
+            "integration_worktree": "/integration",
+            "tasks": [
+                {
+                    "id": "A",
+                    "title": "A",
+                    "prompt": "A",
+                    "depends_on": [],
+                    "checks": [],
+                }
+            ],
+        }
+    )
+    journal.op_prepare_task(
+        {
+            "run_id": "run",
+            "task_id": "A",
+            "branch": "codex/A",
+            "worktree_path": "/worktrees/A",
+        }
+    )
+    claim = journal.op_claim_task(
+        {
+            "run_id": "run",
+            "worker_id": "worker",
+            "ownership_mode": "observable",
+        }
+    )
+    binding = {
+        "run_id": "run",
+        "worker_id": "worker",
+        "task_id": "A",
+        "claim_token": claim["claim_token"],
+    }
+    journal.op_journal_search({**binding, "query": "task:A"})
+    journal.op_journal_add({**binding, "text": "checkpoint: task:A"})
+    journal.op_journal_add({**binding, "text": "handoff: task:A"})
+    result = journal.op_submit_result(
+        {
+            "run_id": "run",
+            "task_id": "A",
+            "claim_token": claim["claim_token"],
+            "outcome": "completed",
+            "summary": "done",
+            "commit_sha": "a" * 40,
+            "blockers": [],
+            "proposed_followups": [],
+        }
+    )
+    with sqlite3.connect(database) as connection:
+        raw = connection.execute(
+            "SELECT payload_json FROM proposals WHERE proposal_id=?",
+            (result["proposal_id"],),
+        ).fetchone()[0]
+        payload = json.loads(raw)
+        del payload["worker_journal_protocol"]
+        connection.execute(
+            "UPDATE proposals SET payload_json=? WHERE proposal_id=?",
+            (json.dumps(payload), result["proposal_id"]),
+        )
+
+    reopened = SQLiteJournal(database)
+    status = reopened.op_run_status({"run_id": "run"})
+    assert status["tasks"][0]["state"] == "pending"
+    assert status["tasks"][0]["worktree_path"] == "/worktrees/A"
+    assert status["proposals"][0]["state"] == "applied"
+    assert status["proposals"][0]["decision"] == "reject"
+    assert any(
+        event["event_type"] == "worker_protocol_cutover_requeued"
+        for event in reopened.op_events({"run_id": "run"})
+    )
+
+
+def test_journal_tools_are_claim_fenced_and_search_authorized_dependencies(journal) -> None:
+    client, _, _ = journal
+    seed(
+        client,
+        [
+            {"id": "A", "title": "A", "prompt": "A", "depends_on": [], "checks": []},
+            {"id": "B", "title": "B", "prompt": "B", "depends_on": ["A"], "checks": []},
+            {"id": "C", "title": "C", "prompt": "C", "depends_on": [], "checks": []},
+        ],
+    )
+    prepare(client, "A")
+    claim = client.claim_task("run", "author")
+    complete_worker_protocol(client, claim, worker_id="author")
+    submitted = client.submit_result(
+        run_id="run",
+        task_id="A",
+        claim_token=claim["claim_token"],
+        outcome="completed",
+        summary="done",
+        commit_sha="a" * 40,
+        blockers=[],
+        proposed_followups=[],
+    )
+    for validator in ("validator-0", "validator-1"):
+        validation = client.claim_work("run", validator)
+        client.submit_validation(
+            run_id="run",
+            worker_id=validator,
+            proposal_id=validation["proposal_id"],
+            claim_token=validation["claim_token"],
+            vote="approve",
+            evidence={"checked": True},
+        )
+    client.call(
+        "apply_proposal",
+        run_id="run",
+        proposal_id=submitted["proposal_id"],
+        success=True,
+        integration_commit="b" * 40,
+    )
+    prepare(client, "B")
+    downstream = client.claim_task("run", "downstream")
+    binding = {
+        "run_id": "run",
+        "worker_id": "downstream",
+        "task_id": "B",
+        "claim_token": downstream["claim_token"],
+    }
+    assert any(
+        row["task_id"] == "A"
+        for row in client.call("journal_search", **binding, query="handoff: task:A")
+    )
+    with pytest.raises(JournalError, match="stale"):
+        client.call(
+            "journal_add",
+            **{**binding, "claim_token": "wrong"},
+            text="checkpoint: task:B",
+        )
 
 
 def test_expired_lease_is_reclaimed_and_old_token_stays_invalid(journal) -> None:
@@ -223,9 +425,7 @@ def test_legacy_fixed_leases_migrate_to_observable_ownership(tmp_path: Path) -> 
     SQLiteJournal(database)
 
     with sqlite3.connect(database) as connection:
-        row = connection.execute(
-            "SELECT ownership_mode,expires_at,state FROM claims"
-        ).fetchone()
+        row = connection.execute("SELECT ownership_mode,expires_at,state FROM claims").fetchone()
     assert row == ("observable", None, "active")
 
 
@@ -238,11 +438,10 @@ def test_dependencies_hold_downstream_until_acceptance(journal) -> None:
             {"id": "B", "title": "B", "prompt": "B", "depends_on": ["A"], "checks": []},
         ],
     )
-    assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == [
-        "A"
-    ]
+    assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == ["A"]
     prepare(client, "A")
     claim = client.claim_task("run", "worker", 60)
+    complete_worker_protocol(client, claim)
     submission = client.submit_result(
         run_id="run",
         task_id="A",
@@ -271,9 +470,7 @@ def test_dependencies_hold_downstream_until_acceptance(journal) -> None:
         success=True,
         integration_commit="b" * 40,
     )
-    assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == [
-        "B"
-    ]
+    assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == ["B"]
 
 
 def test_candidate_author_is_excluded_and_two_independent_votes_are_required(journal) -> None:
@@ -281,6 +478,7 @@ def test_candidate_author_is_excluded_and_two_independent_votes_are_required(jou
     seed(client)
     prepare(client)
     claim = client.claim_task("run", "author")
+    complete_worker_protocol(client, claim, worker_id="author")
     submission = client.submit_result(
         run_id="run",
         task_id="A",
@@ -333,6 +531,7 @@ def test_rejection_quorum_retries_candidate_without_launcher_authority(journal) 
     seed(client)
     prepare(client)
     claim = client.claim_task("run", "author")
+    complete_worker_protocol(client, claim, worker_id="author")
     client.submit_result(
         run_id="run",
         task_id="A",

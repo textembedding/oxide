@@ -50,6 +50,26 @@ def approve_next_proposal(client: JournalClient) -> None:
     assert result["decision"] == "approve"
 
 
+def complete_worker_protocol(client: JournalClient, claim: dict, task_id: str) -> None:
+    binding = {
+        "run_id": "toy-test",
+        "worker_id": "fake-worker",
+        "task_id": task_id,
+        "claim_token": claim["claim_token"],
+    }
+    client.call("journal_search", **binding, query=f"task:{task_id}")
+    client.call(
+        "journal_add",
+        **binding,
+        text=f"checkpoint: task:{task_id}\nstate: durable",
+    )
+    client.call(
+        "journal_add",
+        **binding,
+        text=f"handoff: task:{task_id}\nstate: complete",
+    )
+
+
 def test_toy_stage_completes_claim_verify_and_merge(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -76,6 +96,7 @@ def test_toy_stage_completes_claim_verify_and_merge(tmp_path: Path) -> None:
             assert claim["task_id"] == expected
             worktree = Path(claim["worktree_path"])
             commit = commit_task(worktree, expected)
+            complete_worker_protocol(client, claim, expected)
             client.submit_result(
                 run_id="toy-test",
                 task_id=expected,

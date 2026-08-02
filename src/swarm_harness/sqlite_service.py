@@ -76,6 +76,18 @@ CREATE TABLE IF NOT EXISTS validation_claims (
   ownership_mode TEXT NOT NULL, expires_at REAL, state TEXT NOT NULL,
   FOREIGN KEY (proposal_id) REFERENCES proposals(proposal_id)
 );
+CREATE TABLE IF NOT EXISTS journal_entries (
+  journal_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL, worker_id TEXT NOT NULL, author_kind TEXT NOT NULL,
+  claim_id INTEGER, body TEXT NOT NULL, created_at REAL NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE TABLE IF NOT EXISTS journal_searches (
+  search_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL, worker_id TEXT NOT NULL, claim_id INTEGER NOT NULL,
+  query TEXT NOT NULL, match_count INTEGER NOT NULL, created_at REAL NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
 CREATE INDEX IF NOT EXISTS proposals_run_state
   ON proposals(run_id,state,proposal_id);
 CREATE INDEX IF NOT EXISTS validation_claims_owner
@@ -102,12 +114,12 @@ class SQLiteJournal:
             self._migrate_runs(connection)
             self._migrate_claims(connection)
             self._migrate_candidate_proposals(connection)
+            self._migrate_journal_seeds(connection)
+            self._migrate_worker_protocol_proposals(connection)
 
     @staticmethod
     def _migrate_runs(connection: sqlite3.Connection) -> None:
-        columns = {
-            str(row["name"]): row for row in connection.execute("PRAGMA table_info(runs)")
-        }
+        columns = {str(row["name"]): row for row in connection.execute("PRAGMA table_info(runs)")}
         if "stage_gate_json" not in columns:
             connection.execute(
                 "ALTER TABLE runs ADD COLUMN stage_gate_json TEXT NOT NULL DEFAULT '[]'"
@@ -137,11 +149,97 @@ class SQLiteJournal:
                 proposal_id=row["proposal_id"],
             )
 
+    def _migrate_journal_seeds(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT run_id,task_id,title,prompt FROM tasks task
+            WHERE NOT EXISTS (
+              SELECT 1 FROM journal_entries entry
+              WHERE entry.run_id=task.run_id AND entry.task_id=task.task_id
+                AND entry.author_kind='seed'
+            )
+            """
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                """
+                INSERT INTO journal_entries(
+                  run_id,task_id,worker_id,author_kind,claim_id,body,created_at
+                ) VALUES(?,?,?,'seed',NULL,?,?)
+                """,
+                (
+                    row["run_id"],
+                    row["task_id"],
+                    "journal",
+                    f"task:{row['task_id']}\ntitle:{row['title']}\nobjective:{row['prompt']}",
+                    self.clock(),
+                ),
+            )
+
+    def _migrate_worker_protocol_proposals(self, connection: sqlite3.Connection) -> None:
+        """Fence open candidates created before the two-tool boundary existed."""
+
+        rows = connection.execute(
+            """
+            SELECT proposal_id,run_id,task_id,payload_json
+            FROM proposals
+            WHERE kind='task_acceptance' AND state='open'
+            ORDER BY proposal_id
+            """
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if isinstance(payload.get("worker_journal_protocol"), dict):
+                continue
+            now = self.clock()
+            reason = "candidate predates mandatory journal_add/journal_search protocol"
+            connection.execute(
+                """
+                UPDATE proposals
+                SET state='applied',decision='reject',committed_at=?,applied_at=?,
+                    apply_result_json=?
+                WHERE proposal_id=? AND state='open'
+                """,
+                (
+                    now,
+                    now,
+                    _json({"task_state": "pending", "reason": reason}),
+                    row["proposal_id"],
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE tasks SET state='pending',last_error=?
+                WHERE run_id=? AND task_id=? AND state='submitted'
+                """,
+                (reason, row["run_id"], row["task_id"]),
+            )
+            connection.execute(
+                """
+                UPDATE claims SET state='rejected'
+                WHERE run_id=? AND task_id=? AND state='submitted'
+                """,
+                (row["run_id"], row["task_id"]),
+            )
+            connection.execute(
+                """
+                UPDATE validation_claims SET state='superseded'
+                WHERE proposal_id=? AND state='active'
+                """,
+                (row["proposal_id"],),
+            )
+            self._event(
+                connection,
+                str(row["run_id"]),
+                "worker_protocol_cutover_requeued",
+                str(row["task_id"]),
+                proposal_id=row["proposal_id"],
+                reason=reason,
+            )
+
     @staticmethod
     def _migrate_claims(connection: sqlite3.Connection) -> None:
-        columns = {
-            str(row["name"]): row for row in connection.execute("PRAGMA table_info(claims)")
-        }
+        columns = {str(row["name"]): row for row in connection.execute("PRAGMA table_info(claims)")}
         if "ownership_mode" in columns and not int(columns["expires_at"]["notnull"]):
             return
         connection.execute("BEGIN IMMEDIATE")
@@ -279,9 +377,7 @@ class SQLiteJournal:
             raise ProtocolError("tasks must be a nonempty list")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM runs WHERE run_id=?", (run_id,)
-            ).fetchone()
+            existing = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if existing:
                 stored_gate = json.loads(existing["stage_gate_json"])
                 if not stored_gate and stage_gate:
@@ -357,6 +453,7 @@ class SQLiteJournal:
                         "INSERT INTO dependencies VALUES(?,?,?)",
                         (run_id, task["id"], dependency),
                     )
+            self._migrate_journal_seeds(connection)
             self._event(connection, run_id, "run_created", task_count=len(tasks))
         return {"created": True, "state": "running"}
 
@@ -459,7 +556,9 @@ class SQLiteJournal:
                 (run_id,),
             ).fetchone()
             if row is None:
-                state = connection.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+                state = connection.execute(
+                    "SELECT state FROM runs WHERE run_id=?", (run_id,)
+                ).fetchone()
                 return {"status": "complete" if state and state[0] == "complete" else "idle"}
             token = secrets.token_urlsafe(32)
             now = self.clock()
@@ -648,8 +747,7 @@ class SQLiteJournal:
                 "task_id": proposal["task_id"],
                 "title": proposal["title"] or proposal["kind"],
                 "prompt": proposal["prompt"] or "Validate the journal proposal.",
-                "worktree_path": proposal["worktree_path"]
-                or proposal["integration_worktree"],
+                "worktree_path": proposal["worktree_path"] or proposal["integration_worktree"],
                 "acceptance_checks": payload.get(
                     "checks",
                     json.loads(proposal["checks_json"])
@@ -661,6 +759,131 @@ class SQLiteJournal:
                 "ownership_mode": ownership_mode,
                 "lease_expires_at": expires,
             }
+
+    def _model_claim(
+        self,
+        connection: sqlite3.Connection,
+        values: dict[str, Any],
+    ) -> sqlite3.Row:
+        run_id = require_string(values, "run_id")
+        worker_id = require_string(values, "worker_id")
+        task_id = require_string(values, "task_id")
+        token = require_string(values, "claim_token")
+        if self._run_state(connection, run_id) != "running":
+            raise JournalError("run_not_running", "journal tools require a running run")
+        claim = connection.execute(
+            """
+            SELECT c.* FROM claims c JOIN tasks t
+              ON t.run_id=c.run_id AND t.task_id=c.task_id
+            WHERE c.run_id=? AND c.worker_id=? AND c.task_id=? AND c.token=?
+              AND c.state='active' AND t.state='claimed'
+            """,
+            (run_id, worker_id, task_id, token),
+        ).fetchone()
+        expired = (
+            claim is not None
+            and claim["ownership_mode"] == "lease"
+            and claim["expires_at"] is not None
+            and claim["expires_at"] <= self.clock()
+        )
+        if claim is None or expired:
+            raise JournalError("stale_claim", "journal tool claim is incorrect or stale")
+        return claim
+
+    def op_journal_add(self, values: dict[str, Any]) -> dict:
+        text = require_string(values, "text")
+        if not text.strip() or len(text.encode("utf-8")) > 65_536:
+            raise ProtocolError("journal_add text must be 1..65536 UTF-8 bytes")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            claim = self._model_claim(connection, values)
+            cursor = connection.execute(
+                """
+                INSERT INTO journal_entries(
+                  run_id,task_id,worker_id,author_kind,claim_id,body,created_at
+                ) VALUES(?,?,?,'worker',?,?,?)
+                """,
+                (
+                    claim["run_id"],
+                    claim["task_id"],
+                    claim["worker_id"],
+                    claim["claim_id"],
+                    text,
+                    self.clock(),
+                ),
+            )
+            journal_id = int(cursor.lastrowid)
+            self._event(
+                connection,
+                str(claim["run_id"]),
+                "journal_add",
+                str(claim["task_id"]),
+                journal_id=journal_id,
+                worker_id=claim["worker_id"],
+                claim_id=claim["claim_id"],
+            )
+        return {"saved": True, "journal_id": journal_id}
+
+    def op_journal_search(self, values: dict[str, Any]) -> list[dict]:
+        query = require_string(values, "query")
+        if not query.strip() or len(query.encode("utf-8")) > 4_096:
+            raise ProtocolError("journal_search query must be 1..4096 UTF-8 bytes")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            claim = self._model_claim(connection, values)
+            rows = connection.execute(
+                """
+                SELECT entry.journal_id,entry.created_at,entry.author_kind,
+                       entry.task_id,entry.body
+                FROM journal_entries entry
+                WHERE entry.run_id=? AND INSTR(entry.body,?)>0
+                  AND (
+                    entry.task_id=? OR EXISTS (
+                      SELECT 1 FROM dependencies dependency JOIN tasks producer
+                        ON producer.run_id=dependency.run_id
+                       AND producer.task_id=dependency.dependency_id
+                      WHERE dependency.run_id=? AND dependency.task_id=?
+                        AND dependency.dependency_id=entry.task_id
+                        AND producer.state='accepted'
+                    )
+                  )
+                ORDER BY entry.journal_id DESC LIMIT 20
+                """,
+                (
+                    claim["run_id"],
+                    query,
+                    claim["task_id"],
+                    claim["run_id"],
+                    claim["task_id"],
+                ),
+            ).fetchall()
+            connection.execute(
+                """
+                INSERT INTO journal_searches(
+                  run_id,task_id,worker_id,claim_id,query,match_count,created_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    claim["run_id"],
+                    claim["task_id"],
+                    claim["worker_id"],
+                    claim["claim_id"],
+                    query,
+                    len(rows),
+                    self.clock(),
+                ),
+            )
+            self._event(
+                connection,
+                str(claim["run_id"]),
+                "journal_search",
+                str(claim["task_id"]),
+                worker_id=claim["worker_id"],
+                claim_id=claim["claim_id"],
+                query=query,
+                match_count=len(rows),
+            )
+        return [dict(row) for row in rows]
 
     def op_reclaim_worker(self, values: dict[str, Any]) -> dict:
         run_id = require_string(values, "run_id")
@@ -774,6 +997,51 @@ class SQLiteJournal:
             ).fetchone()
             if task is None or task["state"] != "claimed":
                 raise JournalError("stale_claim", "task no longer belongs to this claim")
+            search_ids = [
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT search_id FROM journal_searches
+                    WHERE claim_id=? AND query=? ORDER BY search_id
+                    """,
+                    (claim["claim_id"], f"task:{task_id}"),
+                )
+            ]
+            checkpoint_marker = f"checkpoint: task:{task_id}"
+            handoff_marker = f"handoff: task:{task_id}"
+            checkpoint_ids = [
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT journal_id FROM journal_entries
+                    WHERE claim_id=? AND INSTR(body,?)>0
+                    ORDER BY journal_id
+                    """,
+                    (claim["claim_id"], checkpoint_marker),
+                )
+            ]
+            handoff_ids = [
+                int(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT journal_id FROM journal_entries
+                    WHERE claim_id=? AND INSTR(body,?)>0
+                    ORDER BY journal_id
+                    """,
+                    (claim["claim_id"], handoff_marker),
+                )
+            ]
+            if not search_ids or not checkpoint_ids or not handoff_ids:
+                raise JournalError(
+                    "worker_protocol_incomplete",
+                    "submission requires exact task journal_search plus checkpoint and handoff journal_add calls",
+                )
+            worker_journal_protocol = {
+                "claim_id": int(claim["claim_id"]),
+                "search_ids": search_ids,
+                "checkpoint_journal_ids": checkpoint_ids,
+                "handoff_journal_ids": handoff_ids,
+            }
             connection.execute(
                 "UPDATE claims SET state='submitted',submission_json=? WHERE claim_id=?",
                 (_json(submission), claim["claim_id"]),
@@ -802,6 +1070,7 @@ class SQLiteJournal:
                     "checks": json.loads(task["checks_json"]),
                     "worktree_path": task["worktree_path"],
                     "branch": task["branch"],
+                    "worker_journal_protocol": worker_journal_protocol,
                 },
             )
             self._event(
@@ -891,9 +1160,7 @@ class SQLiteJournal:
         )
         known = {
             str(row[0])
-            for row in connection.execute(
-                "SELECT task_id FROM tasks WHERE run_id=?", (run_id,)
-            )
+            for row in connection.execute("SELECT task_id FROM tasks WHERE run_id=?", (run_id,))
         }
         proposed: list[dict[str, Any]] = []
         for raw in tasks:
@@ -948,8 +1215,10 @@ class SQLiteJournal:
         run_id = str(proposal["run_id"])
         task_id = str(payload.get("task_id") or proposal["task_id"] or "")
         dependencies = payload.get("depends_on")
-        if not task_id or not isinstance(dependencies, list) or not all(
-            isinstance(item, str) for item in dependencies
+        if (
+            not task_id
+            or not isinstance(dependencies, list)
+            or not all(isinstance(item, str) for item in dependencies)
         ):
             raise JournalError("invalid_proposal", "dependency change schema is invalid")
         task = connection.execute(
@@ -959,9 +1228,7 @@ class SQLiteJournal:
             raise JournalError("invalid_transition", "only a pending task may change dependencies")
         known = {
             str(row[0])
-            for row in connection.execute(
-                "SELECT task_id FROM tasks WHERE run_id=?", (run_id,)
-            )
+            for row in connection.execute("SELECT task_id FROM tasks WHERE run_id=?", (run_id,))
         }
         if task_id in dependencies or any(item not in known for item in dependencies):
             raise JournalError("invalid_proposal", "dependency is unknown or self-referential")
@@ -986,12 +1253,20 @@ class SQLiteJournal:
         payload = json.loads(proposal["payload_json"])
         now = self.clock()
         if kind == "task_acceptance":
+            self._assert_worker_protocol_binding(
+                connection,
+                run_id,
+                str(task_id),
+                payload,
+            )
             changed = connection.execute(
                 "UPDATE tasks SET state='integrating' WHERE run_id=? AND task_id=? AND state='submitted'",
                 (run_id, task_id),
             ).rowcount
             if changed != 1:
-                raise JournalError("invalid_transition", "candidate is no longer awaiting validation")
+                raise JournalError(
+                    "invalid_transition", "candidate is no longer awaiting validation"
+                )
             connection.execute(
                 """
                 UPDATE proposals SET state='committed',decision='approve',committed_at=?
@@ -1068,6 +1343,85 @@ class SQLiteJournal:
             state=state,
         )
         return state
+
+    @staticmethod
+    def _assert_worker_protocol_binding(
+        connection: sqlite3.Connection,
+        run_id: str,
+        task_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        protocol = payload.get("worker_journal_protocol")
+        keys = {
+            "claim_id",
+            "search_ids",
+            "checkpoint_journal_ids",
+            "handoff_journal_ids",
+        }
+        if not isinstance(protocol, dict) or set(protocol) != keys:
+            raise JournalError(
+                "invalid_proposal",
+                "candidate does not bind the mandatory worker journal protocol",
+            )
+        claim_id = protocol["claim_id"]
+        collections = (
+            protocol["search_ids"],
+            protocol["checkpoint_journal_ids"],
+            protocol["handoff_journal_ids"],
+        )
+        if not isinstance(claim_id, int) or any(
+            not isinstance(items, list)
+            or not items
+            or any(not isinstance(item, int) for item in items)
+            for items in collections
+        ):
+            raise JournalError(
+                "invalid_proposal",
+                "candidate worker journal protocol binding is malformed",
+            )
+        claim = connection.execute(
+            "SELECT run_id,task_id FROM claims WHERE claim_id=?",
+            (claim_id,),
+        ).fetchone()
+        if claim is None or claim["run_id"] != run_id or claim["task_id"] != task_id:
+            raise JournalError(
+                "invalid_proposal",
+                "candidate worker journal protocol binds a different claim",
+            )
+        expected_search = f"task:{task_id}"
+        expected_markers = (
+            f"checkpoint: task:{task_id}",
+            f"handoff: task:{task_id}",
+        )
+        searches_valid = all(
+            connection.execute(
+                "SELECT 1 FROM journal_searches WHERE search_id=? AND claim_id=? AND query=?",
+                (search_id, claim_id, expected_search),
+            ).fetchone()
+            is not None
+            for search_id in protocol["search_ids"]
+        )
+        entries_valid = all(
+            connection.execute(
+                """
+                SELECT 1 FROM journal_entries
+                WHERE journal_id=? AND claim_id=? AND INSTR(body,?)>0
+                """,
+                (journal_id, claim_id, marker),
+            ).fetchone()
+            is not None
+            for key, marker in zip(
+                ("checkpoint_journal_ids", "handoff_journal_ids"),
+                expected_markers,
+                strict=True,
+            )
+            for journal_id in protocol[key]
+        )
+        if not searches_valid or not entries_valid:
+            raise JournalError(
+                "invalid_proposal",
+                "candidate worker journal protocol evidence is missing or mismatched",
+            )
 
     def _commit_rejected_proposal(
         self,
@@ -1230,7 +1584,9 @@ class SQLiteJournal:
                 (proposal_id, run_id),
             ).fetchone()
             if proposal is None:
-                raise JournalError("invalid_transition", "proposal is not committed for integration")
+                raise JournalError(
+                    "invalid_transition", "proposal is not committed for integration"
+                )
             task_id = str(proposal["task_id"])
             now = self.clock()
             if success:
@@ -1389,7 +1745,12 @@ class SQLiteJournal:
             )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute("UPDATE runs SET state=? WHERE run_id=?", (state, run_id)).rowcount != 1:
+            if (
+                connection.execute(
+                    "UPDATE runs SET state=? WHERE run_id=?", (state, run_id)
+                ).rowcount
+                != 1
+            ):
                 raise JournalError("missing_run", "run does not exist")
             self._event(connection, run_id, f"run_{state}")
         return {"state": state}
@@ -1549,7 +1910,9 @@ class JournalServer(socketserver.ThreadingUnixStreamServer):
             self.socket_path.unlink()
 
 
-def serve_in_thread(database: str | Path, socket_path: str | Path) -> tuple[JournalServer, threading.Thread]:
+def serve_in_thread(
+    database: str | Path, socket_path: str | Path
+) -> tuple[JournalServer, threading.Thread]:
     server = JournalServer(socket_path, SQLiteJournal(database))
     thread = threading.Thread(target=server.serve_forever, name="swarm-journal", daemon=True)
     thread.start()

@@ -14,10 +14,12 @@ ALLOWED_MODULES = {
     "protocol.py",
     "sqlite_service.py",
     "journal_client.py",
+    "journal_mcp.py",
     "live_observer.py",
     "tools.py",
     "controller.py",
     "worker.py",
+    "yaml_payload.py",
     "cli.py",
 }
 
@@ -48,7 +50,7 @@ def test_only_frozen_source_modules_exist() -> None:
 
 
 def test_source_line_budget() -> None:
-    assert _logical_lines(sorted(SRC.glob("*.py"))) <= 5_000
+    assert _logical_lines(sorted(SRC.glob("*.py"))) <= 6_000
 
 
 def test_test_line_budget() -> None:
@@ -67,8 +69,8 @@ def test_source_is_valid_python() -> None:
 
 def test_exactly_two_worker_tool_names_are_reserved() -> None:
     contract = (ROOT / "HARNESS_CONTRACT.md").read_text(encoding="utf-8")
-    assert "claim_task" in contract
-    assert "submit_result" in contract
+    assert "journal_add" in contract
+    assert "journal_search" in contract
 
 
 def test_non_goals_remain_explicit() -> None:

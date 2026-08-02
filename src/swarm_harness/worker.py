@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .journal_client import JournalClient
-from .tools import claim_task, submit_result
 
 
 class WorkerError(RuntimeError):
@@ -59,6 +60,17 @@ class Worker:
             f"Objective: {envelope['prompt']}\n\n"
             "Acceptance checks:\n"
             f"{checks or '- No additional command.'}\n\n"
+            "Journal protocol:\n"
+            "- The only journal tools available to you are journal_search and journal_add. "
+            "Never open the journal socket or database directly.\n"
+            f"- Before inspecting or editing, call journal_search for `task:{envelope['task_id']}`.\n"
+            f"- After the first durable edit, call journal_add with the exact marker "
+            f"`checkpoint: task:{envelope['task_id']}` and summarize durable state. If this is "
+            "a resumed worktree, checkpoint the recovered state immediately after inspection.\n"
+            f"- Before finishing, call journal_add with the exact marker "
+            f"`handoff: task:{envelope['task_id']}` plus completed work, files, checks, and risks.\n"
+            "- Both tools take one `yaml` argument whose value is YAML containing exactly one "
+            "string field: `query` for journal_search or `text` for journal_add.\n\n"
             "Parallel ownership rule: other workers are implementing sibling tasks from the "
             "same base. Treat root Cargo.toml, Cargo.lock, tools/verifier_support.rs, and "
             "pre-seeded package manifests as shared read-only files. Prefer new files whose "
@@ -69,9 +81,34 @@ class Worker:
             "commit any remaining worktree changes."
         )
 
+    def _mcp_configs(self) -> list[str]:
+        forwarded = [
+            "PYTHONPATH",
+            "SWARM_CLAIM_TOKEN",
+            "SWARM_JOURNAL_SOCKET",
+            "SWARM_RUN_ID",
+            "SWARM_TASK_ID",
+            "SWARM_WORKER_ID",
+        ]
+        return [
+            'approval_policy="never"',
+            'web_search="disabled"',
+            'shell_environment_policy.exclude=["SWARM_*"]',
+            f"mcp_servers.journal.command={json.dumps(str(Path(sys.executable).resolve()))}",
+            'mcp_servers.journal.args=["-m","swarm_harness.journal_mcp"]',
+            f"mcp_servers.journal.env_vars={json.dumps(forwarded)}",
+            "mcp_servers.journal.required=true",
+            'mcp_servers.journal.enabled_tools=["journal_add","journal_search"]',
+            "mcp_servers.journal.startup_timeout_sec=5",
+            "mcp_servers.journal.tool_timeout_sec=10",
+        ]
+
     def _run_codex(self, worktree: Path, envelope: dict) -> tuple[int, str]:
         argv = [
             *self.codex_argv,
+            "--ignore-user-config",
+            "--strict-config",
+            "--ignore-rules",
             "-C",
             str(worktree),
             "--sandbox",
@@ -79,12 +116,26 @@ class Worker:
             "--ephemeral",
             "--json",
         ]
+        for config in self._mcp_configs():
+            argv.extend(("-c", config))
         if self.model:
             argv += ["--model", self.model]
         argv.append(self._prompt(envelope))
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                "SWARM_CLAIM_TOKEN": str(envelope["claim_token"]),
+                "SWARM_JOURNAL_SOCKET": self.client.socket_path,
+                "SWARM_RUN_ID": self.run_id,
+                "SWARM_TASK_ID": str(envelope["task_id"]),
+                "SWARM_WORKER_ID": self.worker_id,
+            }
+        )
         process = subprocess.Popen(
             argv,
             cwd=worktree,
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -235,11 +286,10 @@ class Worker:
         return "validated"
 
     def run_once(self) -> str:
-        envelope = claim_task(
-            self.client,
-            run_id=self.run_id,
-            worker_id=self.worker_id,
-            lease_seconds=self.lease_seconds,
+        envelope = self.client.claim_work(
+            self.run_id,
+            self.worker_id,
+            self.lease_seconds,
         )
         status = str(envelope["status"])
         if status != "claimed":
@@ -266,15 +316,15 @@ class Worker:
         except (OSError, subprocess.SubprocessError, TimeoutError, WorkerError) as error:
             summary = f"{type(error).__name__}: {error}"
             blockers = [{"kind": "worker_error", "message": str(error)}]
-        submit_result(
-            self.client,
+        self.client.submit_result(
             run_id=self.run_id,
             task_id=task_id,
             claim_token=token,
             outcome=outcome,
             summary=summary,
             commit_sha=commit,
-            blockers=blockers,
+            blockers=list(blockers),
+            proposed_followups=[],
         )
         self.log(f"submitted {task_id}: {outcome} {commit[:12]}")
         return "submitted"

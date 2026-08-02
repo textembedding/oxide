@@ -15,8 +15,10 @@ worker terminals, and `./swarmctl harness observe` to follow any slot. The
 legacy observer slot name `orchestrator` is retained for command compatibility;
 that process has no acceptance or completion authority.
 
-Workers atomically claim routine implementation or validation work from the
-journal. Candidate acceptance, retries, task/dependency changes, and stage
+The host worker adapter atomically claims routine implementation or validation
+work from the journal. The Codex process itself sees only `journal_add` and
+`journal_search`; both calls are visible in its JSONL log. Candidate acceptance,
+retries, task/dependency changes, and stage
 completion require two matching votes from up to three independent workers.
 The proposal author cannot vote. The launcher only observes local process
 liveness, prepares Git worktrees, and applies merges already committed by the

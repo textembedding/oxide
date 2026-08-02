@@ -8,67 +8,56 @@ while those workers build the production Rust kernel that will replace it.
 
 ## Worker-visible tool surface
 
-Workers receive exactly two tools.
+The Codex worker receives exactly two journal tools. MCP startup is mandatory;
+the invocation fails if this closed surface cannot initialize.
 
-### `claim_task`
+### `journal_search`
 
 Request:
 
 ```json
-{"worker_id": "worker-1", "ownership_mode": "observable"}
+{"yaml": "query: task:S0-01"}
 ```
 
-Response when work is available:
+Response:
 
-```json
-{
-  "status": "claimed",
-  "work_kind": "implementation",
-  "task_id": "S0-01",
-  "claim_token": "opaque-token",
-  "prompt": "Implement the requested task.",
-  "worktree_path": "/absolute/path",
-  "acceptance_checks": ["cargo test --workspace"],
-  "ownership_mode": "observable",
-  "lease_expires_at": null
-}
+```yaml
+matches:
+  - journal_id: 17
+    author_kind: seed
+    task_id: S0-01
+    body: "task:S0-01 ..."
 ```
 
-The same atomic claim may return `"work_kind": "validation"` with an immutable
-proposal, its author, candidate head, checks, and a validation token. Proposal
-authors are excluded from validation.
+Search is a bounded, literal projection over authorized durable entries. It is
+for context recovery only and never grants lifecycle authority.
 
-Response when no work is available:
-
-```json
-{"status": "idle"}
-```
-
-### `submit_result`
+### `journal_add`
 
 Request:
 
 ```json
 {
-  "task_id": "S0-01",
-  "claim_token": "opaque-token",
-  "outcome": "completed",
-  "summary": "Implemented the task.",
-  "commit_sha": "git-sha",
-  "blockers": [],
-  "proposed_followups": []
+  "yaml": "text: |-\n  checkpoint: task:S0-01\n  durable state"
 }
 ```
 
 Response:
 
-```json
-{"recorded": true, "state": "submitted", "proposal_id": 42}
+```yaml
+saved: true
+journal_id: 18
 ```
 
-Submission is not acceptance. It opens a journal proposal. Independent workers
-check the exact candidate and record evidence-bound votes through the adapter;
-that internal transition is not a model-visible tool.
+Free text records observations, checkpoints, and handoffs. It cannot claim,
+submit, accept, retry, vote, or complete a stage. Submission requires at least
+one `journal_search`, an exact `checkpoint: task:<id>` entry, and an exact
+`handoff: task:<id>` entry from the current fenced attempt.
+
+The host adapter performs atomic claim, typed submission, and validation-vote
+transitions outside the model-visible process. Those private calls are not
+worker tools and cannot be invoked through MCP. Submission is not acceptance;
+it opens a proposal for independent validation.
 
 ## Journal boundary
 

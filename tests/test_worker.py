@@ -6,6 +6,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+from swarm_harness.cli import highlight_stream_line
 from swarm_harness.journal_client import JournalClient
 from swarm_harness.sqlite_service import JournalServer, SQLiteJournal
 from swarm_harness.tools import __all__ as tool_names
@@ -22,7 +23,15 @@ def git(repository: Path, *arguments: str) -> str:
 
 
 def test_exactly_two_harness_tools_are_exported() -> None:
-    assert tool_names == ["claim_task", "submit_result"]
+    assert tool_names == ["journal_add", "journal_search"]
+
+
+def test_worker_claim_binding_is_forwarded_only_to_required_mcp() -> None:
+    worker = Worker(JournalClient("/tmp/not-used.sock"), "run", "worker-0")
+    configs = worker._mcp_configs()
+    assert 'shell_environment_policy.exclude=["SWARM_*"]' in configs
+    assert "mcp_servers.journal.required=true" in configs
+    assert 'mcp_servers.journal.enabled_tools=["journal_add","journal_search"]' in configs
 
 
 def test_real_worker_adapter_commits_and_submits(tmp_path: Path) -> None:
@@ -36,10 +45,21 @@ def test_real_worker_adapter_commits_and_submits(tmp_path: Path) -> None:
     git(worktree, "commit", "-m", "seed")
     fake = tmp_path / "fake_codex.py"
     fake.write_text(
-        "import pathlib,sys\n"
+        "import json,os,pathlib,sys\n"
+        "from swarm_harness.journal_client import JournalClient\n"
+        "client=JournalClient(os.environ['SWARM_JOURNAL_SOCKET'])\n"
+        "binding={'run_id':os.environ['SWARM_RUN_ID'],'worker_id':os.environ['SWARM_WORKER_ID'],"
+        "'task_id':os.environ['SWARM_TASK_ID'],'claim_token':os.environ['SWARM_CLAIM_TOKEN']}\n"
+        "task=binding['task_id']\n"
+        "client.call('journal_search',**binding,query='task:'+task)\n"
+        "print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','server':'journal','tool':'journal_search','status':'completed'}}))\n"
         "root=pathlib.Path(sys.argv[sys.argv.index('-C')+1])\n"
         "(root/'result.txt').write_text('done\\n')\n"
-        "print('{\"type\":\"result\",\"text\":\"done\"}')\n",
+        "client.call('journal_add',**binding,text='checkpoint: task:'+task+'\\nstate: durable')\n"
+        "print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','server':'journal','tool':'journal_add','status':'completed'}}))\n"
+        "client.call('journal_add',**binding,text='handoff: task:'+task+'\\nstate: complete')\n"
+        "print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','server':'journal','tool':'journal_add','status':'completed'}}))\n"
+        'print(\'{"type":"result","text":"done"}\')\n',
         encoding="utf-8",
     )
     socket_root = tempfile.TemporaryDirectory(prefix="swarm-w-", dir="/tmp")
@@ -73,14 +93,20 @@ def test_real_worker_adapter_commits_and_submits(tmp_path: Path) -> None:
             branch="main",
             worktree_path=str(worktree),
         )
+        logs: list[str] = []
         worker = Worker(
             client,
             "run",
             "worker-0",
             codex_argv=(sys.executable, str(fake)),
-            log=lambda _: None,
+            log=logs.append,
         )
         assert worker.run_once() == "submitted"
+        assert sum('"tool": "journal_search"' in line for line in logs) == 1
+        assert sum('"tool": "journal_add"' in line for line in logs) == 2
+        rendered = "\n".join(highlight_stream_line(line, color=False) for line in logs)
+        assert "TOOL COMPLETED journal.journal_search" in rendered
+        assert "TOOL COMPLETED journal.journal_add" in rendered
         submitted = client.call("submitted_tasks", run_id="run")
         assert submitted[0]["submission"]["outcome"] == "completed"
         assert (worktree / "result.txt").read_text() == "done\n"
