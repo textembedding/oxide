@@ -1,3 +1,3 @@
-"""Clean-room swarm harness package."""
+"""Disposable native macOS swarm harness package."""
 
 __all__ = []

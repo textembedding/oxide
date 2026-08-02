@@ -1,6 +1,6 @@
 # Non-Goals
 
-The clean-room Python prototype will not implement:
+The disposable native macOS harness will not implement:
 
 - cgroup authority
 - Bubblewrap qualification
