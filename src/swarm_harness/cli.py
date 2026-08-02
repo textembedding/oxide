@@ -243,16 +243,30 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
     add(run_state, "1;32" if run_state == "COMPLETE" else "1;35")
     add(time.strftime("UPDATED %H:%M:%S"), "2")
     add("-" * width, "2;36")
-    counts: dict[str, int] = {}
-    for task in snapshot["tasks"]:
+    visible: list[tuple[int, dict, str]] = []
+    priority = {
+        "WORKING": 0,
+        "VERIFYING": 1,
+        "EXPIRED": 2,
+        "RETRY": 3,
+        "READY": 4,
+        "ACCEPTED": 5,
+    }
+    for ordinal, task in enumerate(snapshot["tasks"]):
         state = _queue_task_state(task, now)
+        if state == "BLOCKED":
+            continue
+        visible.append((ordinal, task, state))
+    visible.sort(key=lambda item: (priority.get(item[2], 6), item[0]))
+
+    counts: dict[str, int] = {}
+    for _, task, state in visible:
         counts[state] = counts.get(state, 0) + 1
         state_color = {
             "ACCEPTED": "1;32",
             "VERIFYING": "1;33",
             "WORKING": "1;35",
             "READY": "1;36",
-            "BLOCKED": "2;37",
             "RETRY": "1;31",
             "EXPIRED": "1;31",
         }.get(state, "1;37")
@@ -263,8 +277,6 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
             expires = task.get("expires_at")
             lease = "unknown" if expires is None else _queue_duration(float(expires) - now)
             add("expired" if state == "EXPIRED" else lease, prefix="lease: ")
-        if state == "BLOCKED":
-            add(str(int(task["blocked_count"])), prefix="waiting on: ")
         commit = _queue_commit(task)
         if commit and state in {"VERIFYING", "ACCEPTED"}:
             add(commit, prefix="commit: ")
@@ -272,7 +284,7 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
             add(task.get("last_error") or "rejected", prefix="error: ")
         add("-" * width, "2")
     add("SUMMARY", "1;36")
-    for state in ("WORKING", "VERIFYING", "READY", "BLOCKED", "RETRY", "EXPIRED", "ACCEPTED"):
+    for state in ("WORKING", "VERIFYING", "READY", "RETRY", "EXPIRED", "ACCEPTED"):
         if counts.get(state):
             add(str(counts[state]), prefix=f"{state.lower()}: ")
     return "\n".join(lines) + "\n"

@@ -150,23 +150,12 @@ def test_auto_color_is_on_for_a_tty_even_with_no_color(monkeypatch) -> None:
     assert cli._observer_color("never") is False
 
 
-def test_queue_renderer_is_one_column_and_at_most_40_columns() -> None:
+def test_queue_renderer_hides_blocked_tasks_and_keeps_work_in_progress_first() -> None:
     now = time.time()
     snapshot = {
         "run_id": "pilot-20260802-very-long-run-identifier",
         "state": "running",
         "tasks": [
-            {
-                "task_id": "S0-01-VERY-LONG-MILESTONE-NAME",
-                "state": "claimed",
-                "claim_state": "active",
-                "worker_id": "worker-0",
-                "expires_at": now + 60,
-                "blocked_count": 0,
-                "accepted_commit": None,
-                "submission_json": None,
-                "last_error": None,
-            },
             {
                 "task_id": "S0-02",
                 "state": "pending",
@@ -174,6 +163,17 @@ def test_queue_renderer_is_one_column_and_at_most_40_columns() -> None:
                 "worker_id": None,
                 "expires_at": None,
                 "blocked_count": 1,
+                "accepted_commit": None,
+                "submission_json": None,
+                "last_error": None,
+            },
+            {
+                "task_id": "S0-01-VERY-LONG-MILESTONE-NAME",
+                "state": "claimed",
+                "claim_state": "active",
+                "worker_id": "worker-0",
+                "expires_at": now + 60,
+                "blocked_count": 0,
                 "accepted_commit": None,
                 "submission_json": None,
                 "last_error": None,
@@ -186,13 +186,13 @@ def test_queue_renderer_is_one_column_and_at_most_40_columns() -> None:
 
     assert "WORKING\n" in plain
     assert "owner: worker-0\n" in plain
-    assert "BLOCKED\n" in plain
-    assert "waiting on: 1\n" in plain
+    assert "BLOCKED" not in plain
+    assert "S0-02" not in plain
     assert "|" not in plain
     assert max(len(line) for line in plain.splitlines()) <= 40
 
 
-def test_observe_queue_reads_working_and_blocked_tasks(
+def test_observe_queue_reads_working_tasks_without_dependency_blocked_tasks(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     runs = tmp_path / "runs"
@@ -255,7 +255,8 @@ def test_observe_queue_reads_working_and_blocked_tasks(
 
     assert result == 0
     assert "WORKING\nS0-01\nowner: worker-0\n" in transcript
-    assert "BLOCKED\nS0-02\nwaiting on: 1\n" in transcript
+    assert "BLOCKED" not in transcript
+    assert "S0-02" not in transcript
     assert max(len(line) for line in transcript.splitlines()) <= 40
 
 
