@@ -32,3 +32,17 @@ def test_native_observe_prints_slot_log(tmp_path: Path, monkeypatch, capsys) -> 
     )
     assert result == 0
     assert capsys.readouterr().out == "native macOS log\n"
+
+
+def test_observer_renders_codex_events_with_terminal_syntax() -> None:
+    line = (
+        '[12:34:56] {"type":"item.completed","item":'
+        '{"type":"command_execution","command":"git diff",'
+        '"aggregated_output":"+added\\n","exit_code":0,"status":"completed"}}'
+    )
+    plain = cli.highlight_stream_line(line, color=False)
+    colored = cli.highlight_stream_line(line, color=True)
+    assert "COMMAND COMPLETED status=completed exit=0" in plain
+    assert "command:\n" in plain
+    assert "+added" in plain
+    assert "\x1b[" in colored

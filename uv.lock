@@ -92,6 +92,9 @@ wheels = [
 name = "swarm-harness"
 version = "0.0.1"
 source = { editable = "." }
+dependencies = [
+    { name = "pygments" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -101,6 +104,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pygments", specifier = ">=2.19" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]

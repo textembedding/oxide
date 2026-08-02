@@ -5,9 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "swarm-harness"
 version = "0.0.1"
-description = "Clean-room swarm harness and disposable SQLite journal prototype"
+description = "Native macOS swarm harness and disposable SQLite journal"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["Pygments>=2.19"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]

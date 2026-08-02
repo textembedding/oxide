@@ -1,16 +1,22 @@
-"""Native macOS command line for running and observing the clean-room harness."""
+"""Native macOS command line for running and observing the swarm harness."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+from pygments import highlight as pygments_highlight
+from pygments.formatters import TerminalFormatter
+from pygments.lexers import get_lexer_by_name, guess_lexer
+from pygments.util import ClassNotFound
 
 from .controller import Controller, ControllerError, load_stage
 from .journal_client import JournalClient
@@ -20,6 +26,17 @@ from .worker import Worker
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / ".swarm" / "runs"
+ANSI = {
+    "reset": "\033[0m",
+    "dim": "\033[2m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+}
+TIMESTAMP = re.compile(r"^(\[\d{2}:\d{2}:\d{2}\]) (.*)$")
 
 
 def _run_dir(workload: str) -> Path:
@@ -90,6 +107,153 @@ def _wait_socket(path: Path, timeout: float = 30.0) -> None:
         if time.monotonic() >= deadline:
             raise ControllerError(f"journal socket did not appear: {path}")
         time.sleep(0.1)
+
+
+def _paint(text: str, color: str, enabled: bool) -> str:
+    return f"{ANSI[color]}{text}{ANSI['reset']}" if enabled else text
+
+
+def _style(text: str, code: str, enabled: bool) -> str:
+    return f"\033[{code}m{text}\033[0m" if enabled else text
+
+
+def _safe(value: object) -> str:
+    text = str(value)
+    return "".join(
+        character
+        if character in "\n\t" or ord(character) >= 32 and ord(character) != 127
+        else f"\\x{ord(character):02x}"
+        for character in text
+    )
+
+
+def _indent(value: str) -> str:
+    return "\n".join(f"  {line}" for line in value.splitlines())
+
+
+def _code(value: object, language: str, color: bool) -> str:
+    safe = _safe(value).rstrip("\n")
+    if not color or not safe:
+        return safe
+    try:
+        lexer = get_lexer_by_name(language) if language else guess_lexer(safe)
+        rendered = pygments_highlight(safe, lexer, TerminalFormatter())
+        return rendered.removesuffix("\n")
+    except ClassNotFound:
+        return safe
+
+
+def _pretty(value: object, color: bool) -> str:
+    if isinstance(value, str):
+        return _safe(value)
+    rendered = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    return _code(rendered, "json", color)
+
+
+def _status_color(status: object) -> str:
+    normalized = str(status).casefold()
+    if normalized in {"completed", "success", "succeeded"}:
+        return "32"
+    if normalized in {"failed", "error", "cancelled"}:
+        return "31"
+    return "33"
+
+
+def _render_item(phase: str, item: dict, color: bool) -> str:
+    kind = str(item.get("type", "item"))
+    if kind in {"reasoning", "agent_message"}:
+        label = "REASONING" if kind == "reasoning" else "AGENT"
+        label_color = "1;35" if kind == "reasoning" else "1;32"
+        text = item.get("text", item.get("content", ""))
+        return f"{_style(label, label_color, color)} [{_style(phase, '2', color)}]\n{_indent(_code(text, 'markdown', color))}"
+    if kind in {"command_execution", "command"}:
+        command = item.get("command", item.get("cmd", ""))
+        output = item.get("aggregated_output", item.get("output", item.get("result", "")))
+        status, exit_code = item.get("status", ""), item.get("exit_code")
+        heading = [_style("COMMAND", "1;36", color), _style(phase, "2", color)]
+        if status:
+            heading.append(_style(f"status={_safe(status)}", _status_color(status), color))
+        if exit_code is not None:
+            heading.append(_style(f"exit={_safe(exit_code)}", "32" if exit_code == 0 else "31", color))
+        parts = [" ".join(heading), f"{_style('command', '1;34', color)}:\n{_indent(_code(command, 'bash', color))}"]
+        if output:
+            language = "diff" if "git diff" in str(command) else ""
+            parts.append(f"{_style('output', '1;34', color)}:\n{_indent(_code(output, language, color))}")
+        return "\n".join(parts)
+    if kind in {"mcp_tool_call", "tool_call"}:
+        call = f"{item.get('server', '')}.{item.get('tool', item.get('name', ''))}".strip(".")
+        heading = f"{_style('TOOL', '1;36', color)} {_style(phase, '2', color)} {_style(call, '1;34', color)}"
+        parts = [heading, f"{_style('input', '1;34', color)}:\n{_indent(_pretty(item.get('arguments', item.get('input', '')), color))}"]
+        result = item.get("result", item.get("output"))
+        if result not in (None, "", {}, []):
+            parts.append(f"{_style('output', '1;34', color)}:\n{_indent(_pretty(result, color))}")
+        return "\n".join(parts)
+    if kind == "file_change":
+        heading = f"{_style('FILES', '1;36', color)} {_style(phase, '2', color)}"
+        changes = [
+            f"  {_style(_safe(change.get('kind', 'change')), '33', color)} {_style(_safe(change.get('path', '')), '1;36', color)}"
+            for change in item.get("changes", [])
+            if isinstance(change, dict)
+        ]
+        return "\n".join([heading, *changes])
+    return f"{_style('ITEM', '1;35', color)} {_style(phase, '2', color)} type={_style(kind, '1;34', color)}\n{_indent(_pretty(item, color))}"
+
+
+def _render_event(event: dict, color: bool) -> str:
+    event_type = event.get("type")
+    if event_type == "thread.started":
+        return f"{_style('THREAD START', '1;36', color)} {_style(_safe(event.get('thread_id', '')), '1;33', color)}"
+    if event_type == "turn.started":
+        return _style("TURN START", "1;36", color)
+    if event_type == "turn.completed":
+        return _style("TURN COMPLETE", "1;32", color)
+    if event_type in {"turn.failed", "error"}:
+        detail = event.get("error", event.get("message", event))
+        return f"{_style(str(event_type).upper(), '1;31', color)}\n{_indent(_pretty(detail, color))}"
+    if event_type in {"item.started", "item.completed", "item.updated"}:
+        item = event.get("item")
+        if isinstance(item, dict):
+            return _render_item(str(event_type).split(".", 1)[1].upper(), item, color)
+    return f"{_style('EVENT', '1;35', color)} {_style(_safe(event_type or 'unknown'), '1;34', color)}\n{_indent(_pretty(event, color))}"
+
+
+def highlight_stream_line(line: str, *, color: bool, raw: bool = False) -> str:
+    """Highlight one persisted stream line without changing its plain-text bytes."""
+
+    if raw:
+        return line
+    match = TIMESTAMP.match(line)
+    timestamp, body = (match.group(1), match.group(2)) if match else ("", line)
+    prefix = _paint(timestamp, "dim", color) + (" " if timestamp else "")
+    if body.startswith("{"):
+        try:
+            event = json.loads(body)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(event, dict):
+                rendered = _render_event(event, color)
+                return prefix + rendered.replace("\n", "\n" + " " * (len(timestamp) + 1))
+    lowered = body.casefold()
+    if "complete" in lowered or "accepted " in lowered or "submitted " in lowered:
+        selected = "green"
+    elif "failed" in lowered or "rejected " in lowered or "error" in lowered:
+        selected = "red"
+    elif "warn" in lowered:
+        selected = "yellow"
+    elif "claimed " in lowered or "prepared " in lowered or "launched " in lowered:
+        selected = "blue"
+    else:
+        selected = "reset"
+    return prefix + _paint(body, selected, color) if selected != "reset" else prefix + body
+
+
+def _observer_color(mode: str) -> bool:
+    if mode == "always":
+        return True
+    if mode == "never" or "NO_COLOR" in os.environ:
+        return False
+    return sys.stdout.isatty()
 
 
 def command_run(arguments: argparse.Namespace) -> int:
@@ -196,6 +360,16 @@ def command_observe(arguments: argparse.Namespace) -> int:
     if arguments.slot not in allowed:
         raise ControllerError(f"unknown slot {arguments.slot!r}; choose one of {sorted(allowed)}")
     path = Path(config["run_dir"]) / "logs" / f"{arguments.slot}.log"
+    color = _observer_color(getattr(arguments, "color", "auto"))
+
+    def emit(line: str) -> None:
+        print(
+            highlight_stream_line(
+                line.rstrip("\n"), color=color, raw=getattr(arguments, "raw", False)
+            ),
+            flush=True,
+        )
+
     while not path.exists():
         if arguments.no_follow:
             raise ControllerError(f"slot log has not started: {path}")
@@ -204,7 +378,7 @@ def command_observe(arguments: argparse.Namespace) -> int:
         while True:
             line = stream.readline()
             if line:
-                print(line, end="", flush=True)
+                emit(line)
                 continue
             if arguments.no_follow:
                 return 0
@@ -218,7 +392,8 @@ def command_observe(arguments: argparse.Namespace) -> int:
                 time.sleep(0.2)
                 remainder = stream.read()
                 if remainder:
-                    print(remainder, end="", flush=True)
+                    for line in remainder.splitlines():
+                        emit(line)
                 return 0 if state == "complete" else 1
             time.sleep(0.2)
 
@@ -255,6 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--workload", required=True)
     observe.add_argument("--slot", required=True)
     observe.add_argument("--no-follow", action="store_true")
+    observe.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    observe.add_argument("--raw", action="store_true")
     observe.set_defaults(handler=command_observe)
     status = commands.add_parser("status")
     status.add_argument("--workload", required=True)
