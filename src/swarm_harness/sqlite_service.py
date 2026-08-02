@@ -92,6 +92,13 @@ class SQLiteJournal:
             (run_id, event_type, task_id, _json(payload), self.clock()),
         )
 
+    @staticmethod
+    def _run_state(connection: sqlite3.Connection, run_id: str) -> str:
+        row = connection.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            raise JournalError("missing_run", "run does not exist")
+        return str(row[0])
+
     def dispatch(self, operation: str, arguments: dict[str, Any]) -> Any:
         method = getattr(self, f"op_{operation}", None)
         if method is None or not callable(method):
@@ -185,6 +192,8 @@ class SQLiteJournal:
         run_id = require_string(values, "run_id")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self._run_state(connection, run_id) != "running":
+                return []
             self._expire(connection, run_id)
             rows = connection.execute(
                 """
@@ -224,6 +233,9 @@ class SQLiteJournal:
             raise ProtocolError("lease_seconds must be positive")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            run_state = self._run_state(connection, run_id)
+            if run_state != "running":
+                return {"status": run_state}
             self._expire(connection, run_id)
             row = connection.execute(
                 """
@@ -360,7 +372,7 @@ class SQLiteJournal:
     def op_set_run_state(self, values: dict[str, Any]) -> dict:
         run_id = require_string(values, "run_id")
         state = require_string(values, "state")
-        if state not in {"running", "failed", "complete", "stopped"}:
+        if state not in {"running", "paused", "failed", "complete", "stopped"}:
             raise ProtocolError("invalid run state")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -368,6 +380,50 @@ class SQLiteJournal:
                 raise JournalError("missing_run", "run does not exist")
             self._event(connection, run_id, f"run_{state}")
         return {"state": state}
+
+    def op_pause_run(self, values: dict[str, Any]) -> dict:
+        run_id = require_string(values, "run_id")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = self._run_state(connection, run_id)
+            if state in {"complete", "failed"}:
+                raise JournalError("invalid_transition", f"cannot pause a {state} run")
+            claims = connection.execute(
+                "SELECT claim_id,task_id,worker_id FROM claims WHERE run_id=? AND state='active'",
+                (run_id,),
+            ).fetchall()
+            for claim in claims:
+                connection.execute(
+                    "UPDATE claims SET state='paused' WHERE claim_id=?",
+                    (claim["claim_id"],),
+                )
+                connection.execute(
+                    "UPDATE tasks SET state='pending' WHERE run_id=? AND task_id=? AND state='claimed'",
+                    (run_id, claim["task_id"]),
+                )
+                self._event(
+                    connection,
+                    run_id,
+                    "task_paused",
+                    claim["task_id"],
+                    worker_id=claim["worker_id"],
+                )
+            if state != "paused":
+                connection.execute("UPDATE runs SET state='paused' WHERE run_id=?", (run_id,))
+                self._event(connection, run_id, "run_paused", claim_count=len(claims))
+        return {"state": "paused", "paused_claims": len(claims)}
+
+    def op_resume_run(self, values: dict[str, Any]) -> dict:
+        run_id = require_string(values, "run_id")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = self._run_state(connection, run_id)
+            if state in {"complete", "failed"}:
+                raise JournalError("invalid_transition", f"cannot resume a {state} run")
+            if state != "running":
+                connection.execute("UPDATE runs SET state='running' WHERE run_id=?", (run_id,))
+                self._event(connection, run_id, "run_resumed", previous_state=state)
+        return {"state": "running"}
 
     def op_run_status(self, values: dict[str, Any]) -> dict:
         run_id = require_string(values, "run_id")

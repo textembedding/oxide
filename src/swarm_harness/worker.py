@@ -169,8 +169,8 @@ class Worker:
     def run(self, idle_seconds: float = 1.0) -> str:
         while True:
             state = self.run_once()
-            if state == "complete":
-                self.log(f"worker {self.worker_id}: run complete")
+            if state in {"complete", "paused", "failed", "stopped"}:
+                self.log(f"worker {self.worker_id}: run {state}")
                 return state
             if state == "idle":
                 status = self.client.run_status(self.run_id)["run"]["state"]

@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -28,7 +29,8 @@ from .live_observer import (
     ObserverSlot,
 )
 from .live_observer import _render_line as render_observer_line
-from .sqlite_service import serve_in_thread
+from .protocol import JournalError
+from .sqlite_service import SQLiteJournal, serve_in_thread
 from .worker import Worker
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -406,23 +408,118 @@ def _observer_color(mode: str) -> bool:
     return sys.stdout.isatty()
 
 
+def _process_table() -> list[tuple[int, str]]:
+    completed = subprocess.run(
+        ["ps", "-axo", "pid=,command=", "-ww"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise ControllerError(completed.stderr.strip() or "could not inspect processes")
+    rows: list[tuple[int, str]] = []
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) == 2 and fields[0].isdigit():
+            rows.append((int(fields[0]), fields[1]))
+    return rows
+
+
+def _run_processes(config: dict) -> list[tuple[int, str]]:
+    workload = str(config["workload"])
+    swarmctl = str(ROOT / "swarmctl")
+    run_worktrees = str(Path(config["run_dir"]).resolve() / "worktrees")
+    rows: list[tuple[int, str]] = []
+    for pid, command in _process_table():
+        if swarmctl in command and f"harness worker --workload {workload}" in command:
+            rows.append((pid, "worker"))
+        elif swarmctl in command and f"harness orchestrate --workload {workload}" in command:
+            rows.append((pid, "orchestrator"))
+        elif "codex exec -C " in command and run_worktrees in command:
+            rows.append((pid, "codex"))
+    return rows
+
+
+def _signal_process(pid: int, kind: str, signal_number: int) -> None:
+    try:
+        if kind == "codex":
+            os.killpg(pid, signal_number)
+        else:
+            os.kill(pid, signal_number)
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        raise ControllerError(f"cannot signal {kind} process {pid}") from error
+
+
+def _wait_for_process_drain(config: dict, timeout: float) -> list[tuple[int, str]]:
+    deadline = time.monotonic() + timeout
+    while True:
+        rows = _run_processes(config)
+        if not rows or time.monotonic() >= deadline:
+            return rows
+        time.sleep(0.1)
+
+
+def _stop_run_processes(config: dict) -> None:
+    rows = _run_processes(config)
+    for kind in ("worker", "orchestrator"):
+        for pid, process_kind in rows:
+            if process_kind == kind:
+                _signal_process(pid, kind, signal.SIGINT)
+    remaining = _wait_for_process_drain(config, 10)
+    for pid, kind in remaining:
+        _signal_process(pid, kind, signal.SIGTERM)
+    remaining = _wait_for_process_drain(config, 5)
+    for pid, kind in remaining:
+        _signal_process(pid, kind, signal.SIGKILL)
+    remaining = _wait_for_process_drain(config, 5)
+    if remaining:
+        detail = ", ".join(f"{kind}:{pid}" for pid, kind in remaining)
+        raise ControllerError(f"run processes did not stop: {detail}")
+
+
+def _start_run(config: dict, *, foreground: bool) -> int:
+    workload = str(config["workload"])
+    argv = [str(ROOT / "swarmctl"), "harness", "orchestrate", "--workload", workload]
+    if foreground:
+        return command_orchestrate(argparse.Namespace(workload=workload))
+    _launch_terminal(argv)
+    print(f"Started {workload} in a native Terminal window.")
+    print(f"Observe: ./swarmctl harness observe --workload {workload} --slot orchestrator")
+    print(f"Worker:  ./swarmctl harness observe --workload {workload} --slot worker-0")
+    print(f"Queue:   ./swarmctl harness observe-queue --workload {workload}")
+    return 0
+
+
+def _resume_run(workload: str, *, foreground: bool) -> int:
+    config = _load_config(workload)
+    processes = _run_processes(config)
+    if processes:
+        raise ControllerError(f"{workload} already has live processes; pause it first")
+    try:
+        _offline_journal(config).op_resume_run({"run_id": config["run_id"]})
+    except JournalError as error:
+        raise ControllerError(str(error)) from error
+    return _start_run(config, foreground=foreground)
+
+
 def command_run(arguments: argparse.Namespace) -> int:
+    if arguments.resume:
+        return _resume_run(arguments.workload, foreground=arguments.foreground)
     stage = load_stage(_stage_path(arguments.workload))
     target = Path(arguments.target).expanduser().resolve()
     run_dir = _run_dir(arguments.workload)
     config_path = _config_path(arguments.workload)
-    if config_path.exists() and not arguments.resume:
+    if config_path.exists():
         raise ControllerError(
-            f"run already exists at {run_dir}; use --resume or choose another workload"
+            f"run already exists at {run_dir}; use resume or reset the workload"
         )
-    run_id = (
-        _load_config(arguments.workload)["run_id"]
-        if arguments.resume and config_path.exists()
-        else f"{arguments.workload}-{time.strftime('%Y%m%d-%H%M%S')}"
-    )
+    if arguments.workers < 1:
+        raise ControllerError("workers must be positive")
     config = {
         "schema_version": 1,
-        "run_id": run_id,
+        "run_id": f"{arguments.workload}-{time.strftime('%Y%m%d-%H%M%S')}",
         "workload": arguments.workload,
         "stage_path": str(_stage_path(arguments.workload)),
         "target_repo": str(target),
@@ -434,15 +531,7 @@ def command_run(arguments: argparse.Namespace) -> int:
         "stage": stage["stage"],
     }
     _atomic_json(config_path, config)
-    argv = [str(ROOT / "swarmctl"), "harness", "orchestrate", "--workload", arguments.workload]
-    if arguments.foreground:
-        return command_orchestrate(argparse.Namespace(workload=arguments.workload))
-    _launch_terminal(argv)
-    print(f"Started {arguments.workload} in a native Terminal window.")
-    print(f"Observe: ./swarmctl harness observe --workload {arguments.workload} --slot orchestrator")
-    print(f"Worker:  ./swarmctl harness observe --workload {arguments.workload} --slot worker-0")
-    print(f"Queue:   ./swarmctl harness observe-queue --workload {arguments.workload}")
-    return 0
+    return _start_run(config, foreground=arguments.foreground)
 
 
 def command_orchestrate(arguments: argparse.Namespace) -> int:
@@ -463,6 +552,9 @@ def command_orchestrate(arguments: argparse.Namespace) -> int:
     )
     try:
         controller.seed()
+        initial_state = client.run_status(config["run_id"])["run"]["state"]
+        if initial_state != "running":
+            return 0 if initial_state in {"paused", "stopped", "complete"} else 1
         controller.prepare_runnable()
         for index in range(int(config["workers"])):
             slot = f"worker-{index}"
@@ -479,8 +571,8 @@ def command_orchestrate(arguments: argparse.Namespace) -> int:
             log(f"launched {slot}")
         while True:
             state = controller.tick()
-            if state in {"complete", "failed", "stopped"}:
-                return 0 if state == "complete" else 1
+            if state in {"complete", "paused", "failed", "stopped"}:
+                return 0 if state in {"complete", "paused", "stopped"} else 1
             time.sleep(0.5)
     finally:
         server.shutdown()
@@ -502,7 +594,122 @@ def command_worker(arguments: argparse.Namespace) -> int:
     )
     state = worker.run()
     log(f"slot stopped: {state}")
-    return 0 if state == "complete" else 1
+    return 0 if state in {"complete", "paused", "stopped"} else 1
+
+
+def _offline_journal(config: dict) -> SQLiteJournal:
+    database = Path(config["database"])
+    if not database.is_file():
+        raise ControllerError(f"run journal is missing: {database}")
+    return SQLiteJournal(database)
+
+
+def _pause_run(config: dict) -> dict:
+    state = _persisted_run_state(config)
+    if state in {"complete", "failed"}:
+        _stop_run_processes(config)
+        return {"state": state, "paused_claims": 0}
+    journal = _offline_journal(config)
+    try:
+        before_stop = journal.op_pause_run({"run_id": config["run_id"]})
+        _stop_run_processes(config)
+        after_stop = journal.op_pause_run({"run_id": config["run_id"]})
+        return {
+            "state": after_stop["state"],
+            "paused_claims": before_stop["paused_claims"] + after_stop["paused_claims"],
+        }
+    except JournalError as error:
+        raise ControllerError(str(error)) from error
+
+
+def command_pause(arguments: argparse.Namespace) -> int:
+    config = _load_config(arguments.workload)
+    result = _pause_run(config)
+    print(
+        f"{arguments.workload}: {result['state']} "
+        f"({result['paused_claims']} active claim(s) fenced)"
+    )
+    return 0
+
+
+def command_resume(arguments: argparse.Namespace) -> int:
+    return _resume_run(arguments.workload, foreground=arguments.foreground)
+
+
+def _git_run(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise ControllerError(completed.stderr.strip() or "Git command failed")
+    return completed
+
+
+def _remove_run_worktrees(config: dict) -> int:
+    repository = Path(config["target_repo"]).resolve()
+    run_dir = Path(config["run_dir"]).resolve()
+    removed = 0
+    rows = _git_run(repository, "worktree", "list", "--porcelain").stdout.splitlines()
+    for line in rows:
+        if not line.startswith("worktree "):
+            continue
+        worktree = Path(line.removeprefix("worktree ")).resolve()
+        try:
+            relative = worktree.relative_to(run_dir)
+        except ValueError:
+            continue
+        if not relative.parts or relative.parts[0] not in {"integration", "worktrees"}:
+            raise ControllerError(f"refusing to reset unexpected worktree: {worktree}")
+        _git_run(repository, "worktree", "remove", "--force", str(worktree))
+        removed += 1
+    _git_run(repository, "worktree", "prune")
+    return removed
+
+
+def _delete_run_branches(config: dict) -> int:
+    repository = Path(config["target_repo"]).resolve()
+    run_slug = re.sub(r"[^a-zA-Z0-9]+", "-", str(config["run_id"])).strip("-").lower()
+    prefix = f"refs/heads/codex/swarm-{run_slug}/"
+    output = _git_run(
+        repository,
+        "for-each-ref",
+        "--format=%(refname)",
+        prefix,
+    ).stdout
+    refs = [ref for ref in output.splitlines() if ref]
+    for ref in refs:
+        if not ref.startswith(prefix):
+            raise ControllerError(f"refusing to reset unexpected branch: {ref}")
+        _git_run(repository, "update-ref", "-d", ref)
+    return len(refs)
+
+
+def command_reset(arguments: argparse.Namespace) -> int:
+    config = _load_config(arguments.workload)
+    configured_run_dir = Path(config["run_dir"])
+    expected_run_dir = _run_dir(arguments.workload)
+    if (
+        configured_run_dir.is_symlink()
+        or configured_run_dir.resolve() != expected_run_dir.resolve()
+    ):
+        raise ControllerError("run directory does not match the selected workload")
+    _pause_run(config)
+    worktree_count = _remove_run_worktrees(config)
+    branch_count = _delete_run_branches(config)
+    archive_root = RUNS.parent / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    destination = archive_root / f"{arguments.workload}-{config['run_id']}"
+    if destination.exists():
+        destination = archive_root / (
+            f"{arguments.workload}-{config['run_id']}-{time.time_ns()}"
+        )
+    configured_run_dir.replace(destination)
+    print(f"Reset {arguments.workload}; archived prior state at {destination}")
+    print(f"Removed {worktree_count} worktree(s) and {branch_count} run branch(es).")
+    return 0
 
 
 def command_observe(arguments: argparse.Namespace) -> int:
@@ -525,7 +732,7 @@ def command_observe(arguments: argparse.Namespace) -> int:
                     print(line, end="", flush=True)
                     continue
                 state = _persisted_run_state(config)
-                if no_follow or state in {"complete", "failed", "stopped"}:
+                if no_follow or state in {"complete", "paused", "failed", "stopped"}:
                     return 0 if state != "failed" else 1
                 time.sleep(0.2)
 
@@ -578,7 +785,12 @@ def command_observe(arguments: argparse.Namespace) -> int:
                 )
                 if len(rows) >= limit:
                     break
-        if not rows and _persisted_run_state(config) in {"complete", "failed", "stopped"}:
+        if not rows and _persisted_run_state(config) in {
+            "complete",
+            "paused",
+            "failed",
+            "stopped",
+        }:
             stop.set()
         return rows
 
@@ -586,6 +798,8 @@ def command_observe(arguments: argparse.Namespace) -> int:
         state = _persisted_run_state(config)
         if state == "complete":
             return "COMPLETE"
+        if state == "paused":
+            return "PAUSED"
         if state in {"failed", "stopped"}:
             return "FAILED"
         return "ACTIVE" if path.exists() else "WAITING"
@@ -627,8 +841,8 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
             if no_follow:
                 return 0
             state = str(snapshot["state"]) if snapshot is not None else "running"
-            if state in {"complete", "failed", "stopped"}:
-                return 0 if state == "complete" else 1
+            if state in {"complete", "paused", "failed", "stopped"}:
+                return 0 if state in {"complete", "paused", "stopped"} else 1
             time.sleep(1)
     finally:
         if cursor_hidden:
@@ -638,8 +852,14 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
 
 def command_status(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
-    _wait_socket(Path(config["socket"]), timeout=2)
-    status = JournalClient(config["socket"]).run_status(config["run_id"])
+    socket_path = Path(config["socket"])
+    if socket_path.exists():
+        try:
+            status = JournalClient(socket_path, timeout=0.5).run_status(config["run_id"])
+        except OSError:
+            status = _offline_journal(config).op_run_status({"run_id": config["run_id"]})
+    else:
+        status = _offline_journal(config).op_run_status({"run_id": config["run_id"]})
     print(json.dumps(status, indent=2, sort_keys=True))
     return 0
 
@@ -657,6 +877,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--foreground", action="store_true")
     run.add_argument("--resume", action="store_true")
     run.set_defaults(handler=command_run)
+    pause = commands.add_parser("pause")
+    pause.add_argument("--workload", required=True)
+    pause.set_defaults(handler=command_pause)
+    resume = commands.add_parser("resume")
+    resume.add_argument("--workload", required=True)
+    resume.add_argument("--foreground", action="store_true")
+    resume.set_defaults(handler=command_resume)
+    reset = commands.add_parser("reset")
+    reset.add_argument("--workload", required=True)
+    reset.set_defaults(handler=command_reset)
     orchestrate = commands.add_parser("orchestrate", help=argparse.SUPPRESS)
     orchestrate.add_argument("--workload", required=True)
     orchestrate.set_defaults(handler=command_orchestrate)
@@ -686,7 +916,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = build_parser().parse_args(argv)
         return int(arguments.handler(arguments))
-    except (ControllerError, OSError, ValueError) as error:
+    except (ControllerError, JournalError, OSError, ValueError) as error:
         print(f"swarmctl: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

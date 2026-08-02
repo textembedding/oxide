@@ -4,11 +4,61 @@ import argparse
 import json
 import re
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 
 from swarm_harness import cli
 from swarm_harness.sqlite_service import SQLiteJournal
+
+
+def git(repository: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+
+
+def create_run_config(runs: Path, target: Path, *, workload: str = "stage0") -> dict:
+    run = runs / workload
+    config = {
+        "schema_version": 1,
+        "run_id": f"{workload}-test",
+        "workload": workload,
+        "run_dir": str(run),
+        "database": str(run / "journal.sqlite3"),
+        "socket": str(run / "journal.sock"),
+        "target_repo": str(target),
+        "workers": 7,
+    }
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps(config), encoding="utf-8")
+    return config
+
+
+def seed_run(config: dict) -> SQLiteJournal:
+    journal = SQLiteJournal(config["database"])
+    journal.op_create_run(
+        {
+            "run_id": config["run_id"],
+            "workload": config["workload"],
+            "target_repo": config["target_repo"],
+            "integration_branch": f"codex/swarm-{config['run_id']}/integration",
+            "integration_worktree": str(Path(config["run_dir"]) / "integration"),
+            "tasks": [
+                {
+                    "id": "S0-01",
+                    "title": "First milestone",
+                    "prompt": "Implement it",
+                    "checks": [],
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+    return journal
 
 
 def test_native_observe_prints_slot_log(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -214,3 +264,93 @@ def test_observe_queue_parser_selects_queue_handler() -> None:
         ["harness", "observe-queue", "--workload", "pilot", "--no-follow"]
     )
     assert arguments.handler is cli.command_observe_queue
+
+
+def test_pause_and_resume_commands_preserve_run_configuration(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    runs = tmp_path / "runs"
+    monkeypatch.setattr(cli, "RUNS", runs)
+    config = create_run_config(runs, tmp_path / "target")
+    journal = seed_run(config)
+    journal.op_prepare_task(
+        {
+            "run_id": config["run_id"],
+            "task_id": "S0-01",
+            "branch": "codex/swarm-stage0-test/s0-01",
+            "worktree_path": str(Path(config["run_dir"]) / "worktrees" / "s0-01"),
+        }
+    )
+    journal.op_claim_task(
+        {"run_id": config["run_id"], "worker_id": "worker-0", "lease_seconds": 60}
+    )
+    monkeypatch.setattr(cli, "_stop_run_processes", lambda _: None)
+
+    assert cli.command_pause(argparse.Namespace(workload="stage0")) == 0
+    paused = journal.op_run_status({"run_id": config["run_id"]})
+    assert paused["run"]["state"] == "paused"
+    assert paused["tasks"][0]["state"] == "pending"
+    assert paused["tasks"][0]["worktree_path"].endswith("/worktrees/s0-01")
+
+    launched: list[tuple[dict, bool]] = []
+    monkeypatch.setattr(cli, "_run_processes", lambda _: [])
+    monkeypatch.setattr(
+        cli,
+        "_start_run",
+        lambda value, *, foreground: launched.append((value, foreground)) or 0,
+    )
+    assert cli.command_resume(argparse.Namespace(workload="stage0", foreground=False)) == 0
+    assert journal.op_run_status({"run_id": config["run_id"]})["run"]["state"] == "running"
+    assert launched == [(config, False)]
+    assert launched[0][0]["workers"] == 7
+    assert "1 active claim(s) fenced" in capsys.readouterr().out
+
+
+def test_reset_removes_only_run_worktrees_and_branches_and_archives_state(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    git(target, "init", "-b", "main")
+    git(target, "config", "user.name", "Harness Test")
+    git(target, "config", "user.email", "harness@example.invalid")
+    (target / "README.md").write_text("target\n", encoding="utf-8")
+    git(target, "add", "README.md")
+    git(target, "commit", "-m", "seed")
+
+    runs = tmp_path / "state" / "runs"
+    monkeypatch.setattr(cli, "RUNS", runs)
+    config = create_run_config(runs, target)
+    seed_run(config)
+    run = Path(config["run_dir"])
+    integration = run / "integration"
+    task = run / "worktrees" / "s0-01"
+    git(target, "worktree", "add", "-b", "codex/swarm-stage0-test/integration", str(integration))
+    git(target, "worktree", "add", "-b", "codex/swarm-stage0-test/s0-01", str(task))
+    git(target, "branch", "unrelated-branch")
+    monkeypatch.setattr(cli, "_stop_run_processes", lambda _: None)
+
+    assert cli.command_reset(argparse.Namespace(workload="stage0")) == 0
+
+    archive = runs.parent / "archive" / "stage0-stage0-test"
+    assert not run.exists()
+    assert (archive / "run.json").is_file()
+    assert "codex/swarm-stage0-test/" not in git(target, "branch", "--list")
+    assert "unrelated-branch" in git(target, "branch", "--list")
+    assert str(run) not in git(target, "worktree", "list", "--porcelain")
+    output = capsys.readouterr().out
+    assert f"archived prior state at {archive}" in output
+    assert "Removed 2 worktree(s) and 2 run branch(es)." in output
+
+
+def test_lifecycle_parser_selects_native_handlers() -> None:
+    cases = {
+        "pause": cli.command_pause,
+        "resume": cli.command_resume,
+        "reset": cli.command_reset,
+    }
+    for command, handler in cases.items():
+        arguments = cli.build_parser().parse_args(
+            ["harness", command, "--workload", "stage0"]
+        )
+        assert arguments.handler is handler

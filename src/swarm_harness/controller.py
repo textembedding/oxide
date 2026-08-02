@@ -246,6 +246,9 @@ class Controller:
         return handled
 
     def tick(self) -> str:
+        current = self.client.run_status(self.run_id)["run"]["state"]
+        if current != "running":
+            return str(current)
         self.adjudicate()
         self.prepare_runnable()
         status = self.client.run_status(self.run_id)
@@ -265,6 +268,6 @@ class Controller:
         self.seed()
         while True:
             state = self.tick()
-            if state in {"complete", "failed", "stopped"}:
+            if state in {"complete", "paused", "failed", "stopped"}:
                 return state
             time.sleep(poll_seconds)

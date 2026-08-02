@@ -12,3 +12,25 @@ Start with:
 
 Use `./swarmctl harness run` to launch an orchestrator and visible worker
 terminals, and `./swarmctl harness observe` to follow any slot.
+
+Lifecycle controls:
+
+```bash
+# Stop workers safely and preserve accepted and in-progress task worktrees.
+./swarmctl harness pause --workload stage0
+
+# Continue the preserved workload with its original target and worker count.
+./swarmctl harness resume --workload stage0
+
+# Stop and archive the workload, then remove only its worktrees and branches.
+./swarmctl harness reset --workload stage0
+
+# Start from scratch after reset.
+./swarmctl harness run \
+  --workload stage0 \
+  --target /Users/cat/Documents/code/memory \
+  --workers 7
+```
+
+`reset` preserves the old journal and logs under `.swarm/archive/` for recovery
+but removes the active run marker, so the next `run` is fresh.

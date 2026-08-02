@@ -173,3 +173,37 @@ def test_dependencies_hold_downstream_until_acceptance(journal) -> None:
     assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == [
         "B"
     ]
+
+
+def test_pause_fences_claim_and_resume_preserves_prepared_worktree(journal) -> None:
+    client, _, _ = journal
+    seed(client)
+    prepare(client)
+    original = client.claim_task("run", "worker-0", 60)
+
+    paused = client.call("pause_run", run_id="run")
+
+    assert paused == {"state": "paused", "paused_claims": 1}
+    status = client.run_status("run")
+    assert status["run"]["state"] == "paused"
+    assert status["tasks"][0]["state"] == "pending"
+    assert status["tasks"][0]["worktree_path"] == "/worktrees/A"
+    assert client.claim_task("run", "worker-1", 60) == {"status": "paused"}
+    with pytest.raises(JournalError, match="stale"):
+        client.submit_result(
+            run_id="run",
+            task_id="A",
+            claim_token=original["claim_token"],
+            outcome="completed",
+            summary="late",
+            commit_sha="a" * 40,
+            blockers=[],
+            proposed_followups=[],
+        )
+
+    assert client.call("resume_run", run_id="run") == {"state": "running"}
+    resumed = client.claim_task("run", "worker-1", 60)
+    assert resumed["status"] == "claimed"
+    assert resumed["task_id"] == "A"
+    assert resumed["worktree_path"] == "/worktrees/A"
+    assert resumed["claim_token"] != original["claim_token"]
