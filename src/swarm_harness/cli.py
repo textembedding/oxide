@@ -7,9 +7,11 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -42,6 +44,7 @@ ANSI = {
     "cyan": "\033[36m",
 }
 TIMESTAMP = re.compile(r"^(\[\d{2}:\d{2}:\d{2}\]) (.*)$")
+QUEUE_MAX_COLUMNS = 40
 
 
 def _run_dir(workload: str) -> Path:
@@ -124,6 +127,153 @@ def _persisted_run_state(config: dict) -> str:
         return str(row[0]) if row else "running"
     except sqlite3.Error:
         return "running"
+
+
+def _queue_snapshot(config: dict) -> dict | None:
+    try:
+        uri = f"file:{Path(config['database']).resolve()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.2) as database:
+            database.row_factory = sqlite3.Row
+            run = database.execute(
+                "SELECT run_id,state FROM runs WHERE run_id=?", (config["run_id"],)
+            ).fetchone()
+            if run is None:
+                return None
+            tasks = database.execute(
+                """
+                SELECT t.task_id,t.title,t.state,t.branch,t.accepted_commit,t.last_error,
+                  c.worker_id,c.claimed_at,c.expires_at,c.state AS claim_state,
+                  c.submission_json,
+                  (SELECT COUNT(*) FROM dependencies d JOIN tasks parent
+                     ON parent.run_id=d.run_id AND parent.task_id=d.dependency_id
+                   WHERE d.run_id=t.run_id AND d.task_id=t.task_id
+                     AND parent.state!='accepted') AS blocked_count
+                FROM tasks t
+                LEFT JOIN claims c ON c.claim_id=(
+                  SELECT latest.claim_id FROM claims latest
+                  WHERE latest.run_id=t.run_id AND latest.task_id=t.task_id
+                  ORDER BY latest.claim_id DESC LIMIT 1
+                )
+                WHERE t.run_id=? ORDER BY t.ordinal
+                """,
+                (config["run_id"],),
+            ).fetchall()
+        return {
+            "run_id": run["run_id"],
+            "state": run["state"],
+            "tasks": [dict(task) for task in tasks],
+        }
+    except sqlite3.Error:
+        return None
+
+
+def _queue_task_state(task: dict, now: float) -> str:
+    state = str(task["state"])
+    if state == "accepted":
+        return "ACCEPTED"
+    if state == "submitted":
+        return "VERIFYING"
+    if state == "claimed":
+        expires = task.get("expires_at")
+        if (
+            task.get("claim_state") == "active"
+            and expires is not None
+            and float(expires) <= now
+        ):
+            return "EXPIRED"
+        return "WORKING"
+    if state == "pending" and task.get("last_error"):
+        return "RETRY"
+    if state == "pending" and int(task.get("blocked_count") or 0):
+        return "BLOCKED"
+    if state == "pending":
+        return "READY"
+    return state.upper()
+
+
+def _queue_duration(seconds: float) -> str:
+    remaining = max(0, int(seconds))
+    hours, remaining = divmod(remaining, 3600)
+    minutes, seconds = divmod(remaining, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {seconds:02d}s"
+
+
+def _queue_commit(task: dict) -> str | None:
+    commit = task.get("accepted_commit")
+    if commit:
+        return str(commit)[:12]
+    raw = task.get("submission_json")
+    if raw:
+        try:
+            value = json.loads(str(raw))
+        except json.JSONDecodeError:
+            return None
+        commit = value.get("commit_sha") if isinstance(value, dict) else None
+        if commit:
+            return str(commit)[:12]
+    return None
+
+
+def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str:
+    width = max(12, min(QUEUE_MAX_COLUMNS, width))
+    now = time.time()
+    lines: list[str] = []
+
+    def add(value: object = "", code: str | None = None, prefix: str = "") -> None:
+        wrapped = textwrap.wrap(
+            str(value),
+            width=width,
+            initial_indent=prefix,
+            subsequent_indent="  " if prefix else "",
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""]
+        lines.extend(_style(line, code, color) if code else line for line in wrapped)
+
+    add("SWARM QUEUE", "1;36")
+    if snapshot is None:
+        add("WAITING FOR JOURNAL", "1;33")
+        return "\n".join(lines) + "\n"
+    add(snapshot["run_id"], "2")
+    run_state = str(snapshot["state"]).upper()
+    add(run_state, "1;32" if run_state == "COMPLETE" else "1;35")
+    add(time.strftime("UPDATED %H:%M:%S"), "2")
+    add("-" * width, "2;36")
+    counts: dict[str, int] = {}
+    for task in snapshot["tasks"]:
+        state = _queue_task_state(task, now)
+        counts[state] = counts.get(state, 0) + 1
+        state_color = {
+            "ACCEPTED": "1;32",
+            "VERIFYING": "1;33",
+            "WORKING": "1;35",
+            "READY": "1;36",
+            "BLOCKED": "2;37",
+            "RETRY": "1;31",
+            "EXPIRED": "1;31",
+        }.get(state, "1;37")
+        add(state, state_color)
+        add(task["task_id"], "1;37")
+        if state in {"WORKING", "EXPIRED"}:
+            add(task.get("worker_id") or "unassigned", prefix="owner: ")
+            expires = task.get("expires_at")
+            lease = "unknown" if expires is None else _queue_duration(float(expires) - now)
+            add("expired" if state == "EXPIRED" else lease, prefix="lease: ")
+        if state == "BLOCKED":
+            add(str(int(task["blocked_count"])), prefix="waiting on: ")
+        commit = _queue_commit(task)
+        if commit and state in {"VERIFYING", "ACCEPTED"}:
+            add(commit, prefix="commit: ")
+        if state == "RETRY":
+            add(task.get("last_error") or "rejected", prefix="error: ")
+        add("-" * width, "2")
+    add("SUMMARY", "1;36")
+    for state in ("WORKING", "VERIFYING", "READY", "BLOCKED", "RETRY", "EXPIRED", "ACCEPTED"):
+        if counts.get(state):
+            add(str(counts[state]), prefix=f"{state.lower()}: ")
+    return "\n".join(lines) + "\n"
 
 
 def _paint(text: str, color: str, enabled: bool) -> str:
@@ -291,6 +441,7 @@ def command_run(arguments: argparse.Namespace) -> int:
     print(f"Started {arguments.workload} in a native Terminal window.")
     print(f"Observe: ./swarmctl harness observe --workload {arguments.workload} --slot orchestrator")
     print(f"Worker:  ./swarmctl harness observe --workload {arguments.workload} --slot worker-0")
+    print(f"Queue:   ./swarmctl harness observe-queue --workload {arguments.workload}")
     return 0
 
 
@@ -448,6 +599,43 @@ def command_observe(arguments: argparse.Namespace) -> int:
     return 1 if _persisted_run_state(config) == "failed" else 0
 
 
+def command_observe_queue(arguments: argparse.Namespace) -> int:
+    config = _load_config(arguments.workload)
+    color = _observer_color(getattr(arguments, "color", "auto"))
+    no_follow = bool(getattr(arguments, "no_follow", False))
+    terminal_width = shutil.get_terminal_size(fallback=(QUEUE_MAX_COLUMNS, 24)).columns
+    width = max(20, min(QUEUE_MAX_COLUMNS, terminal_width))
+    interactive = sys.stdout.isatty() and not no_follow
+    cursor_hidden = False
+    last_rendered: str | None = None
+
+    try:
+        while True:
+            snapshot = _queue_snapshot(config)
+            rendered = _render_queue(snapshot, color=color, width=width)
+            if interactive:
+                if not cursor_hidden:
+                    sys.stdout.write("\033[?25l")
+                    cursor_hidden = True
+                sys.stdout.write("\033[H\033[2J" + rendered)
+                sys.stdout.flush()
+            elif rendered != last_rendered:
+                sys.stdout.write(rendered)
+                sys.stdout.flush()
+            last_rendered = rendered
+
+            if no_follow:
+                return 0
+            state = str(snapshot["state"]) if snapshot is not None else "running"
+            if state in {"complete", "failed", "stopped"}:
+                return 0 if state == "complete" else 1
+            time.sleep(1)
+    finally:
+        if cursor_hidden:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+
+
 def command_status(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     _wait_socket(Path(config["socket"]), timeout=2)
@@ -483,6 +671,11 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     observe.add_argument("--raw", action="store_true")
     observe.set_defaults(handler=command_observe)
+    queue = commands.add_parser("observe-queue")
+    queue.add_argument("--workload", required=True)
+    queue.add_argument("--no-follow", action="store_true")
+    queue.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    queue.set_defaults(handler=command_observe_queue)
     status = commands.add_parser("status")
     status.add_argument("--workload", required=True)
     status.set_defaults(handler=command_status)
