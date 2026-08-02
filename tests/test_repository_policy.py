@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from swarm_harness.controller import load_stage
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "swarm_harness"
 TESTS = ROOT / "tests"
@@ -76,9 +78,59 @@ def test_non_goals_remain_explicit() -> None:
 
 
 def test_stage_zero_is_enabled_for_pilot() -> None:
-    text = (ROOT / "stages" / "stage0.yaml").read_text(encoding="utf-8")
-    assert "enabled: true" in text
-    assert "S0-SEAL" in text
+    path = ROOT / "stages" / "stage0.yaml"
+    text = path.read_text(encoding="utf-8")
+    stage = load_stage(path)
+    expected = [
+        "S0-STABLE-SEAMS",
+        "S0-PROSPECTIVE-PROFILE",
+        "S0-STORAGE-FEASIBILITY",
+        "S0-EXECUTOR-FEASIBILITY",
+        "S0-MODEL-FEASIBILITY",
+        "S0-STATE-FEASIBILITY",
+        "S0-RENDER-FEASIBILITY",
+        "S0-REFERENCE-PROFILE",
+        "S0-RESEARCH-BASIS",
+        "S0-API-LEDGER-VERIFIERS",
+        "S0-BLOCK-LANE-VERIFIERS",
+        "S0-POLICY-SEARCH-VERIFIERS",
+        "S0-PRESENTATION-VERIFIERS",
+        "S0-COMPOSITION-VERIFIERS",
+        "S0-RESEARCH-CORE-VERIFIERS",
+        "S0-RESEARCH-DECISION-VERIFIERS",
+    ]
+    identifiers = [task["id"] for task in stage["tasks"]]
+    assert stage["enabled"] is True
+    assert identifiers == expected
+    assert "S0-SEAL" not in text
+    assert "verify_stage0_demo" not in text
+    assert "completion.json" not in text
+
+    seen: set[str] = set()
+    dependencies: dict[str, list[str]] = {}
+    for task in stage["tasks"]:
+        dependencies[task["id"]] = task["depends_on"]
+        assert set(task["depends_on"]) <= seen
+        seen.add(task["id"])
+
+    closure: set[str] = set()
+    pending = list(dependencies["S0-RESEARCH-DECISION-VERIFIERS"])
+    while pending:
+        dependency = pending.pop()
+        if dependency not in closure:
+            closure.add(dependency)
+            pending.extend(dependencies[dependency])
+    assert closure == set(expected[:-1])
+
+    task_checks = [check for task in stage["tasks"] for check in task["checks"]]
+    assert task_checks == stage["stage_gate"]
+    commands = stage["stage_gate"][:-2]
+    assert len(commands) == 74
+    assert len(set(commands)) == 74
+    assert sum("stage0_readiness" in command for command in commands) == 11
+    assert sum("verify-feasibility" in command for command in commands) == 5
+    assert sum("reference_profile_cycle" in command for command in commands) == 1
+    assert sum(command.startswith("python -m research.verify ") for command in commands) == 10
 
 
 def test_later_stages_remain_disabled() -> None:
