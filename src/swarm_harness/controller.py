@@ -1,9 +1,8 @@
-"""Dependency scheduler, acceptance verifier, and Git integration loop."""
+"""Thin launcher for worktree preparation and quorum-authorized Git integration."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import subprocess
 import time
@@ -115,7 +114,7 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
 
 
-class Controller:
+class Launcher:
     def __init__(
         self,
         client: JournalClient,
@@ -161,6 +160,7 @@ class Controller:
             integration_branch=self.integration_branch,
             integration_worktree=str(self.integration),
             tasks=self.stage["tasks"],
+            stage_gate=self.stage["stage_gate"],
         )
         self.log(f"run {self.run_id}: journal {'created' if result['created'] else 'resumed'}")
         return result
@@ -186,62 +186,37 @@ class Controller:
             prepared += 1
         return prepared
 
-    @staticmethod
-    def _run_checks(worktree: Path, checks: list[str]) -> tuple[bool, str]:
-        for command in checks:
-            completed = subprocess.run(
-                command,
-                cwd=worktree,
-                shell=True,
-                executable="/bin/sh",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
-            if completed.returncode:
-                return False, f"{command}\n{completed.stdout}".strip()
-        return True, ""
+    def apply_committed(self) -> int:
+        """Apply decisions already committed by worker quorum; make no decision here."""
 
-    def adjudicate(self) -> int:
-        rows = self.client.call("submitted_tasks", run_id=self.run_id)
+        rows = self.client.call("committed_proposals", run_id=self.run_id)
         handled = 0
         for row in rows:
-            task_id = row["task_id"]
-            submission = row["submission"]
-            worktree = Path(row["worktree_path"])
-            commit = submission.get("commit_sha", "")
-            error = ""
-            if submission.get("outcome") != "completed":
-                error = submission.get("summary") or "worker reported failure"
-            elif not re.fullmatch(r"[0-9a-f]{40}", commit):
-                error = "worker did not submit an exact Git commit"
-            elif _git(worktree, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode:
-                error = "submitted commit is absent from the task worktree"
-            elif _git(worktree, "status", "--porcelain=v1", "--untracked-files=all").stdout:
-                error = "task worktree is dirty after submission"
-            else:
-                _passed, error = self._run_checks(worktree, json.loads(row["checks_json"]))
-            if error:
-                self.client.call("reject_task", run_id=self.run_id, task_id=task_id, error=error)
-                self.log(f"rejected {task_id}: {error.splitlines()[0]}")
-                handled += 1
-                continue
+            proposal_id = int(row["proposal_id"])
+            task_id = str(row["task_id"])
+            commit = str(row["payload"]["candidate_commit"])
             merged = _git(self.integration, "merge", "--no-ff", "--no-edit", commit, check=False)
             if merged.returncode:
                 _git(self.integration, "merge", "--abort", check=False)
                 error = merged.stderr.strip() or "integration merge failed"
-                self.client.call("reject_task", run_id=self.run_id, task_id=task_id, error=error)
-                self.log(f"rejected {task_id}: integration conflict")
+                self.client.call(
+                    "apply_proposal",
+                    run_id=self.run_id,
+                    proposal_id=proposal_id,
+                    success=False,
+                    error=error,
+                )
+                self.log(f"merge failed for {task_id}; retry proposed")
             else:
                 integrated = _git(self.integration, "rev-parse", "HEAD").stdout.strip()
                 self.client.call(
-                    "accept_task",
+                    "apply_proposal",
                     run_id=self.run_id,
-                    task_id=task_id,
-                    commit_sha=integrated,
+                    proposal_id=proposal_id,
+                    success=True,
+                    integration_commit=integrated,
                 )
-                self.log(f"accepted {task_id} at {integrated[:12]}")
+                self.log(f"applied quorum merge {task_id} at {integrated[:12]}")
             handled += 1
         return handled
 
@@ -249,19 +224,21 @@ class Controller:
         current = self.client.run_status(self.run_id)["run"]["state"]
         if current != "running":
             return str(current)
-        self.adjudicate()
+        self.apply_committed()
         self.prepare_runnable()
         status = self.client.run_status(self.run_id)
         states = [task["state"] for task in status["tasks"]]
         if states and all(state == "accepted" for state in states):
-            passed, error = self._run_checks(self.integration, list(self.stage["stage_gate"]))
-            if passed:
-                self.client.call("set_run_state", run_id=self.run_id, state="complete")
-                self.log(f"run {self.run_id}: COMPLETE")
-                return "complete"
-            self.client.call("set_run_state", run_id=self.run_id, state="failed")
-            self.log(f"run {self.run_id}: stage gate failed: {error}")
-            return "failed"
+            integration_head = _git(self.integration, "rev-parse", "HEAD").stdout.strip()
+            result = self.client.call(
+                "ensure_stage_completion",
+                run_id=self.run_id,
+                integration_head=integration_head,
+            )
+            if result.get("opened"):
+                self.log(
+                    f"proposed stage completion at {integration_head[:12]}; awaiting quorum"
+                )
         return status["run"]["state"]
 
     def run(self, poll_seconds: float = 0.5) -> str:
@@ -271,3 +248,7 @@ class Controller:
             if state in {"complete", "paused", "failed", "stopped"}:
                 return state
             time.sleep(poll_seconds)
+
+
+# Compatibility for callers importing the old name. It no longer adjudicates.
+Controller = Launcher

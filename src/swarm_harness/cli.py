@@ -23,7 +23,7 @@ from pygments.formatters import TerminalFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.util import ClassNotFound
 
-from .controller import Controller, ControllerError, load_stage
+from .controller import ControllerError, Launcher, load_stage
 from .journal_client import JournalClient
 from .live_observer import (
     JournalSlotFollower,
@@ -84,7 +84,14 @@ def _terminal_command(arguments: list[str]) -> str:
 def _launch_terminal(arguments: list[str]) -> None:
     command = _terminal_command(arguments)
     if os.environ.get("SWARM_NO_TERMINAL") == "1":
-        subprocess.Popen(arguments, cwd=ROOT, start_new_session=True)
+        subprocess.Popen(
+            arguments,
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         return
     if sys.platform != "darwin":
         raise ControllerError("visible worker terminals currently require macOS Terminal")
@@ -109,7 +116,11 @@ class _Log:
         line = f"[{time.strftime('%H:%M:%S')}] {message}"
         with self.lock:
             self.stream.write(line + "\n")
-            print(line, flush=True)
+            try:
+                print(line, flush=True)
+            except BrokenPipeError:
+                # The persisted observer log survives a disposable detached terminal.
+                pass
 
 
 def _wait_socket(path: Path, timeout: float = 30.0) -> None:
@@ -153,6 +164,18 @@ def _queue_snapshot(config: dict) -> dict | None:
                 SELECT t.task_id,t.title,t.state,t.branch,t.accepted_commit,t.last_error,
                   c.worker_id,c.claimed_at,c.expires_at,c.state AS claim_state,
                   c.submission_json,{ownership_mode} AS ownership_mode,
+                  p.proposal_id,p.kind AS proposal_kind,p.state AS proposal_state,
+                  p.required_votes,
+                  (SELECT COUNT(*) FROM proposal_votes votes
+                   WHERE votes.proposal_id=p.proposal_id AND votes.vote='approve')
+                    AS approvals,
+                  (SELECT COUNT(*) FROM proposal_votes votes
+                   WHERE votes.proposal_id=p.proposal_id AND votes.vote='reject')
+                    AS rejections,
+                  (SELECT GROUP_CONCAT(active.worker_id, ',')
+                   FROM validation_claims active
+                   WHERE active.proposal_id=p.proposal_id AND active.state='active')
+                    AS validators,
                   (SELECT COUNT(*) FROM dependencies d JOIN tasks parent
                      ON parent.run_id=d.run_id AND parent.task_id=d.dependency_id
                    WHERE d.run_id=t.run_id AND d.task_id=t.task_id
@@ -163,7 +186,26 @@ def _queue_snapshot(config: dict) -> dict | None:
                   WHERE latest.run_id=t.run_id AND latest.task_id=t.task_id
                   ORDER BY latest.claim_id DESC LIMIT 1
                 )
+                LEFT JOIN proposals p ON p.proposal_id=(
+                  SELECT latest.proposal_id FROM proposals latest
+                  WHERE latest.run_id=t.run_id AND latest.task_id=t.task_id
+                  ORDER BY latest.proposal_id DESC LIMIT 1
+                )
                 WHERE t.run_id=? ORDER BY t.ordinal
+                """,
+                (config["run_id"],),
+            ).fetchall()
+            decisions = database.execute(
+                """
+                SELECT p.proposal_id,p.kind,p.state,p.required_votes,
+                  (SELECT COUNT(*) FROM proposal_votes v
+                   WHERE v.proposal_id=p.proposal_id AND v.vote='approve') approvals,
+                  (SELECT COUNT(*) FROM proposal_votes v
+                   WHERE v.proposal_id=p.proposal_id AND v.vote='reject') rejections
+                FROM proposals p
+                WHERE p.run_id=? AND p.task_id IS NULL
+                  AND p.state IN ('open','committed')
+                ORDER BY p.proposal_id
                 """,
                 (config["run_id"],),
             ).fetchall()
@@ -171,6 +213,7 @@ def _queue_snapshot(config: dict) -> dict | None:
             "run_id": run["run_id"],
             "state": run["state"],
             "tasks": [dict(task) for task in tasks],
+            "decisions": [dict(decision) for decision in decisions],
         }
     except sqlite3.Error:
         return None
@@ -182,6 +225,8 @@ def _queue_task_state(task: dict, now: float) -> str:
         return "ACCEPTED"
     if state == "submitted":
         return "VERIFYING"
+    if state == "integrating":
+        return "INTEGRATING"
     if state == "claimed":
         expires = task.get("expires_at")
         if (
@@ -254,10 +299,11 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
     priority = {
         "WORKING": 0,
         "VERIFYING": 1,
-        "EXPIRED": 2,
-        "RETRY": 3,
-        "READY": 4,
-        "ACCEPTED": 5,
+        "INTEGRATING": 2,
+        "EXPIRED": 3,
+        "RETRY": 4,
+        "READY": 5,
+        "ACCEPTED": 6,
     }
     for ordinal, task in enumerate(snapshot["tasks"]):
         state = _queue_task_state(task, now)
@@ -272,6 +318,7 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
         state_color = {
             "ACCEPTED": "1;32",
             "VERIFYING": "1;33",
+            "INTEGRATING": "1;33",
             "WORKING": "1;35",
             "READY": "1;36",
             "RETRY": "1;31",
@@ -287,16 +334,41 @@ def _render_queue(snapshot: dict | None, *, color: bool, width: int = 40) -> str
                 expires = task.get("expires_at")
                 lease = "unknown" if expires is None else _queue_duration(float(expires) - now)
                 add("expired" if state == "EXPIRED" else lease, prefix="lease: ")
+        if state in {"VERIFYING", "INTEGRATING"} and task.get("proposal_id"):
+            add(f"#{task['proposal_id']}", prefix="proposal: ")
+            add(
+                f"{task.get('approvals') or 0}/{task.get('required_votes') or 2} yes, "
+                f"{task.get('rejections') or 0} no",
+                prefix="votes: ",
+            )
+            if task.get("validators"):
+                add(task["validators"], prefix="checking: ")
         commit = _queue_commit(task)
-        if commit and state in {"VERIFYING", "ACCEPTED"}:
+        if commit and state in {"VERIFYING", "INTEGRATING", "ACCEPTED"}:
             add(commit, prefix="commit: ")
         if state == "RETRY":
             add(task.get("last_error") or "rejected", prefix="error: ")
         add("-" * width, "2")
     add("SUMMARY", "1;36")
-    for state in ("WORKING", "VERIFYING", "READY", "RETRY", "EXPIRED", "ACCEPTED"):
+    for state in (
+        "WORKING",
+        "VERIFYING",
+        "INTEGRATING",
+        "READY",
+        "RETRY",
+        "EXPIRED",
+        "ACCEPTED",
+    ):
         if counts.get(state):
             add(str(counts[state]), prefix=f"{state.lower()}: ")
+    for decision in snapshot.get("decisions", []):
+        add("STAGE DECISION", "1;33")
+        add(f"#{decision['proposal_id']} {decision['kind']}")
+        add(
+            f"{decision['approvals']}/{decision['required_votes']} yes, "
+            f"{decision['rejections']} no",
+            prefix="votes: ",
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -455,7 +527,10 @@ def _run_processes(config: dict) -> list[tuple[int, str]]:
     for pid, command in _process_table():
         if swarmctl in command and f"harness worker --workload {workload}" in command:
             rows.append((pid, "worker"))
-        elif swarmctl in command and f"harness orchestrate --workload {workload}" in command:
+        elif swarmctl in command and (
+            f"harness launch --workload {workload}" in command
+            or f"harness orchestrate --workload {workload}" in command
+        ):
             rows.append((pid, "orchestrator"))
         elif "codex exec -C " in command and run_worktrees in command:
             rows.append((pid, "codex"))
@@ -625,9 +700,9 @@ def _stop_run_processes(config: dict) -> None:
 
 def _start_run(config: dict, *, foreground: bool) -> int:
     workload = str(config["workload"])
-    argv = [str(ROOT / "swarmctl"), "harness", "orchestrate", "--workload", workload]
+    argv = [str(ROOT / "swarmctl"), "harness", "launch", "--workload", workload]
     if foreground:
-        return command_orchestrate(argparse.Namespace(workload=workload))
+        return command_launch(argparse.Namespace(workload=workload))
     _launch_terminal(argv)
     print(f"Started {workload} in a native Terminal window.")
     print(f"Observe: ./swarmctl harness observe --workload {workload} --slot orchestrator")
@@ -640,7 +715,7 @@ def _resume_run(workload: str, *, foreground: bool) -> int:
     config = _load_config(workload)
     processes = _run_processes(config)
     if any(kind == "orchestrator" for _, kind in processes):
-        raise ControllerError(f"{workload} already has a live orchestrator")
+        raise ControllerError(f"{workload} already has a live launcher")
     try:
         _offline_journal(config).op_resume_run({"run_id": config["run_id"]})
     except JournalError as error:
@@ -678,14 +753,14 @@ def command_run(arguments: argparse.Namespace) -> int:
     return _start_run(config, foreground=arguments.foreground)
 
 
-def command_orchestrate(arguments: argparse.Namespace) -> int:
+def command_launch(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     run_dir = Path(config["run_dir"])
     log = _Log(run_dir / "logs" / "orchestrator.log")
     server, thread = serve_in_thread(config["database"], config["socket"])
     client = JournalClient(config["socket"])
     stage = load_stage(config["stage_path"])
-    controller = Controller(
+    launcher = Launcher(
         client,
         config["run_id"],
         config["workload"],
@@ -695,16 +770,16 @@ def command_orchestrate(arguments: argparse.Namespace) -> int:
         log,
     )
     try:
-        controller.seed()
+        launcher.seed()
         initial_state = client.run_status(config["run_id"])["run"]["state"]
         if initial_state != "running":
             return 0 if initial_state in {"paused", "stopped", "complete"} else 1
-        controller.prepare_runnable()
+        launcher.prepare_runnable()
         supervisor = _LocalWorkerSupervisor(config, client, log)
         supervisor.start()
         while True:
             supervisor.tick()
-            state = controller.tick()
+            state = launcher.tick()
             if state in {"complete", "paused", "failed", "stopped"}:
                 return 0 if state in {"complete", "paused", "stopped"} else 1
             time.sleep(0.5)
@@ -712,6 +787,10 @@ def command_orchestrate(arguments: argparse.Namespace) -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# Preserve old private command lines during a rolling upgrade.
+command_orchestrate = command_launch
 
 
 def command_worker(arguments: argparse.Namespace) -> int:
@@ -1021,6 +1100,9 @@ def build_parser() -> argparse.ArgumentParser:
     reset = commands.add_parser("reset")
     reset.add_argument("--workload", required=True)
     reset.set_defaults(handler=command_reset)
+    launch = commands.add_parser("launch", help=argparse.SUPPRESS)
+    launch.add_argument("--workload", required=True)
+    launch.set_defaults(handler=command_launch)
     orchestrate = commands.add_parser("orchestrate", help=argparse.SUPPRESS)
     orchestrate.add_argument("--workload", required=True)
     orchestrate.set_defaults(handler=command_orchestrate)

@@ -243,7 +243,7 @@ def test_dependencies_hold_downstream_until_acceptance(journal) -> None:
     ]
     prepare(client, "A")
     claim = client.claim_task("run", "worker", 60)
-    client.submit_result(
+    submission = client.submit_result(
         run_id="run",
         task_id="A",
         claim_token=claim["claim_token"],
@@ -254,10 +254,146 @@ def test_dependencies_hold_downstream_until_acceptance(journal) -> None:
         proposed_followups=[],
     )
     assert client.call("runnable_unprepared", run_id="run") == []
-    client.call("accept_task", run_id="run", task_id="A", commit_sha="b" * 40)
+    for validator in ("validator-0", "validator-1"):
+        validation = client.claim_work("run", validator, 60)
+        client.submit_validation(
+            run_id="run",
+            worker_id=validator,
+            proposal_id=validation["proposal_id"],
+            claim_token=validation["claim_token"],
+            vote="approve",
+            evidence={"checked": True},
+        )
+    client.call(
+        "apply_proposal",
+        run_id="run",
+        proposal_id=submission["proposal_id"],
+        success=True,
+        integration_commit="b" * 40,
+    )
     assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == [
         "B"
     ]
+
+
+def test_candidate_author_is_excluded_and_two_independent_votes_are_required(journal) -> None:
+    client, _, _ = journal
+    seed(client)
+    prepare(client)
+    claim = client.claim_task("run", "author")
+    submission = client.submit_result(
+        run_id="run",
+        task_id="A",
+        claim_token=claim["claim_token"],
+        outcome="completed",
+        summary="candidate",
+        commit_sha="a" * 40,
+        blockers=[],
+        proposed_followups=[],
+    )
+
+    assert client.claim_work("run", "author")["status"] == "idle"
+    first = client.claim_work("run", "validator-0")
+    result = client.submit_validation(
+        run_id="run",
+        worker_id="validator-0",
+        proposal_id=first["proposal_id"],
+        claim_token=first["claim_token"],
+        vote="approve",
+        evidence={"check": "one"},
+    )
+    assert result["state"] == "open"
+    assert client.run_status("run")["tasks"][0]["state"] == "submitted"
+    assert client.claim_work("run", "validator-0")["status"] == "idle"
+
+    second = client.claim_work("run", "validator-1")
+    result = client.submit_validation(
+        run_id="run",
+        worker_id="validator-1",
+        proposal_id=second["proposal_id"],
+        claim_token=second["claim_token"],
+        vote="approve",
+        evidence={"check": "two"},
+    )
+    assert result == {
+        "recorded": True,
+        "state": "committed",
+        "decision": "approve",
+        "approvals": 2,
+        "rejections": 0,
+    }
+    assert client.run_status("run")["tasks"][0]["state"] == "integrating"
+    with pytest.raises(JournalError, match="quorum"):
+        client.call("accept_task", run_id="run", task_id="A", commit_sha="b" * 40)
+    assert submission["proposal_id"] == second["proposal_id"]
+
+
+def test_rejection_quorum_retries_candidate_without_launcher_authority(journal) -> None:
+    client, _, _ = journal
+    seed(client)
+    prepare(client)
+    claim = client.claim_task("run", "author")
+    client.submit_result(
+        run_id="run",
+        task_id="A",
+        claim_token=claim["claim_token"],
+        outcome="completed",
+        summary="candidate",
+        commit_sha="a" * 40,
+        blockers=[],
+        proposed_followups=[],
+    )
+    for validator in ("validator-0", "validator-1"):
+        validation = client.claim_work("run", validator)
+        result = client.submit_validation(
+            run_id="run",
+            worker_id=validator,
+            proposal_id=validation["proposal_id"],
+            claim_token=validation["claim_token"],
+            vote="reject",
+            evidence={"reason": "candidate check failed"},
+        )
+    assert result["decision"] == "reject"
+    task = client.run_status("run")["tasks"][0]
+    assert task["state"] == "pending"
+    assert task["worktree_path"] is None
+    assert task["last_error"] == "candidate rejected by independent validation quorum"
+
+
+def test_permissionless_decomposition_is_applied_only_after_quorum(journal) -> None:
+    client, _, _ = journal
+    seed(client)
+    proposal = client.call(
+        "propose_change",
+        run_id="run",
+        worker_id="worker-0",
+        kind="task_decomposition",
+        payload={
+            "tasks": [
+                {
+                    "id": "B",
+                    "title": "B",
+                    "prompt": "Do B",
+                    "depends_on": ["A"],
+                    "checks": ["true"],
+                }
+            ]
+        },
+    )
+    assert len(client.run_status("run")["tasks"]) == 1
+    for validator in ("worker-1", "worker-2"):
+        validation = client.claim_work("run", validator)
+        client.submit_validation(
+            run_id="run",
+            worker_id=validator,
+            proposal_id=validation["proposal_id"],
+            claim_token=validation["claim_token"],
+            vote="approve",
+            evidence={"schema": "checked"},
+        )
+    status = client.run_status("run")
+    assert proposal["proposal_id"] == status["proposals"][0]["proposal_id"]
+    assert [task["task_id"] for task in status["tasks"]] == ["A", "B"]
 
 
 def test_pause_fences_claim_and_resume_preserves_prepared_worktree(journal) -> None:

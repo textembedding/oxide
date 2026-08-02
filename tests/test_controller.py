@@ -35,6 +35,21 @@ def commit_task(worktree: Path, task_id: str) -> str:
     return git(worktree, "rev-parse", "HEAD")
 
 
+def approve_next_proposal(client: JournalClient) -> None:
+    for worker in ("validator-0", "validator-1"):
+        claim = client.claim_work("toy-test", worker, 60)
+        assert claim["work_kind"] == "validation"
+        result = client.submit_validation(
+            run_id="toy-test",
+            worker_id=worker,
+            proposal_id=claim["proposal_id"],
+            claim_token=claim["claim_token"],
+            vote="approve",
+            evidence={"test": "independent approval"},
+        )
+    assert result["decision"] == "approve"
+
+
 def test_toy_stage_completes_claim_verify_and_merge(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -71,7 +86,9 @@ def test_toy_stage_completes_claim_verify_and_merge(tmp_path: Path) -> None:
                 blockers=[],
                 proposed_followups=[],
             )
+            approve_next_proposal(client)
             controller.tick()
+        approve_next_proposal(client)
         assert controller.tick() == "complete"
         assert (controller.integration / "toy-output" / "combined.txt").read_text() == "one\ntwo\n"
         assert all(task["state"] == "accepted" for task in client.run_status("toy-test")["tasks"])

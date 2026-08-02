@@ -61,8 +61,26 @@ class JournalClient:
             arguments["lease_seconds"] = lease_seconds
         return self.call("claim_task", **arguments)
 
+    def claim_work(
+        self,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: float | None = None,
+    ) -> dict:
+        arguments: dict[str, Any] = {
+            "run_id": run_id,
+            "worker_id": worker_id,
+            "ownership_mode": "lease" if lease_seconds is not None else "observable",
+        }
+        if lease_seconds is not None:
+            arguments["lease_seconds"] = lease_seconds
+        return self.call("claim_work", **arguments)
+
     def submit_result(self, **result: Any) -> dict:
         return self.call("submit_result", **result)
+
+    def submit_validation(self, **validation: Any) -> dict:
+        return self.call("submit_validation", **validation)
 
     def run_status(self, run_id: str) -> dict:
         return self.call("run_status", run_id=run_id)

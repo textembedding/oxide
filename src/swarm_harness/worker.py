@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import time
@@ -129,6 +130,110 @@ class Worker:
             _git(worktree, "commit", "-m", f"Complete {task_id}")
         return _git(worktree, "rev-parse", "HEAD")
 
+    @staticmethod
+    def _validate(envelope: dict) -> tuple[str, dict]:
+        """Independently validate one immutable proposal without model authority."""
+
+        kind = str(envelope["proposal_kind"])
+        payload = envelope.get("payload") or {}
+        evidence: dict[str, object] = {
+            "proposal_kind": kind,
+            "proposal_id": int(envelope["proposal_id"]),
+            "checks": [],
+        }
+        if kind in {"task_acceptance", "stage_completion"}:
+            worktree = Path(envelope["worktree_path"])
+            expected = str(
+                payload.get("candidate_commit")
+                if kind == "task_acceptance"
+                else payload.get("integration_head")
+            )
+            try:
+                observed = _git(worktree, "rev-parse", "HEAD")
+                dirty = _git(
+                    worktree,
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                )
+            except WorkerError as error:
+                evidence["reason"] = str(error)
+                return "reject", evidence
+            evidence["expected_head"] = expected
+            evidence["observed_head"] = observed
+            evidence["clean"] = not dirty
+            if not re.fullmatch(r"[0-9a-f]{40}", expected):
+                evidence["reason"] = "proposal does not bind an exact Git commit"
+                return "reject", evidence
+            if observed != expected:
+                evidence["reason"] = "proposal head differs from the validation worktree"
+                return "reject", evidence
+            if dirty:
+                evidence["reason"] = "validation worktree is dirty"
+                return "reject", evidence
+            check_evidence: list[dict[str, object]] = []
+            for command in envelope.get("acceptance_checks", []):
+                completed = subprocess.run(
+                    str(command),
+                    cwd=worktree,
+                    shell=True,
+                    executable="/bin/sh",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+                check_evidence.append(
+                    {
+                        "command": str(command),
+                        "returncode": completed.returncode,
+                        "output_tail": completed.stdout[-4000:],
+                    }
+                )
+                if completed.returncode:
+                    evidence["checks"] = check_evidence
+                    evidence["reason"] = f"acceptance check failed: {command}"
+                    return "reject", evidence
+            evidence["checks"] = check_evidence
+            evidence["reason"] = "exact head, clean tree, and all checks passed"
+            return "approve", evidence
+        if kind == "task_retry":
+            submission = payload.get("submission")
+            justified = bool(payload.get("reason")) or (
+                isinstance(submission, dict) and submission.get("outcome") == "failed"
+            )
+            evidence["reason"] = (
+                "retry has a recorded worker or integration failure"
+                if justified
+                else "retry proposal has no recorded failure"
+            )
+            return ("approve" if justified else "reject"), evidence
+        if kind in {"task_decomposition", "dependency_change", "retry_task"}:
+            evidence["reason"] = "proposal is structurally closed for journal application"
+            evidence["payload"] = payload
+            return "approve", evidence
+        evidence["reason"] = f"unsupported proposal kind: {kind}"
+        return "reject", evidence
+
+    def _run_validation(self, envelope: dict) -> str:
+        proposal_id = int(envelope["proposal_id"])
+        kind = str(envelope["proposal_kind"])
+        self.log(f"validating proposal {proposal_id}: {kind}")
+        vote, evidence = self._validate(envelope)
+        result = self.client.submit_validation(
+            run_id=self.run_id,
+            worker_id=self.worker_id,
+            proposal_id=proposal_id,
+            claim_token=str(envelope["claim_token"]),
+            vote=vote,
+            evidence=evidence,
+        )
+        self.log(
+            f"validated proposal {proposal_id}: {vote} "
+            f"({result.get('approvals', 0)} approve, {result.get('rejections', 0)} reject)"
+        )
+        return "validated"
+
     def run_once(self) -> str:
         envelope = claim_task(
             self.client,
@@ -139,6 +244,8 @@ class Worker:
         status = str(envelope["status"])
         if status != "claimed":
             return status
+        if envelope.get("work_kind") == "validation":
+            return self._run_validation(envelope)
         task_id = str(envelope["task_id"])
         token = str(envelope["claim_token"])
         worktree = Path(envelope["worktree_path"])

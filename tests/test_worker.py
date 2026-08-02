@@ -85,6 +85,18 @@ def test_real_worker_adapter_commits_and_submits(tmp_path: Path) -> None:
         assert submitted[0]["submission"]["outcome"] == "completed"
         assert (worktree / "result.txt").read_text() == "done\n"
         assert git(worktree, "status", "--porcelain=v1") == ""
+        for validator in ("worker-1", "worker-2"):
+            reviewer = Worker(
+                client,
+                "run",
+                validator,
+                codex_argv=(sys.executable, str(fake)),
+                log=lambda _: None,
+            )
+            assert reviewer.run_once() == "validated"
+        proposal = client.run_status("run")["proposals"][0]
+        assert proposal["state"] == "committed"
+        assert proposal["approvals"] == 2
     finally:
         server.shutdown()
         server.server_close()

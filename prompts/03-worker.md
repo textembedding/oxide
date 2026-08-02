@@ -1,7 +1,9 @@
 # Milestone 3: Real Worker Adapter
 
-Implement only the real worker, two-tool adapter, Git branch/worktree flow,
-process-group cancellation, and visible-terminal launch.
+Implement only the real implementation/validation worker, two-tool adapter,
+Git branch/worktree flow, process-group cancellation, and visible-terminal
+launch. Validation claims run exact candidate checks and submit evidence-bound
+votes; authors never validate their own proposal.
 
 ## Allowed files
 

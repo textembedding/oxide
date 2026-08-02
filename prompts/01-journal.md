@@ -1,4 +1,4 @@
-# Milestone 1: Journal Only
+# Journal Authority
 
 Implement only the disposable journal and backend-neutral client.
 
@@ -15,7 +15,7 @@ Implement only the disposable journal and backend-neutral client.
 - At most 800 non-test source lines added in this milestone.
 - No source file longer than 500 lines.
 - No additional modules.
-- No controller, worker launcher, Codex integration, or Stage 0 execution.
+- No acceptance or completion authority outside journal transactions.
 
 ## Required behavior
 
@@ -27,6 +27,9 @@ Implement only the disposable journal and backend-neutral client.
 - persistence across service restart
 - dependency-aware runnable selection
 - storage of proposed follow-ups without queue insertion
+- permissionless proposals for acceptance, retry, decomposition, dependency
+  change, and stage completion
+- author exclusion, one vote per validator, and deterministic 2-of-3 commit
 - small JSON protocol over a local socket
 
 Stop after the journal tests pass. A missing requirement is a blocker report,

@@ -1,7 +1,7 @@
-# Milestone 2: Controller with Fake Workers
+# Thin Launcher with Fake Workers
 
-Implement only dependency scheduling, submission verification, explicit
-planning state, and a toy-stage runner using fake workers.
+Implement only process liveness observation, worktree preparation, application
+of journal-committed merges, and a toy-stage runner using fake workers.
 
 ## Allowed files
 
@@ -15,6 +15,7 @@ planning state, and a toy-stage runner using fake workers.
 - No source file longer than 500 lines.
 - No real Codex processes.
 - No new worker-visible tools.
-- No task creation outside an explicit planning phase.
+- No acceptance checks, retry decisions, graph decisions, or terminal stage
+  decisions in the launcher.
 
 Stop after the controller tests pass.

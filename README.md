@@ -10,8 +10,17 @@ Start with:
 3. `ACCEPTANCE.md`
 4. `prompts/01-journal.md`
 
-Use `./swarmctl harness run` to launch an orchestrator and visible worker
-terminals, and `./swarmctl harness observe` to follow any slot.
+Use `./swarmctl harness run` to launch a thin local process launcher and visible
+worker terminals, and `./swarmctl harness observe` to follow any slot. The
+legacy observer slot name `orchestrator` is retained for command compatibility;
+that process has no acceptance or completion authority.
+
+Workers atomically claim routine implementation or validation work from the
+journal. Candidate acceptance, retries, task/dependency changes, and stage
+completion require two matching votes from up to three independent workers.
+The proposal author cannot vote. The launcher only observes local process
+liveness, prepares Git worktrees, and applies merges already committed by the
+journal quorum.
 
 Lifecycle controls:
 

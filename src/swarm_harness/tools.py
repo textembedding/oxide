@@ -16,7 +16,7 @@ def claim_task(
     worker_id: str,
     lease_seconds: float | None = None,
 ) -> dict[str, Any]:
-    return client.claim_task(run_id, worker_id, lease_seconds)
+    return client.claim_work(run_id, worker_id, lease_seconds)
 
 
 def submit_result(
