@@ -980,8 +980,8 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         if task.get("last_journal_record_id") is not None:
             add(f"journal #{task['last_journal_record_id']}", code="36")
             body = str(task.get("last_journal_body") or "")
-            for index, line in enumerate(body.splitlines() or [""]):
-                add(line, "body: " if index == 0 else "  ", "36")
+            add("body:", code="36")
+            lines.extend((line, "36") for line in _safe(body).split("\n"))
         add("-" * width, code="2")
     if tasks:
         add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}", code="1;32")
