@@ -84,7 +84,7 @@ print(json.dumps({'type':'turn.completed'}))
     assert "queue:ready" in prompt
     assert "rotate that list left by 0" in prompt
     assert "host normally preclaims" in prompt
-    assert "Prior-generation\n  authorship is not" in prompt
+    assert "prior-generation authorship is allowed" in prompt
     assert "INTERNAL REVIEW" in prompt
     assert "configured approval count" in prompt
     assert "There is no integration branch" in prompt

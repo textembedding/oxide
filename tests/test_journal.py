@@ -332,6 +332,32 @@ def test_challenge_invalidates_generation_and_requires_all_reviews_again(workflo
         )
 
 
+def test_review_drain_collects_every_sibling_decision_before_revision(workflow) -> None:
+    client, _, socket = workflow
+    client.add("run", "launcher", "control: drain-reviews")
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    _approve(client, "run", "worker-1", "A", 1, 1, 2)
+    client.add("run", "worker-2", "claim: review:A:1:2")
+    client.add(
+        "run",
+        "worker-2",
+        f"challenge: review:A:1:2\nhead: {2:040x}\nverified: true\nreason: defect",
+    )
+    remaining = client.search("run", "queue:ready")
+    assert [(item["role"], item["review_ordinal"]) for item in remaining] == [
+        ("review:integration", 3)
+    ]
+    _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    summary = WorkflowClient(JournalClient(socket)).search("run", "task:A")[0]
+    assert summary["state"] == "revision"
+    assert summary["approvals"] == 2
+    assert [review["state"] for review in summary["reviews"]] == [
+        "approved",
+        "challenged",
+        "approved",
+    ]
+
+
 def test_pause_resume_is_derived_from_generic_records(workflow) -> None:
     client, _, _ = workflow
     assert client.add("run", "launcher", "control: pause")["state"] == "paused"

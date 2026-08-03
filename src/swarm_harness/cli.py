@@ -681,6 +681,8 @@ def command_launch(arguments: argparse.Namespace) -> int:
         )
         log(f"run {config['run_id']}: {'created' if result['saved'] else 'resumed'}")
         state = str(result["state"])
+        if state == "running" and not client.search(config["run_id"], "control: drain-reviews"):
+            client.add(config["run_id"], "launcher", "control: drain-reviews")
         supervisor: _Supervisor | None = None
         if state == "running":
             _prepare_repositories(config)

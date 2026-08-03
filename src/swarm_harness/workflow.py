@@ -45,6 +45,7 @@ class Projection:
     stage: dict[str, Any] | None = None
     stage_bytes: str | None = None
     required_reviews: int = 0
+    drain_reviews: bool = False
     tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
     outcomes: dict[int, tuple[bool, dict[str, Any] | str]] = field(default_factory=dict)
 
@@ -71,6 +72,14 @@ class WorkflowReducer:
             return
         if view.stage is None:
             view.reject(record, "workflow is not bootstrapped")
+            return
+        if first == "control: drain-reviews":
+            if author != "launcher":
+                view.reject(record, "review-drain activation requires the launcher")
+            else:
+                saved = not view.drain_reviews
+                view.drain_reviews = True
+                view.accept(record, {"saved": saved, "review_drain": True})
             return
         if first == "control: pause":
             if author != "launcher" or view.state == "complete":
@@ -462,6 +471,23 @@ class WorkflowReducer:
             or not detail
         ):
             view.reject(record, "review decision is not bound to the owned current candidate")
+            return
+        if view.drain_reviews:
+            review["state"] = "challenged" if decision == "challenge" else "approved"
+            if decision == "challenge":
+                task["last_error"] = str(detail)[:2000]
+            approvals = sum(item["state"] == "approved" for item in task["reviews"])
+            if all(item["state"] in {"approved", "challenged"} for item in task["reviews"]):
+                task.update(
+                    state=(
+                        "revision"
+                        if any(item["state"] == "challenged" for item in task["reviews"])
+                        else "merge_ready"
+                    ),
+                    worker_id=None,
+                    merge_worker_id=None,
+                )
+            view.accept(record, {"saved": True, "decision": decision, "approvals": approvals})
             return
         if decision == "challenge":
             review["state"] = "challenged"

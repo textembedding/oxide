@@ -40,62 +40,31 @@ class Worker:
     def _prompt(self) -> str:
         ordinal = int(self.worker_id.rsplit("-", 1)[-1])
         return f"""Perform exactly one journal-assigned role as {self.worker_id}.
-
-The journal is the entire coordination interface. You have exactly two journal
-tools: journal_search and journal_add. Never open or inspect the harness,
-journal socket, or journal database by shell command.
-
-1. Search `worker:{self.worker_id}`; the host normally preclaims its work. If empty,
-   search `queue:ready`, rotate that list left by {ordinal} modulo its length, and
-   journal_add each exact `claim` until accepted. Try the next item immediately
-   after a rejected race. Then search `task:<root_task_id>`.
+The journal is the entire coordination interface. You have exactly journal_search and journal_add. Never inspect the harness, journal socket, or journal database by shell.
+1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, rotate that list left by {ordinal} modulo its length, and journal_add exact claims until accepted. Then search `task:<root_task_id>`.
 2. Follow the assigned role. A fresh session may receive any role.
-
 AUTHOR or REVISION
-- Fetch origin. For a new PR, create the assigned branch at the returned base.
-  For a revision, check out the assigned branch and merge current
-  `origin/{self.target_branch}` before editing. There is no integration branch.
-- Implement only the objective. Add `checkpoint: task:<root_task_id>` after the
-  first durable edit. Run every returned check, fix failures, commit, and push
-  HEAD to the exact assigned branch.
+- Fetch origin. For a new PR, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.
+- Implement only the objective. Add `checkpoint: task:<root_task_id>` after the first durable edit. Run every returned check, fix failures, commit, and push HEAD to the exact branch.
 - Add `handoff: task:<root_task_id>` with files and check evidence, then add:
-
   open-pr: task:<root_task_id>
   branch: <exact assigned branch>
   base: <exact commit the candidate is based on>
   head: <exact pushed HEAD>
   verified: true
-
 INTERNAL REVIEW
-- An accepted review claim is the workflow's final eligibility decision for that
-  exact generation. Only its current author is excluded. Prior-generation
-  authorship is not an eligibility failure or candidate defect. Never challenge
-  because you authored an earlier generation; review the exact assigned head.
-- Work read-only. Fetch the assigned branch, detach at exact `head_sha`, inspect
-  the complete base-to-head diff against the objective, and run every returned
-  check. Do not edit, commit, or push. The author cannot review its own PR.
+- An accepted claim is final eligibility for that generation. Only its current author is excluded; prior-generation authorship is allowed. Review the exact assigned head.
+- Work read-only. Fetch the branch, detach at exact `head_sha`, inspect the complete base-to-head diff, and run every returned check. Do not edit, commit, or push.
 - On pass, add the exact review identity from the work item:
-
   approve: review:<root_task_id>:<generation>:<review_ordinal>
   head: <exact reviewed head>
   verified: true
   evidence: <criterion-level evidence>
-
-- On any defect use `challenge:` with the same identity, exact head,
-  `verified: true`, and `reason:`. A changed candidate requires all reviews again.
-
+- On any defect use `challenge:` with the same identity, exact head, `verified: true`, and `reason:`. Finish your decision even if a sibling challenged; a changed candidate requires all reviews again.
 MERGE
-- Re-search the task and confirm the exact head and configured approval count.
-  Add `merge: task:<root_task_id>` with exact `generation:` and `head:`. This is
-  the worker-owned merge authorization. The thin launcher runs the task checks
-  on the prospective merge tree and performs only that authorized merge to
-  `{self.target_branch}`.
-
-Do not claim a second item in this session. Finish after the terminal record is
-accepted.
-
-Both tools take one `yaml` argument. Its value is YAML containing exactly one
-string field: `query` for journal_search or `text` for journal_add.
+- Re-search and confirm the exact head and configured approval count. Add `merge: task:<root_task_id>` with exact `generation:` and `head:`. The launcher verifies the prospective tree before merging to `{self.target_branch}`.
+Do not claim a second item. Finish after the terminal record is accepted.
+Both tools take one `yaml` argument containing exactly one string field: `query` for journal_search or `text` for journal_add.
 """
 
     def _configs(self) -> list[str]:
