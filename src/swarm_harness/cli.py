@@ -809,11 +809,14 @@ def _safe(value: object) -> str:
 def _code(value: object, language: str, color: bool) -> str:
     if not (safe := _safe(value).rstrip("\n")) or not color:
         return safe
-    if language == "yaml":
+    if language == "yaml-input":
+        safe = _YAML_VALUE.sub(lambda m: m[1] + _style(m[2], "38;5;208", True), safe)
+    if language.startswith("yaml"):
         return _YAML_KEY.sub(lambda m: m[1] + _style(m[2], "94", True) + m[3], safe)
     try:
         lexer = get_lexer_by_name(language) if language else guess_lexer(safe)
-        return pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
+        rendered = pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
+        return rendered.replace("\x1b[33m", "\x1b[38;5;208m")
     except ClassNotFound:
         return safe
 
@@ -822,6 +825,7 @@ def _indent(value: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in value.splitlines())
 
 
+_YAML_VALUE = re.compile(r"(^\s*(?:-\s+)?[\w-]+:|^)(.*)$", re.MULTILINE)
 _YAML_KEY = re.compile(r"^(\s*(?:-\s+)?)([\w-]+)(:)", re.MULTILINE)
 _QUOTED_YAML = re.compile(r'^(\s*(?:(?:-\s+)?[\w-]+:\s+|-\s+))("(?:[^"\\]|\\.)*")$', re.MULTILINE)
 _YAML_WORDS = {"null", "true", "false", "yes", "no", "on", "off", "~"}
@@ -850,17 +854,13 @@ def _tool_value(item: dict[str, Any], phase: str, color: bool) -> str:
     arguments = item.get("arguments", item.get("input", {}))
     result = item.get("result", item.get("output"))
     if server == "journal" and isinstance(arguments, dict) and "yaml" in arguments:
-        blocks = [
-            heading,
-            "input.yaml:\n" + _indent(_code(_display_yaml(arguments["yaml"]), "yaml", color)),
-        ]
+        input_yaml = _code(_display_yaml(arguments["yaml"]), "yaml-input", color)
+        blocks = [heading, "input.yaml:\n" + _indent(input_yaml)]
         if isinstance(result, dict):
             content = result.get("content")
             if isinstance(content, list) and content and isinstance(content[0], dict):
-                blocks.append(
-                    "output.yaml:\n"
-                    + _indent(_code(_display_yaml(content[0].get("text", "")), "yaml", color))
-                )
+                output_yaml = _code(_display_yaml(content[0].get("text", "")), "yaml", color)
+                blocks.append("output.yaml:\n" + _indent(output_yaml))
         return "\n".join(blocks)
     return heading + "\n" + _indent(json.dumps(arguments, indent=2, sort_keys=True))
 

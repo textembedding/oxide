@@ -117,21 +117,28 @@ def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
     )
 
 
-def test_observer_highlights_yaml_structure_without_coloring_journal_prose() -> None:
+def test_observer_highlights_yaml_fields_and_colors_input_values_as_strings() -> None:
     rendered = cli._code(
         "text: |-\n"
         "  blocked: task:S0-POLICY-SEARCH-VERIFIERS\n"
         "  reason: The assigned revision requires fetching origin.\n"
         "verified: false",
-        "yaml",
+        "yaml-input",
         True,
     )
-    assert "\x1b[94mtext\x1b[0m: |-" in rendered
-    assert "\x1b[94mblocked\x1b[0m: task:S0-POLICY-SEARCH-VERIFIERS" in rendered
-    assert "\x1b[94mreason\x1b[0m: The assigned revision requires fetching origin." in rendered
-    assert "\x1b[94mverified\x1b[0m: false" in rendered
+    orange = "\x1b[38;5;208m"
+    assert f"\x1b[94mtext\x1b[0m:{orange} |-\x1b[0m" in rendered
+    assert f"\x1b[94mblocked\x1b[0m:{orange} task:S0-POLICY-SEARCH-VERIFIERS\x1b[0m" in rendered
+    assert (
+        f"\x1b[94mreason\x1b[0m:{orange} The assigned revision requires fetching origin.\x1b[0m"
+        in rendered
+    )
+    assert f"\x1b[94mverified\x1b[0m:{orange} false\x1b[0m" in rendered
     assert "\x1b[31m" not in rendered
     assert "\x1b[33m" not in rendered
+    source = cli._code('value = "quoted string"', "python", True)
+    assert orange in source
+    assert "\x1b[33m" not in source
 
 
 def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Path, capsys) -> None:
