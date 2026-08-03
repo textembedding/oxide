@@ -943,44 +943,62 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
     add("-" * width)
     tasks = [task for task in snapshot["tasks"] if task["state"] == "working"]
     for task in tasks:
-        add("WORKING")
-        add(task["task_id"])
+        add("IN PROGRESS")
+        add(task.get("root_task_id") or task["task_id"])
         role = str(task.get("role") or "task")
         owner = str(task.get("worker_id") or "unowned")
-        add(f"{role} / {owner}")
-        workflow_state = str(task.get("workflow_state") or task["state"])
-        claim_state = str(task.get("claim_state") or "accepted")
-        add(f"{workflow_state} / claim {claim_state}", "journal: ")
         generation = int(task.get("generation") or 0)
-        if role in {"author", "revision"}:
-            checkpoint = "yes" if task.get("checkpoint") else "no"
-            handoff = "yes" if task.get("handoff") else "no"
-            add(f"gen {generation} / checkpoint {checkpoint}")
-            add(handoff, "handoff: ")
+        if role == "author":
+            add(f"{owner} is implementing candidate {generation + 1}")
+        elif role == "revision":
+            add(f"{owner} is revising candidate {generation + 1}")
+        elif role.startswith("review:"):
+            add(f"{owner} is reviewing candidate {generation}")
+            focus = role.removeprefix("review:").replace("-", " ")
+            add(focus, "focus: ")
+        elif role == "merge":
+            add(f"{owner} is approving candidate {generation}")
         else:
-            add(generation, "generation: ")
+            add(f"{owner} is working")
+        if role in {"author", "revision"}:
+            if not task.get("checkpoint"):
+                step = "editing files"
+            elif not task.get("handoff"):
+                step = "running checks"
+            else:
+                step = "submitting candidate"
+            add(step, "step: ")
+        elif role == "merge":
+            add("final merge check", "step: ")
         if role.startswith("review:") or role == "merge":
             add(
-                f"{task.get('approvals', 0)}/{task['required_reviews']}",
-                "reviews: ",
+                f"{task.get('approvals', 0)} of {task['required_reviews']}",
+                "reviews passed: ",
             )
-        if task.get("head_sha"):
-            add(str(task["head_sha"])[:12], "head: ")
-        if task.get("journal_record_count") is not None:
-            add(task["journal_record_count"], "accepted records: ")
+        if task.get("head_sha") and (role.startswith("review:") or role == "merge"):
+            add(str(task["head_sha"])[:12], "commit: ")
         if task.get("last_journal_record_id") is not None:
-            last = f"#{task['last_journal_record_id']}"
-            if task.get("last_journal_worker_id"):
-                last += f" / {task['last_journal_worker_id']}"
-            add(last, "last record: ")
-        if task.get("last_journal_event"):
-            event = str(task["last_journal_event"]).split(":", 1)[0]
-            add(event, "event: ")
+            action = str(task.get("last_journal_event") or "").split(":", 1)[0]
+            if action == "checkpoint":
+                update = "changes saved"
+            elif action == "handoff":
+                update = "checks completed"
+            elif action == "claim" and role == "revision":
+                update = "revision began"
+            elif action == "claim" and role.startswith("review:"):
+                update = "review began"
+            elif action == "claim" and role == "merge":
+                update = "merge check began"
+            elif action == "claim":
+                update = "implementation began"
+            else:
+                update = action.replace("-", " ") or "work updated"
+            add(update, f"journal #{task['last_journal_record_id']}: ")
         add("-" * width)
     if tasks:
-        add(len(tasks), "active: ")
+        add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}")
     else:
-        add("NO ACTIVE CLAIMS")
+        add("NO TASKS IN PROGRESS")
     return (
         "\n".join(_style(line, "1;36" if line == "SWARM QUEUE" else "0", color) for line in lines)
         + "\n"

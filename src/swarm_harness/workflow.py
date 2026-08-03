@@ -580,47 +580,30 @@ class WorkflowReducer:
         self, view: Projection, task: dict[str, Any], value: dict[str, Any]
     ) -> dict[str, Any]:
         owner = value.get("worker_id")
-        accepted = [
-            record
-            for record in view.records
-            if view.outcomes.get(int(record["record_id"]), (False, ""))[0]
-            and record["author"] == owner
-        ]
+        events = {value["claim"]}
         if value["role"] in {"author", "revision"}:
-            accepted_records = [
+            events.update(
+                {
+                    f"checkpoint: task:{task['task_id']}",
+                    f"handoff: task:{task['task_id']}",
+                }
+            )
+        latest = next(
+            (
                 record
-                for record in accepted
-                if str(record["text"]).splitlines()[0] == value["claim"]
-                or (
-                    (match := _AUTHOR_MARKER.fullmatch(str(record["text"]).splitlines()[0]))
-                    is not None
-                    and match.group(2) == task["task_id"]
-                )
-            ]
-            claim_indexes = [
-                index
-                for index, record in enumerate(accepted_records)
-                if str(record["text"]).splitlines()[0] == value["claim"]
-            ]
-            if claim_indexes:
-                accepted_records = accepted_records[claim_indexes[-1] :]
-        else:
-            accepted_records = [
-                record
-                for record in accepted
-                if str(record["text"]).splitlines()[0] == value["claim"]
-            ]
-        latest = accepted_records[-1] if accepted_records else None
+                for record in reversed(view.records)
+                if record["author"] == owner
+                and str(record["text"]).splitlines()[0] in events
+                and view.outcomes.get(int(record["record_id"]), (False, ""))[0]
+            ),
+            None,
+        )
         value.update(
-            workflow_state=task["state"],
-            claim_state="accepted" if value["state"] == "working" else "available",
             checkpoint=bool(task["checkpoint"]),
             handoff=bool(task["handoff"]),
             approvals=sum(item["state"] == "approved" for item in task["reviews"]),
             required_reviews=view.required_reviews,
-            journal_record_count=len(accepted_records),
             last_journal_record_id=(int(latest["record_id"]) if latest else None),
-            last_journal_worker_id=(str(latest["author"]) if latest else None),
             last_journal_event=(str(latest["text"]).splitlines()[0] if latest else None),
         )
         return value

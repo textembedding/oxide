@@ -185,13 +185,9 @@ def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
         ("B", "blocked"),
     ]
     active = work[0]
-    assert active["workflow_state"] == "authoring"
-    assert active["claim_state"] == "accepted"
     assert active["checkpoint"] is True
     assert active["handoff"] is False
-    assert active["journal_record_count"] == 2
     assert active["last_journal_record_id"] == checkpoint["record_id"]
-    assert active["last_journal_worker_id"] == winner
     assert active["last_journal_event"] == "checkpoint: task:A"
 
 
@@ -218,8 +214,6 @@ def test_internal_verification_review_claim_uses_the_same_atomic_race(workflow) 
         for item in client.search("run", "queue:all")
         if item["claim"] == claim and item["state"] == "working"
     )
-    assert active_review["journal_record_count"] == 1
-    assert active_review["last_journal_worker_id"] == winner
     assert active_review["last_journal_event"] == claim
     assert len(Journal(database).search("run", claim)) == 2
 

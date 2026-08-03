@@ -53,18 +53,19 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
         "tasks": [
             {
                 "task_id": "ACTIVE-LONG-TASK-NAME",
+                "root_task_id": "ACTIVE-LONG-TASK-NAME",
                 "state": "working",
-                "role": "author",
+                "role": "revision",
                 "worker_id": "worker-0",
                 "workflow_state": "authoring",
                 "claim_state": "accepted",
-                "generation": 0,
-                "checkpoint": True,
+                "generation": 2,
+                "checkpoint": False,
                 "handoff": False,
-                "journal_record_count": 2,
-                "last_journal_record_id": 17,
+                "journal_record_count": 1,
+                "last_journal_record_id": 140,
                 "last_journal_worker_id": "worker-0",
-                "last_journal_event": "checkpoint: task:ACTIVE-LONG-TASK-NAME",
+                "last_journal_event": "claim: task:ACTIVE-LONG-TASK-NAME",
             },
             {"task_id": "READY", "state": "ready", "worker_id": None},
             {"task_id": "NOISE", "state": "blocked", "worker_id": None},
@@ -76,11 +77,12 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "READY" not in rendered
     assert "NOISE" not in rendered
     assert "DONE" not in rendered
-    assert "journal: authoring / claim accepted" in rendered
-    assert "gen 0 / checkpoint yes" in rendered
-    assert "handoff: no" in rendered
-    assert "accepted records: 2" in rendered
-    assert "last record: #17 / worker-0" in rendered
+    assert "worker-0 is revising candidate 3" in rendered
+    assert "step: editing files" in rendered
+    assert "journal #140: revision began" in rendered
+    assert "authoring" not in rendered
+    assert "claim accepted" not in rendered
+    assert "checkpoint no" not in rendered
     assert all(len(line) <= 40 for line in rendered.splitlines())
     assert "|" not in rendered
 
