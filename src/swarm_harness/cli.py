@@ -158,15 +158,13 @@ def _git(repository: Path, *arguments: str, check: bool = True) -> str:
 
 
 def _git_succeeds(repository: Path, *arguments: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "-C", str(repository), *arguments],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
-        == 0
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
     )
+    return result.returncode == 0
 
 
 def _slug(value: str) -> str:
@@ -791,12 +789,8 @@ def _safe(value: object) -> str:
     rendered: list[str] = []
     for character in str(value):
         codepoint = ord(character)
-        if character == "\n":
-            rendered.append(character)
-        elif character == "\t":
-            rendered.append("\\t")
-        elif character == "\r":
-            rendered.append("\\r")
+        if character in "\n\t\r":
+            rendered.append({"\n": "\n", "\t": "\\t", "\r": "\\r"}[character])
         elif codepoint < 32 or 127 <= codepoint <= 159:
             rendered.append(f"\\x{codepoint:02x}")
         elif codepoint in {0x2028, 0x2029} or 0xD800 <= codepoint <= 0xDFFF:
@@ -806,17 +800,19 @@ def _safe(value: object) -> str:
     return "".join(rendered)
 
 
-def _code(value: object, language: str, color: bool) -> str:
+def _code(value: object, language: str, color: bool, base: str = "") -> str:
     if not (safe := _safe(value).rstrip("\n")) or not color:
         return safe
-    if language == "yaml-input":
-        safe = _YAML_VALUE.sub(lambda m: m[1] + _style(m[2], "38;5;208", True), safe)
     if language.startswith("yaml"):
+        safe = _YAML_VALUE.sub(lambda m: m[1] + _style(m[2], "38;5;214", True), safe)
         return _YAML_KEY.sub(lambda m: m[1] + _style(m[2], "94", True) + m[3], safe)
     try:
         lexer = get_lexer_by_name(language) if language else guess_lexer(safe)
         rendered = pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
-        return rendered.replace("\x1b[33m", "\x1b[38;5;208m")
+        if base:
+            marker = f"\x1b[{base}m"
+            rendered = marker + rendered.replace("\x1b[39;49;00m", "\x1b[0m" + marker) + "\x1b[0m"
+        return rendered.replace("\x1b[33m", "\x1b[38;5;214m")
     except ClassNotFound:
         return safe
 
@@ -850,24 +846,26 @@ def _display_yaml(value: object) -> str:
 def _tool_value(item: dict[str, Any], phase: str, color: bool) -> str:
     server = item.get("server", "")
     tool = item.get("tool", item.get("name", ""))
-    heading = f"{_style('TOOL', '1;36', color)} {phase} {_style(f'{server}.{tool}'.strip('.'), '1;34', color)}"
+    heading = f"{_style('TOOL', '1;36', color)} {_style(phase, '2', color)} {_style(f'{server}.{tool}'.strip('.'), '1;34', color)}"
     arguments = item.get("arguments", item.get("input", {}))
     result = item.get("result", item.get("output"))
     if server == "journal" and isinstance(arguments, dict) and "yaml" in arguments:
         input_yaml = _code(_display_yaml(arguments["yaml"]), "yaml-input", color)
-        blocks = [heading, "input.yaml:\n" + _indent(input_yaml)]
+        blocks = [heading, f"{_style('input.yaml', '1;34', color)}:\n" + _indent(input_yaml)]
         if isinstance(result, dict):
             content = result.get("content")
             if isinstance(content, list) and content and isinstance(content[0], dict):
                 output_yaml = _code(_display_yaml(content[0].get("text", "")), "yaml", color)
-                blocks.append("output.yaml:\n" + _indent(output_yaml))
+                blocks.append(f"{_style('output.yaml', '1;34', color)}:\n" + _indent(output_yaml))
         return "\n".join(blocks)
     return heading + "\n" + _indent(json.dumps(arguments, indent=2, sort_keys=True))
 
 
 def _event_value(event: Any, color: bool) -> str:
+    if isinstance(event, str):
+        return _safe(event)
     if not isinstance(event, dict):
-        return _safe(event) if isinstance(event, str) else _code(json.dumps(event), "json", color)
+        return _code(json.dumps(event), "json", color, "38;5;250")
     event_type = str(event.get("type", "event"))
     phase = event_type.split(".", 1)[-1].upper()
     item = event.get("item")
@@ -877,17 +875,19 @@ def _event_value(event: Any, color: bool) -> str:
         command = item.get("command", item.get("cmd", ""))
         output = item.get("aggregated_output", item.get("output", ""))
         parts = [
-            f"{_style('COMMAND', '1;36', color)} {phase}",
-            "command:\n" + _indent(_code(command, "bash", color)),
+            f"{_style('COMMAND', '1;36', color)} {_style(phase, '2', color)}",
+            f"{_style('command', '1;34', color)}:\n" + _indent(_code(command, "bash", color)),
         ]
         if output:
             language = "diff" if "git diff" in str(command) else ""
-            parts.append("output:\n" + _indent(_code(output, language, color)))
+            output_text = _code(output, language, color, "38;5;250")
+            parts.append(f"{_style('output', '1;34', color)}:\n" + _indent(output_text))
         return "\n".join(parts)
     if isinstance(item, dict) and item.get("type") in {"reasoning", "agent_message"}:
         label = "REASONING" if item["type"] == "reasoning" else "AGENT"
-        return f"{label} [{phase}]\n" + _indent(_code(item.get("text", ""), "markdown", color))
-    return _code(json.dumps(event, ensure_ascii=False, indent=2), "json", color)
+        message = _code(item.get("text", ""), "markdown", color, "38;5;153")
+        return f"{_style(label, '1;32', color)} [{_style(phase, '2', color)}]\n" + _indent(message)
+    return _code(json.dumps(event, ensure_ascii=False, indent=2), "json", color, "38;5;250")
 
 
 def highlight_stream_line(line: str, *, color: bool, raw: bool = False) -> str:

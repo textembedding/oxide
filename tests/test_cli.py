@@ -85,6 +85,9 @@ def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
     assert "[12:34:56]" not in plain
     assert cli.highlight_stream_line(line, color=False, raw=True) == line
     assert "\x1b[" in colored
+    assert "\x1b[1;34minput.yaml\x1b[0m:" in colored
+    assert "\x1b[38;5;214m" in colored
+    assert "\x1b[38;5;208m" not in colored
     assert json.dumps(event) not in colored
 
 
@@ -126,7 +129,7 @@ def test_observer_highlights_yaml_fields_and_colors_input_values_as_strings() ->
         "yaml-input",
         True,
     )
-    orange = "\x1b[38;5;208m"
+    orange = "\x1b[38;5;214m"
     assert f"\x1b[94mtext\x1b[0m:{orange} |-\x1b[0m" in rendered
     assert f"\x1b[94mblocked\x1b[0m:{orange} task:S0-POLICY-SEARCH-VERIFIERS\x1b[0m" in rendered
     assert (
@@ -139,6 +142,29 @@ def test_observer_highlights_yaml_fields_and_colors_input_values_as_strings() ->
     source = cli._code('value = "quoted string"', "python", True)
     assert orange in source
     assert "\x1b[33m" not in source
+
+
+def test_observer_uses_codex_base_colors_and_colored_section_labels() -> None:
+    agent = cli._event_value(
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "prose"}},
+        True,
+    )
+    command = cli._event_value(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "printf result",
+                "aggregated_output": "plain command output",
+            },
+        },
+        True,
+    )
+    assert "\x1b[1;32mAGENT\x1b[0m [\x1b[2mCOMPLETED\x1b[0m]" in agent
+    assert "\x1b[38;5;153mprose" in agent
+    assert "\x1b[1;34mcommand\x1b[0m:" in command
+    assert "\x1b[1;34moutput\x1b[0m:" in command
+    assert "\x1b[38;5;250m" in command
 
 
 def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Path, capsys) -> None:
