@@ -1,6 +1,6 @@
-stage: toy
+stage: smoke
 enabled: true
-goal: Prove dependency-aware claim, submit, verify, and merge behavior.
+goal: Prove the complete native two-tool launcher, MCP, worker, journal, and Git path without model spend.
 tasks:
   - id: TOY-01
     title: Create the first fixture file

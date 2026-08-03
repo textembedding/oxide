@@ -1,16 +1,16 @@
-# Production Rust Kernel Stages 0–3
+# Memory Roadmap Workloads
 
-Detailed Stage 0–3 product work has intentionally not been copied from the
-legacy repository.
+Each file in `stages/` is an executable work contract consumed by the journal
+prototype. A task contains an ID, objective, dependencies, and exact checks.
 
-Populate this document only from a human-reviewed product roadmap. Include
-for each stage:
+`stages/stage0.yaml` is derived from the memory specification and contains the
+complete 16-milestone Stage 0 implementation graph plus its 76-command closing
+gate. Fifteen milestones are independent and immediately claimable; the final
+decision-verifier milestone depends on all fifteen.
 
-- goal
-- concrete deliverables
-- task dependencies
-- task prompts
-- acceptance commands
-- stage-completion gate
+`smoke.yaml` is the three-task model-free end-to-end fixture used by
+`./swarmctl verify`.
 
-Do not include legacy harness implementation details.
+Later roadmap contracts can be added as `stages/<workload>.yaml` and will run
+through the same generic two-tool worker. Empty stage placeholders and harness
+lifecycle detail do not belong in this directory.

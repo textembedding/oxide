@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Model-free Codex JSONL fixture for the native end-to-end smoke test."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+class Mcp:
+    def __init__(self) -> None:
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "swarm_harness.journal_mcp"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.number = 0
+        self.request("initialize", {"protocolVersion": "2025-06-18"})
+        listed = self.request("tools/list", {})
+        assert [tool["name"] for tool in listed["tools"]] == [
+            "journal_add",
+            "journal_search",
+        ]
+
+    def request(self, method: str, params: dict) -> dict:
+        self.number += 1
+        request = {"jsonrpc": "2.0", "id": self.number, "method": method, "params": params}
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.flush()
+        response = json.loads(self.process.stdout.readline())
+        assert response["id"] == self.number and "error" not in response
+        return response["result"]
+
+    def tool(self, name: str, yaml: str) -> str:
+        item = {
+            "type": "mcp_tool_call",
+            "server": "journal",
+            "tool": name,
+            "arguments": {"yaml": yaml},
+            "status": "in_progress",
+        }
+        print(json.dumps({"type": "item.started", "item": item}), flush=True)
+        result = self.request("tools/call", {"name": name, "arguments": {"yaml": yaml}})
+        item = {**item, "status": "completed", "result": result}
+        print(json.dumps({"type": "item.completed", "item": item}), flush=True)
+        if result.get("isError"):
+            raise RuntimeError(result)
+        return result["content"][0]["text"]
+
+    def close(self) -> None:
+        assert self.process.stdin is not None
+        self.process.stdin.close()
+        if self.process.wait(timeout=5):
+            raise RuntimeError("MCP fixture failed")
+
+
+def git(*arguments: str) -> str:
+    result = subprocess.run(["git", *arguments], text=True, capture_output=True, check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return result.stdout.strip()
+
+
+def block(field: str, value: str) -> str:
+    return field + ": |-\n" + "\n".join("  " + line for line in value.splitlines())
+
+
+def task_id(document: str) -> str | None:
+    match = re.search(r'^\s+task_id: "([^"]+)"$', document, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def main() -> int:
+    prompt = sys.argv[-1]
+    worker = re.search(r"Implement one Stage task as ([^.]*)\.", prompt).group(1)
+    branch = re.search(r"refs/heads/([^`]+)` from origin", prompt).group(1)
+    mcp = Mcp()
+    try:
+        active = mcp.tool("journal_search", f"query: worker:{worker}")
+        task = task_id(active)
+        if task is None:
+            ready = mcp.tool("journal_search", "query: queue:ready")
+            task = task_id(ready)
+            if task is None:
+                return 0
+            mcp.tool("journal_add", f"text: claim: task:{task}")
+        mcp.tool("journal_search", f"query: task:{task}")
+
+        output = Path("toy-output")
+        output.mkdir(exist_ok=True)
+        if task == "TOY-01":
+            (output / "one.txt").write_text("one\n", encoding="utf-8")
+        elif task == "TOY-02":
+            (output / "two.txt").write_text("two\n", encoding="utf-8")
+        elif task == "TOY-03":
+            one = (output / "one.txt").read_text(encoding="utf-8").strip()
+            two = (output / "two.txt").read_text(encoding="utf-8").strip()
+            (output / "combined.txt").write_text(f"{one}\n{two}\n", encoding="utf-8")
+        else:
+            raise RuntimeError(f"unexpected fixture task: {task}")
+
+        mcp.tool(
+            "journal_add",
+            block("text", f"checkpoint: task:{task}\nfixture edit written"),
+        )
+        git("add", "toy-output")
+        git("commit", "-m", f"Complete {task}")
+        git("fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/swarm-integration")
+        git("rebase", "refs/remotes/origin/swarm-integration")
+        git("push", "origin", f"HEAD:refs/heads/{branch}")
+        commit = git("rev-parse", "HEAD")
+        mcp.tool(
+            "journal_add",
+            block("text", f"handoff: task:{task}\nchecks passed\ncommit: {commit}"),
+        )
+        mcp.tool(
+            "journal_add",
+            block(
+                "text",
+                f"complete: task:{task}\ncommit: {commit}\nverified: true",
+            ),
+        )
+        print(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": f"Completed {task}."},
+                }
+            ),
+            flush=True,
+        )
+        return 0
+    finally:
+        mcp.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

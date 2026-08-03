@@ -2,132 +2,119 @@
 
 ## Purpose
 
-The harness coordinates coding workers implementing Stages 0–3 in a
-separate target repository. It dogfoods a minimal Python journal prototype
-while those workers build the production Rust kernel that will replace it.
+The harness runs the memory roadmap while dogfooding the exact interface that
+the production Rust journal kernel will replace. The Python implementation is
+temporary and disposable. Its public coordination surface is permanent:
 
-## Worker-visible tool surface
+1. search journal state and text;
+2. append journal text atomically.
 
-The Codex worker receives exactly two journal tools. MCP startup is mandatory;
-the invocation fails if this closed surface cannot initialize.
+## Exact worker interface
 
-### `journal_search`
+Every Codex invocation receives one required MCP server named `journal`. Its
+tool list contains exactly `journal_search` and `journal_add`. Both accept a
+single `yaml` string argument.
 
-Request:
-
-```json
-{"yaml": "query: task:S0-01"}
-```
-
-Response:
+Seek ready work:
 
 ```yaml
-matches:
-  - journal_id: 17
-    author_kind: seed
-    task_id: S0-01
-    body: "task:S0-01 ..."
+query: queue:ready
 ```
 
-Search is a bounded, literal projection over authorized durable entries. It is
-for context recovery only and never grants lifecycle authority.
-
-### `journal_add`
-
-Request:
-
-```json
-{
-  "yaml": "text: |-\n  checkpoint: task:S0-01\n  durable state"
-}
-```
-
-Response:
+Recover the stable worker slot:
 
 ```yaml
-saved: true
-journal_id: 18
+query: worker:worker-0
 ```
 
-Free text records observations, checkpoints, and handoffs. It cannot claim,
-submit, accept, retry, vote, or complete a stage. Submission requires at least
-one `journal_search`, an exact `checkpoint: task:<id>` entry, and an exact
-`handoff: task:<id>` entry from the current fenced attempt.
+Claim one task atomically:
 
-The host adapter performs atomic claim, typed submission, and validation-vote
-transitions outside the model-visible process. Those private calls are not
-worker tools and cannot be invoked through MCP. Submission is not acceptance;
-it opens a proposal for independent validation.
+```yaml
+text: claim: task:S0-STABLE-SEAMS
+```
 
-## Journal boundary
+Persist implementation context:
 
-The harness talks to the journal through a small implementation-neutral JSON
-protocol over a local socket. Harness code must not import SQLite classes or
-depend on table layout.
+```yaml
+text: |-
+  checkpoint: task:S0-STABLE-SEAMS
+  Added the seam schema and initial goldens.
+```
 
-The Python service is temporary. The Rust service later implements the same
-protocol so the backend can be swapped without changing worker prompts,
-stage manifests, or launcher behavior.
+Publish the self-verification handoff:
 
-## Durable state
+```yaml
+text: |-
+  handoff: task:S0-STABLE-SEAMS
+  Files: ...
+  Checks: ...
+  Pushed commit: ...
+```
 
-The journal persists only externally meaningful orchestration state:
+Complete after pushing the verified commit to the shared integration ref:
 
-- runs
-- tasks and dependencies
-- claims, ownership mode, and optional lease expiry
-- submissions, proposals, validation claims, votes, and committed decisions
-- append-only operator/launcher events
-- worker-proposed blockers and follow-up work
+```yaml
+text: |-
+  complete: task:S0-STABLE-SEAMS
+  commit: 0123456789abcdef0123456789abcdef01234567
+  verified: true
+```
 
-Subprocess implementation details are not journal state.
+Claims, checkpoints, handoffs, and completions are ordinary journal text. The
+prototype interprets their exact first lines atomically. There are no worker
+registration, heartbeat, submission, vote, release, lease, or acceptance APIs.
 
-## Ownership and recovery
+## Swappable backend
 
-Claims use an opaque token. Only the active token may submit. Local macOS
-workers use `observable` ownership with no expiry: the launcher directly
-observes each worker process, atomically fences its claim when that process
-disappears, terminates any orphaned Codex child for the task worktree, and
-immediately starts a replacement worker. A successful submission releases
-implementation ownership before independent proposal validation begins.
+`src/swarm_harness/journal.py` is the only module containing journal semantics
+or SQLite. It owns the run, task, and append-only entry projections and accepts
+only operations named `journal_add` and `journal_search` over its local socket.
+`journal_mcp.py` is the exact MCP facade used by Codex.
 
-An expiry exists only when a caller explicitly requests `lease` ownership for
-a distributed or otherwise ambiguous worker whose liveness cannot be directly
-observed, supplying both `"ownership_mode": "lease"` and a positive
-`lease_seconds`. Launcher restart reconstructs ownership from the journal and
-reconciles it against the currently observed local worker processes.
+The launcher and host worker adapter use the same two operations. Replacing the
+Python service with Rust therefore requires implementing those two operations,
+not preserving a Python table layout or private lifecycle protocol.
 
-## Proposal and decision authority
+## Worker ownership and recovery
 
-There is no privileged planning or acceptance actor. Any worker may open a
-closed proposal for candidate acceptance, retry, task decomposition, or a
-dependency change. The journal admits at most three validators, excludes the
-author, accepts one vote per worker, and commits on two matching votes. A split
-therefore requires the third validator. Rejected candidate-acceptance proposals
-atomically queue a retry. Approved graph proposals atomically change the task
-graph. When all tasks are accepted, the same mechanism validates and commits
-stage completion.
+Each worker slot owns one persistent independent Git clone. A worker claims at
+most one task at a time. The claim has no duration and no lease timer. If Codex
+or its host worker exits, the thin launcher starts the same slot again. The
+replacement searches `worker:<slot>`, finds the claim, searches the task's
+entries, and resumes the same clone immediately.
 
-Direct `accept_task`, `reject_task`, and terminal `set_run_state` operations are
-fail-closed. Neither a launcher process nor a worker process can bypass quorum.
+Pause stops all processes but preserves claims and clones. Reset is the only
+operation that discards an active campaign, and it first moves the entire run
+directory into the local archive.
 
-## Git isolation
+## Self-directed integration
 
-Each coding task receives its own branch and Git worktree. Workers never write
-directly to the target repository's main checkout. Independent validators run
-the task checks against the exact clean candidate. The launcher may merge only
-a proposal whose quorum decision is already committed in SQLite, and it reports
-the mechanical merge result back to the journal.
+Workers perform their own task checks, commit their changes, fetch the shared
+integration ref, rebase, rerun checks, and push. A rejected push means another
+worker integrated first; the worker fetches, rebases, rechecks, and retries.
+There is no central merge actor.
 
-## Thin launcher boundary
+The journal admits completion only from the claiming worker and only after that
+worker has appended both checkpoint and handoff records plus an exact 40-byte
+hex commit and `verified: true`. Completing a task makes its dependants ready.
+Completing every task makes the run complete.
 
-The long-lived local process has exactly four jobs: serve the journal socket,
-observe worker process liveness, prepare journal-authorized worktrees, and apply
-already-committed Git merges. It does not run acceptance checks, choose retry,
-change dependencies, create tasks, or mark a stage complete.
+## Thin launcher
+
+The persistent process has four mechanical jobs:
+
+- start the Python journal prototype;
+- create missing worker clones and the integration ref;
+- ensure the configured worker slots have live host processes;
+- stop when the journal reports pause or completion.
+
+It does not choose tasks, reclaim claims, validate candidates, merge commits,
+change dependencies, or mark tasks complete.
 
 ## Observability
 
-Each real worker runs in its own visible terminal emulator window. Standard
-Codex output and tool activity remain visible. The harness does not create a
-custom trace-capture or terminal-multiplexing system.
+Codex emits JSONL directly into each worker log. The observer renders model
+messages, visible reasoning summaries, commands, file changes, and both journal
+tool calls with terminal-safe syntax coloring. The queue view is a disposable
+projection. It is single-column, at most 40 characters wide, prioritizes
+working tasks, and omits blocked tasks.

@@ -1,629 +1,218 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-import tempfile
+import secrets
 import threading
+import time
+from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pytest
 
-from swarm_harness.journal_client import JournalClient
-from swarm_harness.protocol import JournalError
-from swarm_harness.sqlite_service import JournalServer, SQLiteJournal
+from swarm_harness.cli import load_stage
+from swarm_harness.journal import Journal, JournalClient, JournalError, serve_in_thread
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = 1_000.0
+def _stage() -> dict:
+    return {
+        "stage": 0,
+        "enabled": True,
+        "goal": "test",
+        "tasks": [
+            {
+                "id": "A",
+                "title": "first",
+                "prompt": "build A",
+                "depends_on": [],
+                "checks": ["test A"],
+            },
+            {
+                "id": "B",
+                "title": "second",
+                "prompt": "build B",
+                "depends_on": ["A"],
+                "checks": ["test B"],
+            },
+        ],
+        "stage_gate": ["test all"],
+    }
 
-    def __call__(self) -> float:
-        return self.now
+
+def _bootstrap(client: JournalClient, run_id: str, stage: dict | None = None) -> None:
+    document = json.dumps(stage or _stage(), separators=(",", ":"))
+    client.add(run_id, "launcher", f"bootstrap: run:{run_id}\nstage-json: {document}")
+
+
+def _socket() -> Path:
+    return Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
 
 
 @pytest.fixture
 def journal(tmp_path: Path):
-    clock = Clock()
-    socket_root = tempfile.TemporaryDirectory(prefix="swarm-j-", dir="/tmp")
-    socket_path = Path(socket_root.name) / "journal.sock"
-    server = JournalServer(socket_path, SQLiteJournal(tmp_path / "journal.db", clock))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    client = JournalClient(socket_path)
-    yield client, clock, socket_path
+    socket = _socket()
+    database = tmp_path / "journal.sqlite3"
+    server, thread = serve_in_thread(database, socket)
+    client = JournalClient(socket)
+    _bootstrap(client, "run")
+    yield client, database, socket
     server.shutdown()
     server.server_close()
-    thread.join()
-    socket_root.cleanup()
+    thread.join(timeout=5)
 
 
-def seed(client: JournalClient, tasks: list[dict] | None = None) -> None:
-    client.call(
-        "create_run",
-        run_id="run",
-        workload="toy",
-        target_repo="/target",
-        integration_branch="codex/test",
-        integration_worktree="/integration",
-        tasks=tasks
-        or [
-            {
-                "id": "A",
-                "title": "A",
-                "prompt": "Do A",
-                "depends_on": [],
-                "checks": ["true"],
-            }
-        ],
+def _finish(client: JournalClient, run_id: str, worker: str, task: str, number: int) -> None:
+    client.add(run_id, worker, f"checkpoint: task:{task}\nimplementation saved")
+    client.add(run_id, worker, f"handoff: task:{task}\nchecks passed")
+    client.add(
+        run_id,
+        worker,
+        f"complete: task:{task}\ncommit: {number:040x}\nverified: true",
     )
 
 
-def prepare(client: JournalClient, task_id: str = "A") -> None:
-    client.call(
-        "prepare_task",
-        run_id="run",
-        task_id=task_id,
-        branch=f"codex/{task_id}",
-        worktree_path=f"/worktrees/{task_id}",
-    )
+def test_exactly_two_operations_and_atomic_claim(journal) -> None:
+    client, database, _ = journal
+    prototype = Journal(database)
+    with pytest.raises(JournalError, match="only journal_add and journal_search"):
+        prototype.dispatch("claim_task", {})
 
+    barrier = threading.Barrier(2)
 
-def complete_worker_protocol(
-    client: JournalClient,
-    claim: dict,
-    *,
-    run_id: str = "run",
-    worker_id: str = "worker",
-    task_id: str = "A",
-) -> None:
-    binding = {
-        "run_id": run_id,
-        "worker_id": worker_id,
-        "task_id": task_id,
-        "claim_token": claim["claim_token"],
-    }
-    client.call("journal_search", **binding, query=f"task:{task_id}")
-    client.call(
-        "journal_add",
-        **binding,
-        text=f"checkpoint: task:{task_id}\nstate: durable",
-    )
-    client.call(
-        "journal_add",
-        **binding,
-        text=f"handoff: task:{task_id}\nstate: complete",
-    )
-
-
-def test_concurrent_workers_cannot_claim_the_same_task(journal) -> None:
-    client, _, socket_path = journal
-    seed(client)
-    prepare(client)
-    barrier = threading.Barrier(3)
-    results: list[dict] = []
-
-    def claim(worker: str) -> None:
-        own = JournalClient(socket_path)
+    def claim(worker: str) -> str:
+        contender = JournalClient(client.socket_path)
         barrier.wait()
-        results.append(own.claim_task("run", worker, 60))
+        try:
+            contender.add("run", worker, "claim: task:A")
+            return "accepted"
+        except JournalError:
+            return "rejected"
 
-    threads = [threading.Thread(target=claim, args=(f"worker-{index}",)) for index in range(2)]
-    for thread in threads:
-        thread.start()
-    barrier.wait()
-    for thread in threads:
-        thread.join()
-    assert sorted(item["status"] for item in results) == ["claimed", "idle"]
-
-
-def test_stale_token_rejects_and_valid_submission_survives_restart(journal) -> None:
-    client, _, _ = journal
-    seed(client)
-    prepare(client)
-    claim = client.claim_task("run", "worker", 60)
-    with pytest.raises(JournalError, match="stale"):
-        client.submit_result(
-            run_id="run",
-            task_id="A",
-            claim_token="incorrect",
-            outcome="completed",
-            summary="bad",
-            commit_sha="a" * 40,
-            blockers=[],
-            proposed_followups=[],
-        )
-    complete_worker_protocol(client, claim)
-    client.submit_result(
-        run_id="run",
-        task_id="A",
-        claim_token=claim["claim_token"],
-        outcome="completed",
-        summary="done",
-        commit_sha="a" * 40,
-        blockers=[],
-        proposed_followups=[{"title": "not executable"}],
-    )
-    assert client.run_status("run")["tasks"][0]["state"] == "submitted"
-    assert client.call(
-        "reclaim_worker",
-        run_id="run",
-        worker_id="worker",
-        reason="worker_process_exited_after_submission",
-    ) == {"run_state": "running", "reclaimed": []}
-    status = client.run_status("run")
-    assert status["proposed_followups"] == [
-        {"task_id": "A", "proposal": {"title": "not executable"}}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(claim, ("worker-0", "worker-1")))
+    assert sorted(outcomes) == ["accepted", "rejected"]
+    working = client.search("run", "queue:all")
+    assert [(task["task_id"], task["state"]) for task in working] == [
+        ("A", "working"),
+        ("B", "blocked"),
     ]
-    assert len(status["tasks"]) == 1
 
 
-def test_submission_requires_exact_two_tool_protocol(journal) -> None:
+def test_worker_self_completion_unlocks_dependency_and_survives_restart(journal) -> None:
+    client, database, socket = journal
+    assert [task["task_id"] for task in client.search("run", "queue:ready")] == ["A"]
+    assert client.search("run", "task:A")[0]["checks"] == ["test A"]
+    assert client.search("run", "task:B")[0]["checks"] == ["test B"]
+    client.add("run", "worker-0", "claim: task:A")
+    with pytest.raises(JournalError, match="checkpoint"):
+        client.add(
+            "run",
+            "worker-0",
+            "complete: task:A\ncommit: " + "1" * 40 + "\nverified: true",
+        )
+    _finish(client, "run", "worker-0", "A", 1)
+    assert [task["task_id"] for task in client.search("run", "queue:ready")] == ["B"]
+
+    # Closing and reopening the prototype preserves the queue without a controller.
+    # The fixture owns the live server, so use a second database copy for this proof.
+    restarted = Journal(database)
+    assert restarted.search("run", "task:A")[0]["commit_sha"] == f"{1:040x}"
+
+    client.add("run", "worker-1", "claim: task:B")
+    _finish(client, "run", "worker-1", "B", 2)
+    assert client.search("run", "run:state")[0]["state"] == "complete"
+    assert socket.exists()
+
+
+def test_pause_resume_is_itself_two_tool_journal_text(journal) -> None:
     client, _, _ = journal
-    seed(client)
-    prepare(client)
-    claim = client.claim_task("run", "worker")
-    submission = {
-        "run_id": "run",
-        "task_id": "A",
-        "claim_token": claim["claim_token"],
-        "outcome": "completed",
-        "summary": "done",
-        "commit_sha": "a" * 40,
-        "blockers": [],
-        "proposed_followups": [],
-    }
-    with pytest.raises(JournalError, match="journal_search"):
-        client.submit_result(**submission)
-    binding = {
-        "run_id": "run",
-        "worker_id": "worker",
-        "task_id": "A",
-        "claim_token": claim["claim_token"],
-    }
-    client.call("journal_search", **binding, query="not-the-task-handle")
-    client.call("journal_add", **binding, text="checkpoint: task:A\ndurable")
-    client.call("journal_add", **binding, text="handoff: task:A\ncomplete")
-    with pytest.raises(JournalError, match="exact task journal_search"):
-        client.submit_result(**submission)
-    client.call("journal_search", **binding, query="task:A")
-    assert client.submit_result(**submission)["recorded"] is True
+    assert client.add("run", "launcher", "control: pause")["state"] == "paused"
+    with pytest.raises(JournalError, match="paused"):
+        client.add("run", "worker-0", "claim: task:A")
+    assert client.add("run", "launcher", "control: resume")["state"] == "running"
+    assert client.add("run", "worker-0", "claim: task:A")["claim"] == "accepted"
 
 
-def test_open_pre_tool_candidate_is_requeued_on_cutover(tmp_path: Path) -> None:
-    database = tmp_path / "cutover.db"
-    journal = SQLiteJournal(database)
-    journal.op_create_run(
-        {
-            "run_id": "run",
-            "workload": "test",
-            "target_repo": "/target",
-            "integration_branch": "main",
-            "integration_worktree": "/integration",
-            "tasks": [
-                {
-                    "id": "A",
-                    "title": "A",
-                    "prompt": "A",
-                    "depends_on": [],
-                    "checks": [],
-                }
-            ],
-        }
-    )
-    journal.op_prepare_task(
-        {
-            "run_id": "run",
-            "task_id": "A",
-            "branch": "codex/A",
-            "worktree_path": "/worktrees/A",
-        }
-    )
-    claim = journal.op_claim_task(
-        {
-            "run_id": "run",
-            "worker_id": "worker",
-            "ownership_mode": "observable",
-        }
-    )
-    binding = {
-        "run_id": "run",
-        "worker_id": "worker",
-        "task_id": "A",
-        "claim_token": claim["claim_token"],
-    }
-    journal.op_journal_search({**binding, "query": "task:A"})
-    journal.op_journal_add({**binding, "text": "checkpoint: task:A"})
-    journal.op_journal_add({**binding, "text": "handoff: task:A"})
-    result = journal.op_submit_result(
-        {
-            "run_id": "run",
-            "task_id": "A",
-            "claim_token": claim["claim_token"],
-            "outcome": "completed",
-            "summary": "done",
-            "commit_sha": "a" * 40,
-            "blockers": [],
-            "proposed_followups": [],
-        }
-    )
-    with sqlite3.connect(database) as connection:
-        raw = connection.execute(
-            "SELECT payload_json FROM proposals WHERE proposal_id=?",
-            (result["proposal_id"],),
-        ).fetchone()[0]
-        payload = json.loads(raw)
-        del payload["worker_journal_protocol"]
-        connection.execute(
-            "UPDATE proposals SET payload_json=? WHERE proposal_id=?",
-            (json.dumps(payload), result["proposal_id"]),
-        )
+def test_stage0_keeps_seven_workers_productive_and_reaches_gate(tmp_path: Path) -> None:
+    stage = load_stage(Path(__file__).parents[1] / "stages" / "stage0.yaml")
+    assert len(stage["tasks"]) == 16
+    assert sum(not task["depends_on"] for task in stage["tasks"]) == 15
+    assert all(task["checks"] and all(task["checks"]) for task in stage["tasks"])
 
-    reopened = SQLiteJournal(database)
-    status = reopened.op_run_status({"run_id": "run"})
-    assert status["tasks"][0]["state"] == "pending"
-    assert status["tasks"][0]["worktree_path"] == "/worktrees/A"
-    assert status["proposals"][0]["state"] == "applied"
-    assert status["proposals"][0]["decision"] == "reject"
-    assert any(
-        event["event_type"] == "worker_protocol_cutover_requeued"
-        for event in reopened.op_events({"run_id": "run"})
-    )
+    socket = _socket()
+    server, thread = serve_in_thread(tmp_path / "stage0.sqlite3", socket)
+    client = JournalClient(socket)
+    _bootstrap(client, "stage0", stage)
+    first_claims: list[tuple[str, str]] = []
+    errors: list[tuple[int, str]] = []
+    lock = threading.Lock()
+    first_wave = threading.Barrier(7)
+    stop = threading.Event()
+
+    def work(index: int) -> None:
+        try:
+            local = JournalClient(socket)
+            worker = f"worker-{index}"
+            initial_id = stage["tasks"][index]["id"]
+            assert initial_id in {task["task_id"] for task in local.search("stage0", "queue:ready")}
+            local.add("stage0", worker, f"claim: task:{initial_id}")
+            with lock:
+                first_claims.append((worker, initial_id))
+            first_wave.wait(timeout=10)
+            counter = index + 1
+            while not stop.is_set():
+                active = local.search("stage0", f"worker:{worker}")
+                if active:
+                    _finish(local, "stage0", worker, active[0]["task_id"], counter)
+                    counter += 7
+                    continue
+                state = local.search("stage0", "run:state")[0]["state"]
+                if state == "complete":
+                    return
+                claimed = False
+                for task in local.search("stage0", "queue:ready"):
+                    try:
+                        local.add("stage0", worker, f"claim: task:{task['task_id']}")
+                    except JournalError:
+                        continue
+                    claimed = True
+                    break
+                if not claimed:
+                    time.sleep(0.005)
+            raise RuntimeError("another worker failed")
+        except Exception as error:
+            with lock:
+                errors.append((index, repr(error)))
+            stop.set()
+            raise
+
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        futures = [pool.submit(work, index) for index in range(7)]
+        finished, unfinished = wait(futures, timeout=30, return_when=ALL_COMPLETED)
+        assert len(finished) == 7
+        assert not unfinished
+    assert not errors, errors
+    assert len(first_claims) == 7
+    assert len({task for _, task in first_claims}) == 7
+    assert all(task["state"] == "complete" for task in client.search("stage0", "queue:all"))
+    assert client.search("stage0", "run:state")[0]["state"] == "complete"
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
 
 
-def test_journal_tools_are_claim_fenced_and_search_authorized_dependencies(journal) -> None:
-    client, _, _ = journal
-    seed(
-        client,
-        [
-            {"id": "A", "title": "A", "prompt": "A", "depends_on": [], "checks": []},
-            {"id": "B", "title": "B", "prompt": "B", "depends_on": ["A"], "checks": []},
-            {"id": "C", "title": "C", "prompt": "C", "depends_on": [], "checks": []},
-        ],
-    )
-    prepare(client, "A")
-    claim = client.claim_task("run", "author")
-    complete_worker_protocol(client, claim, worker_id="author")
-    submitted = client.submit_result(
-        run_id="run",
-        task_id="A",
-        claim_token=claim["claim_token"],
-        outcome="completed",
-        summary="done",
-        commit_sha="a" * 40,
-        blockers=[],
-        proposed_followups=[],
-    )
-    for validator in ("validator-0", "validator-1"):
-        validation = client.claim_work("run", validator)
-        client.submit_validation(
-            run_id="run",
-            worker_id=validator,
-            proposal_id=validation["proposal_id"],
-            claim_token=validation["claim_token"],
-            vote="approve",
-            evidence={"checked": True},
-        )
-    client.call(
-        "apply_proposal",
-        run_id="run",
-        proposal_id=submitted["proposal_id"],
-        success=True,
-        integration_commit="b" * 40,
-    )
-    prepare(client, "B")
-    downstream = client.claim_task("run", "downstream")
-    binding = {
-        "run_id": "run",
-        "worker_id": "downstream",
-        "task_id": "B",
-        "claim_token": downstream["claim_token"],
-    }
-    assert any(
-        row["task_id"] == "A"
-        for row in client.call("journal_search", **binding, query="handoff: task:A")
-    )
-    with pytest.raises(JournalError, match="stale"):
-        client.call(
-            "journal_add",
-            **{**binding, "claim_token": "wrong"},
-            text="checkpoint: task:B",
-        )
-
-
-def test_expired_lease_is_reclaimed_and_old_token_stays_invalid(journal) -> None:
-    client, clock, _ = journal
-    seed(client)
-    prepare(client)
-    old = client.claim_task("run", "old-worker", 5)
-    clock.now += 6
-    assert client.call("runnable_unprepared", run_id="run")[0]["task_id"] == "A"
-    prepare(client)
-    new = client.claim_task("run", "new-worker", 5)
-    assert new["claim_token"] != old["claim_token"]
-    with pytest.raises(JournalError, match="stale"):
-        client.submit_result(
-            run_id="run",
-            task_id="A",
-            claim_token=old["claim_token"],
-            outcome="completed",
-            summary="late",
-            commit_sha="a" * 40,
-            blockers=[],
-            proposed_followups=[],
-        )
-
-
-def test_observable_owner_has_no_expiry_and_is_reclaimed_by_process_loss(journal) -> None:
-    client, clock, _ = journal
-    seed(client)
-    prepare(client)
-    original = client.claim_task("run", "worker-0")
-
-    assert original["ownership_mode"] == "observable"
-    assert original["lease_expires_at"] is None
-    clock.now += 1_000_000
-    assert client.call("runnable_unprepared", run_id="run") == []
-
-    reclaimed = client.call(
-        "reclaim_worker",
-        run_id="run",
-        worker_id="worker-0",
-        reason="worker_process_exited",
-    )
-    assert reclaimed == {
-        "run_state": "running",
-        "reclaimed": [{"task_id": "A", "worktree_path": "/worktrees/A"}],
-    }
-    with pytest.raises(JournalError, match="stale"):
-        client.submit_result(
-            run_id="run",
-            task_id="A",
-            claim_token=original["claim_token"],
-            outcome="completed",
-            summary="late",
-            commit_sha="a" * 40,
-            blockers=[],
-            proposed_followups=[],
-        )
-    replacement = client.claim_task("run", "worker-1")
-    assert replacement["status"] == "claimed"
-    assert replacement["worktree_path"] == "/worktrees/A"
-
-
-def test_legacy_fixed_lease_client_is_retired_before_another_claim(journal) -> None:
-    client, _, _ = journal
-    seed(client)
-    prepare(client)
-
-    assert client.call(
-        "claim_task",
-        run_id="run",
-        worker_id="legacy-worker",
-        lease_seconds=3600,
-    ) == {"status": "stopped"}
-    assert client.run_status("run")["tasks"][0]["state"] == "pending"
-
-
-def test_legacy_fixed_leases_migrate_to_observable_ownership(tmp_path: Path) -> None:
-    database = tmp_path / "legacy.db"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            """
-            CREATE TABLE claims (
-              claim_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
-              task_id TEXT NOT NULL, worker_id TEXT NOT NULL,
-              token TEXT NOT NULL UNIQUE, claimed_at REAL NOT NULL,
-              expires_at REAL NOT NULL, state TEXT NOT NULL, submission_json TEXT
-            )
-            """
-        )
-        connection.execute(
-            "INSERT INTO claims(run_id,task_id,worker_id,token,claimed_at,expires_at,state) VALUES(?,?,?,?,?,?,?)",
-            ("run", "A", "worker-0", "token", 10.0, 3610.0, "active"),
-        )
-
-    SQLiteJournal(database)
-
-    with sqlite3.connect(database) as connection:
-        row = connection.execute("SELECT ownership_mode,expires_at,state FROM claims").fetchone()
-    assert row == ("observable", None, "active")
-
-
-def test_dependencies_hold_downstream_until_acceptance(journal) -> None:
-    client, _, _ = journal
-    seed(
-        client,
-        [
-            {"id": "A", "title": "A", "prompt": "A", "depends_on": [], "checks": []},
-            {"id": "B", "title": "B", "prompt": "B", "depends_on": ["A"], "checks": []},
-        ],
-    )
-    assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == ["A"]
-    prepare(client, "A")
-    claim = client.claim_task("run", "worker", 60)
-    complete_worker_protocol(client, claim)
-    submission = client.submit_result(
-        run_id="run",
-        task_id="A",
-        claim_token=claim["claim_token"],
-        outcome="completed",
-        summary="done",
-        commit_sha="a" * 40,
-        blockers=[],
-        proposed_followups=[],
-    )
-    assert client.call("runnable_unprepared", run_id="run") == []
-    for validator in ("validator-0", "validator-1"):
-        validation = client.claim_work("run", validator, 60)
-        client.submit_validation(
-            run_id="run",
-            worker_id=validator,
-            proposal_id=validation["proposal_id"],
-            claim_token=validation["claim_token"],
-            vote="approve",
-            evidence={"checked": True},
-        )
-    client.call(
-        "apply_proposal",
-        run_id="run",
-        proposal_id=submission["proposal_id"],
-        success=True,
-        integration_commit="b" * 40,
-    )
-    assert [row["task_id"] for row in client.call("runnable_unprepared", run_id="run")] == ["B"]
-
-
-def test_candidate_author_is_excluded_and_two_independent_votes_are_required(journal) -> None:
-    client, _, _ = journal
-    seed(client)
-    prepare(client)
-    claim = client.claim_task("run", "author")
-    complete_worker_protocol(client, claim, worker_id="author")
-    submission = client.submit_result(
-        run_id="run",
-        task_id="A",
-        claim_token=claim["claim_token"],
-        outcome="completed",
-        summary="candidate",
-        commit_sha="a" * 40,
-        blockers=[],
-        proposed_followups=[],
-    )
-
-    assert client.claim_work("run", "author")["status"] == "idle"
-    first = client.claim_work("run", "validator-0")
-    result = client.submit_validation(
-        run_id="run",
-        worker_id="validator-0",
-        proposal_id=first["proposal_id"],
-        claim_token=first["claim_token"],
-        vote="approve",
-        evidence={"check": "one"},
-    )
-    assert result["state"] == "open"
-    assert client.run_status("run")["tasks"][0]["state"] == "submitted"
-    assert client.claim_work("run", "validator-0")["status"] == "idle"
-
-    second = client.claim_work("run", "validator-1")
-    result = client.submit_validation(
-        run_id="run",
-        worker_id="validator-1",
-        proposal_id=second["proposal_id"],
-        claim_token=second["claim_token"],
-        vote="approve",
-        evidence={"check": "two"},
-    )
-    assert result == {
-        "recorded": True,
-        "state": "committed",
-        "decision": "approve",
-        "approvals": 2,
-        "rejections": 0,
-    }
-    assert client.run_status("run")["tasks"][0]["state"] == "integrating"
-    with pytest.raises(JournalError, match="quorum"):
-        client.call("accept_task", run_id="run", task_id="A", commit_sha="b" * 40)
-    assert submission["proposal_id"] == second["proposal_id"]
-
-
-def test_rejection_quorum_retries_candidate_without_launcher_authority(journal) -> None:
-    client, _, _ = journal
-    seed(client)
-    prepare(client)
-    claim = client.claim_task("run", "author")
-    complete_worker_protocol(client, claim, worker_id="author")
-    client.submit_result(
-        run_id="run",
-        task_id="A",
-        claim_token=claim["claim_token"],
-        outcome="completed",
-        summary="candidate",
-        commit_sha="a" * 40,
-        blockers=[],
-        proposed_followups=[],
-    )
-    for validator in ("validator-0", "validator-1"):
-        validation = client.claim_work("run", validator)
-        result = client.submit_validation(
-            run_id="run",
-            worker_id=validator,
-            proposal_id=validation["proposal_id"],
-            claim_token=validation["claim_token"],
-            vote="reject",
-            evidence={"reason": "candidate check failed"},
-        )
-    assert result["decision"] == "reject"
-    task = client.run_status("run")["tasks"][0]
-    assert task["state"] == "pending"
-    assert task["worktree_path"] is None
-    assert task["last_error"] == "candidate rejected by independent validation quorum"
-
-
-def test_permissionless_decomposition_is_applied_only_after_quorum(journal) -> None:
-    client, _, _ = journal
-    seed(client)
-    proposal = client.call(
-        "propose_change",
-        run_id="run",
-        worker_id="worker-0",
-        kind="task_decomposition",
-        payload={
-            "tasks": [
-                {
-                    "id": "B",
-                    "title": "B",
-                    "prompt": "Do B",
-                    "depends_on": ["A"],
-                    "checks": ["true"],
-                }
-            ]
-        },
-    )
-    assert len(client.run_status("run")["tasks"]) == 1
-    for validator in ("worker-1", "worker-2"):
-        validation = client.claim_work("run", validator)
-        client.submit_validation(
-            run_id="run",
-            worker_id=validator,
-            proposal_id=validation["proposal_id"],
-            claim_token=validation["claim_token"],
-            vote="approve",
-            evidence={"schema": "checked"},
-        )
-    status = client.run_status("run")
-    assert proposal["proposal_id"] == status["proposals"][0]["proposal_id"]
-    assert [task["task_id"] for task in status["tasks"]] == ["A", "B"]
-
-
-def test_pause_fences_claim_and_resume_preserves_prepared_worktree(journal) -> None:
-    client, _, _ = journal
-    seed(client)
-    prepare(client)
-    original = client.claim_task("run", "worker-0", 60)
-
-    paused = client.call("pause_run", run_id="run")
-
-    assert paused == {"state": "paused", "paused_claims": 1}
-    status = client.run_status("run")
-    assert status["run"]["state"] == "paused"
-    assert status["tasks"][0]["state"] == "pending"
-    assert status["tasks"][0]["worktree_path"] == "/worktrees/A"
-    assert client.claim_task("run", "worker-1", 60) == {"status": "paused"}
-    with pytest.raises(JournalError, match="stale"):
-        client.submit_result(
-            run_id="run",
-            task_id="A",
-            claim_token=original["claim_token"],
-            outcome="completed",
-            summary="late",
-            commit_sha="a" * 40,
-            blockers=[],
-            proposed_followups=[],
-        )
-
-    assert client.call("resume_run", run_id="run") == {"state": "running"}
-    resumed = client.claim_task("run", "worker-1", 60)
-    assert resumed["status"] == "claimed"
-    assert resumed["task_id"] == "A"
-    assert resumed["worktree_path"] == "/worktrees/A"
-    assert resumed["claim_token"] != original["claim_token"]
+@pytest.mark.parametrize(
+    "stage, message",
+    [
+        ({**_stage(), "tasks": [{**_stage()["tasks"][0], "depends_on": ["A"]}]}, "itself"),
+        ({**_stage(), "tasks": [{**_stage()["tasks"][0], "checks": [""]}]}, "invalid"),
+    ],
+)
+def test_invalid_stage_graph_fails_closed(tmp_path: Path, stage: dict, message: str) -> None:
+    socket = _socket()
+    server, thread = serve_in_thread(tmp_path / "bad.sqlite3", socket)
+    client = JournalClient(socket)
+    with pytest.raises(JournalError, match=message):
+        _bootstrap(client, "bad", stage)
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)

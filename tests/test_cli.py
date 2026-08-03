@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+from swarm_harness import cli
+
+ROOT = Path(__file__).parents[1]
+
+
+def test_stage0_contract_parses_without_phantom_checks() -> None:
+    stage = cli.load_stage(Path(__file__).parents[1] / "stages" / "stage0.yaml")
+    assert stage["stage"] == "0"
+    assert len(stage["tasks"]) == 16
+    assert len(stage["tasks"][0]["checks"]) == 1
+    assert len(stage["tasks"][-1]["depends_on"]) == 15
+    assert len(stage["stage_gate"]) == 76
+
+
+def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
+    event = {
+        "type": "item.completed",
+        "item": {
+            "type": "mcp_tool_call",
+            "server": "journal",
+            "tool": "journal_add",
+            "arguments": {"yaml": "text: |-\n  checkpoint: task:A\n  file\tname"},
+            "result": {"content": [{"type": "text", "text": "saved: true\njournal_id: 7\n"}]},
+        },
+    }
+    line = "[12:34:56] " + json.dumps(event)
+    plain = cli.highlight_stream_line(line, color=False)
+    colored = cli.highlight_stream_line(line, color=True)
+    assert "TOOL COMPLETED journal.journal_add" in plain
+    assert "input.yaml:\n             text:" in plain
+    assert "file\\tname" in plain
+    assert "output.yaml:" in plain
+    assert "\x1b[" in colored
+    assert json.dumps(event) not in colored
+
+
+def test_queue_is_single_column_bounded_and_hides_blocked() -> None:
+    snapshot = {
+        "run_id": "stage0-20260802-123456",
+        "state": "running",
+        "tasks": [
+            {"task_id": "ACTIVE-LONG-TASK-NAME", "state": "working", "worker_id": "worker-0"},
+            {"task_id": "READY", "state": "ready", "worker_id": None},
+            {"task_id": "NOISE", "state": "blocked", "worker_id": None},
+        ],
+    }
+    rendered = cli._render_queue(snapshot, color=False, width=40)
+    assert "ACTIVE-LONG-TASK-NAME" in rendered
+    assert "READY" in rendered
+    assert "NOISE" not in rendered
+    assert all(len(line) <= 40 for line in rendered.splitlines())
+    assert "|" not in rendered
+
+
+def test_macos_commands_and_controls_remain_available() -> None:
+    parser = cli.build_parser()
+    assert parser.parse_args(["verify"]).handler is cli.command_verify
+    for command in ("pause", "resume", "reset", "observe", "observe-queue", "status"):
+        arguments = ["harness", command, "--workload", "stage0"]
+        if command == "observe":
+            arguments += ["--slot", "worker-0"]
+        parsed = parser.parse_args(arguments)
+        assert parsed.workload == "stage0"
+
+
+def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(target), "config", "user.email", "test@example.com"], check=True
+    )
+    (target / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "seed"], check=True)
+
+    run_dir = ROOT / ".swarm" / "runs" / "smoke"
+    assert not run_dir.exists()
+    environment = os.environ.copy()
+    environment["PATH"] = str(ROOT / "tests" / "fake-bin") + os.pathsep + environment["PATH"]
+    environment["SWARM_NO_TERMINAL"] = "1"
+    result = subprocess.run(
+        [
+            str(ROOT / "swarmctl"),
+            "harness",
+            "run",
+            "--workload",
+            "smoke",
+            "--target",
+            str(target),
+            "--workers",
+            "2",
+            "--foreground",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    branch = config["integration_branch"]
+    assert (
+        subprocess.run(
+            ["git", "-C", str(target), "show", f"{branch}:toy-output/combined.txt"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        == "one\ntwo\n"
+    )
+    worker_logs = "\n".join(
+        path.read_text(encoding="utf-8") for path in (run_dir / "logs").glob("worker-*.log")
+    )
+    assert '"tool": "journal_search"' in worker_logs
+    assert '"tool": "journal_add"' in worker_logs
+
+    reset = subprocess.run(
+        [str(ROOT / "swarmctl"), "harness", "reset", "--workload", "smoke"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert reset.returncode == 0, reset.stdout + reset.stderr
+    assert not run_dir.exists()

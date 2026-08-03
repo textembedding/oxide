@@ -1,27 +1,31 @@
 # Acceptance Criteria
 
-The harness prototype is viable when all of the following are demonstrated:
+The disposable harness is ready when:
 
-1. Two concurrent workers cannot both claim the same task.
-2. A worker cannot submit with an incorrect, stale, or superseded claim token.
-3. Every Codex invocation exposes only `journal_add` and `journal_search` as
-   journal tools, and both calls appear in the observable JSONL stream.
-4. Submission is rejected unless the current attempt searched and persisted an
-   exact checkpoint and handoff through those tools.
-5. A valid submission and its open proposal persist across journal and launcher restart.
-6. A vanished local worker is observed, fenced, and replaced immediately; an
-   optional explicit lease still expires for an unobservable worker.
-7. Dependencies prevent downstream tasks from becoming runnable too early.
-8. A proposal author cannot vote, each validator votes once, and two matching
-   independent votes are required to commit.
-9. Candidate checks run in independent workers; the launcher can merge only an
-   already committed acceptance proposal.
-10. Retry, decomposition, dependency change, and stage completion transitions
-   are journal quorum commits rather than launcher decisions.
-11. A three-task toy stage completes end to end through proposal quorum.
-12. The toy stage later runs against the Rust backend without harness changes.
-13. One real Stage 0 task completes through the same claim, submit, verify,
-    and merge path.
+1. the source tree contains only the thin CLI, generic worker, two-tool MCP
+   facade, YAML codec, and one swappable journal prototype;
+2. only the journal prototype imports SQLite or implements task transitions;
+3. MCP lists exactly `journal_add` and `journal_search`;
+4. two concurrent workers cannot both claim one task through `journal_add`;
+5. checkpoint, handoff, exact commit, and `verified: true` are required before
+   self-completion;
+6. dependencies become ready immediately after their prerequisites complete;
+7. claims have no timer and a replacement stable slot recovers them through
+   `journal_search`;
+8. seven concurrent workers can claim seven distinct tasks and traverse the
+   complete real Stage 0 graph;
+9. stream highlighting, safe indentation, the compact queue, pause, resume,
+   reset, and all native macOS commands work;
+10. an end-to-end model-free run can launch workers, complete a workload, stop,
+    resume, and reset;
+11. one authorized paid run exposes visible calls to both journal tools and
+    completes a real task through worker-owned Git integration.
 
-Passing these criteria completes the Python prototype. It then freezes except
-for defects that violate this contract. Production behavior belongs in Rust.
+Run the model-free suite with:
+
+```bash
+./swarmctl verify
+```
+
+The Python prototype freezes after these criteria pass. Production journal
+semantics belong in the Rust kernel behind the same two tools.
