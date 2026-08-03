@@ -417,6 +417,20 @@ def _run_case(
     parent_replay = _replay(socket, namespace)
     if parent_replay["workflow_digest"] not in workflow_digests:
         raise ConcurrencyError("controller replay disagreed with worker replay")
+    claim_outcomes = {
+        actor: (
+            "crashed_after_accepted_claim" if actor in crashed else str(results[actor]["outcome"])
+        )
+        for actor in actors
+    }
+    worker_replays = {
+        str(item["actor"]): {
+            "record_count": item["record_count"],
+            "journal_digest": item["journal_digest"],
+            "workflow_digest": item["workflow_digest"],
+        }
+        for item in replays
+    }
     return {
         "case_id": case_id,
         "role": role,
@@ -425,13 +439,17 @@ def _run_case(
         "workers": workers,
         "claim": claim,
         "owner": owner,
+        "claim_outcomes": claim_outcomes,
         "crash_after_win": crash_after_win,
         "crashed_worker": owner if crash_after_win else None,
         "claim_records_appended": workers,
         "protected_records": len(protected),
+        "protected_author": protected[0]["author"],
+        "observed_by": sorted(item["actor"] for item in observations),
         "observation_digest": observations[0]["replay"]["workflow_digest"],
         "workflow_digest": parent_replay["workflow_digest"],
         "journal_digest": parent_replay["journal_digest"],
+        "worker_replays": worker_replays,
         "random_delays": delays,
     }
 

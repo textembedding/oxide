@@ -22,6 +22,18 @@ def test_real_multiprocess_claim_crash_and_replay_campaign(tmp_path: Path) -> No
     assert {item["crash_after_win"] for item in report["cases"]} == {False, True}
     assert all(item["claim_records_appended"] == 2 for item in report["cases"])
     assert all(item["protected_records"] == 1 for item in report["cases"])
+    assert all(item["protected_author"] == item["owner"] for item in report["cases"])
+    assert all(len(item["claim_outcomes"]) == 2 for item in report["cases"])
+    assert all(len(item["observed_by"]) == 2 for item in report["cases"])
+    assert all(len(item["worker_replays"]) == 2 for item in report["cases"])
+    assert all(
+        len({replay["workflow_digest"] for replay in item["worker_replays"].values()}) == 1
+        for item in report["cases"]
+    )
+    assert all(
+        len({replay["journal_digest"] for replay in item["worker_replays"].values()}) == 1
+        for item in report["cases"]
+    )
     assert all(len(item["workflow_digest"]) == 64 for item in report["cases"])
     assert all(len(item["journal_digest"]) == 64 for item in report["cases"])
 
