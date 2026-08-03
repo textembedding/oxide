@@ -978,22 +978,10 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         if task.get("head_sha") and (role.startswith("review:") or role == "merge"):
             add(str(task["head_sha"])[:12], "commit: ", "36")
         if task.get("last_journal_record_id") is not None:
-            entry = str(task.get("last_journal_entry") or "")
-            first, *payload = entry.splitlines() or [""]
-            action = first.partition(":")[0].replace("-", " ") or "update"
-            detail = next(
-                (
-                    line.partition(":")[2].strip()
-                    for line in payload
-                    if line.strip().startswith(("status:", "evidence:"))
-                ),
-                "",
-            )
-            if not detail and payload:
-                detail = payload[0].partition(":")[2].strip() or payload[0].strip()
-            add(f"{action} by {owner}", f"journal #{task['last_journal_record_id']}: ", "36")
-            detail = textwrap.shorten(detail, width=width * 2 - 8, placeholder="…")
-            add(detail or "none recorded", "detail: ", "36")
+            add(f"journal #{task['last_journal_record_id']}", code="36")
+            body = str(task.get("last_journal_body") or "")
+            for index, line in enumerate(body.splitlines() or [""]):
+                add(line, "body: " if index == 0 else "  ", "36")
         add("-" * width, code="2")
     if tasks:
         add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}", code="1;32")

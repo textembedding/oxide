@@ -604,7 +604,7 @@ class WorkflowReducer:
             approvals=sum(item["state"] == "approved" for item in task["reviews"]),
             required_reviews=view.required_reviews,
             last_journal_record_id=(int(latest["record_id"]) if latest else None),
-            last_journal_entry=(str(latest["text"]) if latest else None),
+            last_journal_body=(str(latest["text"]) if latest else None),
         )
         return value
 
