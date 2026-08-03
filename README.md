@@ -66,7 +66,7 @@ present in the target checkout and the 76-command Stage 0 gate passed there.
 # Thin launcher activity.
 ./swarmctl harness observe --workload stage0 --slot orchestrator
 
-# Compact single-column queue; blocked tasks are omitted.
+# Active claims only, with replayed journal progress. Ready and blocked work is omitted.
 ./swarmctl harness observe-queue --workload stage0
 
 # One JSON snapshot.

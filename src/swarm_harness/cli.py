@@ -941,31 +941,46 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
     add(snapshot["run_id"])
     add(str(snapshot["state"]).upper())
     add("-" * width)
-    priority = {"working": 0, "ready": 1, "complete": 2}
-    tasks = [task for task in snapshot["tasks"] if task["state"] != "blocked"]
-    tasks.sort(key=lambda task: priority.get(str(task["state"]), 3))
-    counts: dict[str, int] = {}
+    tasks = [task for task in snapshot["tasks"] if task["state"] == "working"]
     for task in tasks:
-        state = str(task["state"]).upper()
-        counts[state] = counts.get(state, 0) + 1
-        add(state)
+        add("WORKING")
         add(task["task_id"])
-        if task.get("role") and task["role"] != "task":
-            add(task["role"], "role: ")
-        if task.get("worker_id"):
-            add(task["worker_id"], "owner: ")
-        if task.get("required_reviews"):
+        role = str(task.get("role") or "task")
+        owner = str(task.get("worker_id") or "unowned")
+        add(f"{role} / {owner}")
+        workflow_state = str(task.get("workflow_state") or task["state"])
+        claim_state = str(task.get("claim_state") or "accepted")
+        add(f"{workflow_state} / claim {claim_state}", "journal: ")
+        generation = int(task.get("generation") or 0)
+        if role in {"author", "revision"}:
+            checkpoint = "yes" if task.get("checkpoint") else "no"
+            handoff = "yes" if task.get("handoff") else "no"
+            add(f"gen {generation} / checkpoint {checkpoint}")
+            add(handoff, "handoff: ")
+        else:
+            add(generation, "generation: ")
+        if role.startswith("review:") or role == "merge":
             add(
                 f"{task.get('approvals', 0)}/{task['required_reviews']}",
                 "reviews: ",
             )
-        if task.get("commit_sha"):
-            add(str(task["commit_sha"])[:12], "commit: ")
+        if task.get("head_sha"):
+            add(str(task["head_sha"])[:12], "head: ")
+        if task.get("journal_record_count") is not None:
+            add(task["journal_record_count"], "accepted records: ")
+        if task.get("last_journal_record_id") is not None:
+            last = f"#{task['last_journal_record_id']}"
+            if task.get("last_journal_worker_id"):
+                last += f" / {task['last_journal_worker_id']}"
+            add(last, "last record: ")
+        if task.get("last_journal_event"):
+            event = str(task["last_journal_event"]).split(":", 1)[0]
+            add(event, "event: ")
         add("-" * width)
-    add("SUMMARY")
-    for state in ("WORKING", "READY", "COMPLETE"):
-        if counts.get(state):
-            add(counts[state], f"{state.lower()}: ")
+    if tasks:
+        add(len(tasks), "active: ")
+    else:
+        add("NO ACTIVE CLAIMS")
     return (
         "\n".join(_style(line, "1;36" if line == "SWARM QUEUE" else "0", color) for line in lines)
         + "\n"

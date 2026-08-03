@@ -46,20 +46,41 @@ def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
     assert json.dumps(event) not in colored
 
 
-def test_queue_is_single_column_bounded_and_hides_blocked() -> None:
+def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress() -> None:
     snapshot = {
         "run_id": "stage0-20260802-123456",
         "state": "running",
         "tasks": [
-            {"task_id": "ACTIVE-LONG-TASK-NAME", "state": "working", "worker_id": "worker-0"},
+            {
+                "task_id": "ACTIVE-LONG-TASK-NAME",
+                "state": "working",
+                "role": "author",
+                "worker_id": "worker-0",
+                "workflow_state": "authoring",
+                "claim_state": "accepted",
+                "generation": 0,
+                "checkpoint": True,
+                "handoff": False,
+                "journal_record_count": 2,
+                "last_journal_record_id": 17,
+                "last_journal_worker_id": "worker-0",
+                "last_journal_event": "checkpoint: task:ACTIVE-LONG-TASK-NAME",
+            },
             {"task_id": "READY", "state": "ready", "worker_id": None},
             {"task_id": "NOISE", "state": "blocked", "worker_id": None},
+            {"task_id": "DONE", "state": "complete", "worker_id": None},
         ],
     }
     rendered = cli._render_queue(snapshot, color=False, width=40)
     assert "ACTIVE-LONG-TASK-NAME" in rendered
-    assert "READY" in rendered
+    assert "READY" not in rendered
     assert "NOISE" not in rendered
+    assert "DONE" not in rendered
+    assert "journal: authoring / claim accepted" in rendered
+    assert "gen 0 / checkpoint yes" in rendered
+    assert "handoff: no" in rendered
+    assert "accepted records: 2" in rendered
+    assert "last record: #17 / worker-0" in rendered
     assert all(len(line) <= 40 for line in rendered.splitlines())
     assert "|" not in rendered
 

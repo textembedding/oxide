@@ -308,7 +308,11 @@ class WorkflowReducer:
         elif review["state"] == "claimed" and review["worker_id"] == worker:
             view.accept(
                 record,
-                {"saved": False, "claim": "resumed", "work": self._review_work(task, review)},
+                {
+                    "saved": False,
+                    "claim": "resumed",
+                    "work": self._review_work(view, task, review),
+                },
             )
         elif review["state"] != "pending":
             view.reject(record, f"review is {review['state']}")
@@ -324,7 +328,11 @@ class WorkflowReducer:
             review.update(state="claimed", worker_id=worker)
             view.accept(
                 record,
-                {"saved": True, "claim": "accepted", "work": self._review_work(task, review)},
+                {
+                    "saved": True,
+                    "claim": "accepted",
+                    "work": self._review_work(view, task, review),
+                },
             )
 
     def _claim_merge(
@@ -336,7 +344,8 @@ class WorkflowReducer:
             view.reject(record, "unknown task")
         elif task["state"] == "merge_claimed" and task["merge_worker_id"] == worker:
             view.accept(
-                record, {"saved": False, "claim": "resumed", "work": self._merge_work(task)}
+                record,
+                {"saved": False, "claim": "resumed", "work": self._merge_work(view, task)},
             )
         elif task["state"] != "merge_ready" or task["generation"] != generation:
             view.reject(record, "merge is obsolete or unavailable")
@@ -345,7 +354,8 @@ class WorkflowReducer:
         else:
             task.update(state="merge_claimed", merge_worker_id=worker)
             view.accept(
-                record, {"saved": True, "claim": "accepted", "work": self._merge_work(task)}
+                record,
+                {"saved": True, "claim": "accepted", "work": self._merge_work(view, task)},
             )
 
     def _author_record(
@@ -566,6 +576,55 @@ class WorkflowReducer:
             "last_error": task["last_error"],
         }
 
+    def _with_progress(
+        self, view: Projection, task: dict[str, Any], value: dict[str, Any]
+    ) -> dict[str, Any]:
+        owner = value.get("worker_id")
+        accepted = [
+            record
+            for record in view.records
+            if view.outcomes.get(int(record["record_id"]), (False, ""))[0]
+            and record["author"] == owner
+        ]
+        if value["role"] in {"author", "revision"}:
+            accepted_records = [
+                record
+                for record in accepted
+                if str(record["text"]).splitlines()[0] == value["claim"]
+                or (
+                    (match := _AUTHOR_MARKER.fullmatch(str(record["text"]).splitlines()[0]))
+                    is not None
+                    and match.group(2) == task["task_id"]
+                )
+            ]
+            claim_indexes = [
+                index
+                for index, record in enumerate(accepted_records)
+                if str(record["text"]).splitlines()[0] == value["claim"]
+            ]
+            if claim_indexes:
+                accepted_records = accepted_records[claim_indexes[-1] :]
+        else:
+            accepted_records = [
+                record
+                for record in accepted
+                if str(record["text"]).splitlines()[0] == value["claim"]
+            ]
+        latest = accepted_records[-1] if accepted_records else None
+        value.update(
+            workflow_state=task["state"],
+            claim_state="accepted" if value["state"] == "working" else "available",
+            checkpoint=bool(task["checkpoint"]),
+            handoff=bool(task["handoff"]),
+            approvals=sum(item["state"] == "approved" for item in task["reviews"]),
+            required_reviews=view.required_reviews,
+            journal_record_count=len(accepted_records),
+            last_journal_record_id=(int(latest["record_id"]) if latest else None),
+            last_journal_worker_id=(str(latest["author"]) if latest else None),
+            last_journal_event=(str(latest["text"]).splitlines()[0] if latest else None),
+        )
+        return value
+
     @staticmethod
     def _body(value: dict[str, Any]) -> dict[str, Any]:
         value["body"] = "\n".join(
@@ -599,9 +658,11 @@ class WorkflowReducer:
         role = "revision" if task["generation"] else "author"
         value = self._base_work(task, state, role, f"claim: task:{task['task_id']}")
         value["worker_id"] = task["worker_id"]
-        return self._body(value)
+        return self._body(self._with_progress(view, task, value))
 
-    def _review_work(self, task: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    def _review_work(
+        self, view: Projection, task: dict[str, Any], review: dict[str, Any]
+    ) -> dict[str, Any]:
         state = "working" if review["state"] == "claimed" else "ready"
         claim = f"claim: review:{task['task_id']}:{review['generation']}:{review['ordinal']}"
         value = self._base_work(task, state, f"review:{review['role']}", claim)
@@ -611,14 +672,14 @@ class WorkflowReducer:
             review_ordinal=review["ordinal"],
             review_role=review["role"],
         )
-        return self._body(value)
+        return self._body(self._with_progress(view, task, value))
 
-    def _merge_work(self, task: dict[str, Any]) -> dict[str, Any]:
+    def _merge_work(self, view: Projection, task: dict[str, Any]) -> dict[str, Any]:
         state = "working" if task["state"] == "merge_claimed" else "ready"
         claim = f"claim: merge:{task['task_id']}:{task['generation']}"
         value = self._base_work(task, state, "merge", claim)
         value.update(task_id=f"{task['task_id']}/merge", worker_id=task["merge_worker_id"])
-        return self._body(value)
+        return self._body(self._with_progress(view, task, value))
 
     def _summary(self, view: Projection, task: dict[str, Any]) -> dict[str, Any]:
         approvals = sum(item["state"] == "approved" for item in task["reviews"])
@@ -641,12 +702,12 @@ class WorkflowReducer:
                 values.append(self._author_work(view, task))
             elif task["state"] == "reviewing":
                 values.extend(
-                    self._review_work(task, review)
+                    self._review_work(view, task, review)
                     for review in task["reviews"]
                     if review["state"] in {"pending", "claimed"}
                 )
             elif task["state"] in {"merge_ready", "merge_claimed"}:
-                values.append(self._merge_work(task))
+                values.append(self._merge_work(view, task))
             else:
                 values.append(self._summary(view, task))
         return values
