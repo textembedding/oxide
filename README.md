@@ -75,8 +75,8 @@ present in the target checkout and the 76-command Stage 0 gate passed there.
 
 The stream observer preserves the original terminal syntax coloring for model
 messages, reasoning summaries, commands, diffs, and journal YAML. Control
-characters are escaped and continuation lines remain indented beneath their
-timestamp.
+characters are escaped. Display timestamps are removed, and multiline output
+uses only its format-specific indentation rather than a timestamp offset.
 
 ## Pause, resume, and reset
 

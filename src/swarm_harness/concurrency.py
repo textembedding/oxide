@@ -550,6 +550,7 @@ def validate_receipt(
     *,
     required_workers: int,
     minimum_rounds: int = MIN_STAGE0_ROUNDS,
+    require_current_source: bool = True,
 ) -> dict[str, Any]:
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -575,7 +576,8 @@ def validate_receipt(
     if (
         receipt.get("schema") != "swarm-concurrency-validation-v1"
         or receipt.get("status") != "passed"
-        or receipt.get("source_digest") != implementation_digest(root)
+        or require_current_source
+        and receipt.get("source_digest") != implementation_digest(root)
         or int(receipt.get("workers", 0)) < required_workers
         or int(receipt.get("rounds", 0)) < minimum_rounds
         or set(receipt.get("roles", [])) != set(ROLES)

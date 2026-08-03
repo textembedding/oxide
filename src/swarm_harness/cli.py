@@ -589,15 +589,18 @@ def _start(config: dict[str, Any], foreground: bool) -> int:
 def _validate_bound_concurrency(config: dict[str, Any]) -> None:
     if str(config.get("stage")) != "0":
         return
+    bound = config.get("concurrency_validation")
+    if not isinstance(bound, dict):
+        raise ConcurrencyError("Stage 0 run has no bound concurrency receipt")
     receipt = validate_receipt(
         ROOT,
-        ROOT / ".swarm" / "validation" / "latest.json",
+        Path(str(bound.get("report_path", ""))),
         required_workers=int(config["workers"]),
+        require_current_source=False,
     )
-    bound = config.get("concurrency_validation")
     fields = ("source_digest", "workers", "rounds", "seed", "report_path")
-    if not isinstance(bound, dict) or any(bound.get(name) != receipt.get(name) for name in fields):
-        raise ConcurrencyError("Stage 0 run is not bound to the current concurrency receipt")
+    if any(bound.get(name) != receipt.get(name) for name in fields):
+        raise ConcurrencyError("Stage 0 run does not match its bound concurrency receipt")
 
 
 def command_run(arguments: argparse.Namespace) -> int:
@@ -859,15 +862,12 @@ def highlight_stream_line(line: str, *, color: bool, raw: bool = False) -> str:
     if raw:
         return line
     match = TIMESTAMP.match(line)
-    timestamp, body = (match.group(1), match.group(2)) if match else ("", line)
+    body = match.group(2) if match else line
     try:
         rendered = _event_value(json.loads(body), color)
     except json.JSONDecodeError:
         rendered = _safe(body)
-    if not timestamp:
-        return rendered
-    prefix = _style(timestamp, "2", color) + " "
-    return prefix + rendered.replace("\n", "\n" + " " * (len(timestamp) + 1))
+    return rendered
 
 
 def _observer_color(mode: str) -> bool:

@@ -37,9 +37,11 @@ def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
     plain = cli.highlight_stream_line(line, color=False)
     colored = cli.highlight_stream_line(line, color=True)
     assert "TOOL COMPLETED journal.journal_add" in plain
-    assert "input.yaml:\n             text:" in plain
+    assert "input.yaml:\n  text:" in plain
     assert "file\\tname" in plain
     assert "output.yaml:" in plain
+    assert "[12:34:56]" not in plain
+    assert cli.highlight_stream_line(line, color=False, raw=True) == line
     assert "\x1b[" in colored
     assert json.dumps(event) not in colored
 
