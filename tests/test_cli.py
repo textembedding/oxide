@@ -165,15 +165,18 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
         ],
     }
     snapshots = iter((first, second))
+    delays = []
     monkeypatch.setattr(cli, "_load_config", lambda _workload: {})
     monkeypatch.setattr(cli, "_queue_snapshot", lambda _config: next(snapshots))
-    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli.time, "sleep", delays.append)
     arguments = cli.argparse.Namespace(workload="stage0", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
     output = capsys.readouterr().out
     assert output.count("SWARM JOURNAL") == 1
     assert output.index("JOURNAL #1") < output.index("JOURNAL #2")
     assert "\x1b[2J\x1b[H" not in output
+    assert delays[0] == 1
+    assert sum(delays[1:]) == pytest.approx(0.75)
 
 
 def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Path) -> None:

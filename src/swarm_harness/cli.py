@@ -1012,13 +1012,14 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
             if first and not arguments.no_follow:
                 entries = entries[-10:]
             if first or entries:
-                print(
-                    _render_queue(
-                        {**snapshot, "entries": entries}, color=color, width=width, header=first
-                    ),
-                    end="",
-                    flush=True,
+                rendered = _render_queue(
+                    {**snapshot, "entries": entries}, color=color, width=width, header=first
                 )
+                rows = rendered.splitlines(keepends=True)
+                for index, row in enumerate(rows):
+                    if not first and index:
+                        time.sleep(0.75 / (len(rows) - 1))
+                    print(row, end="", flush=True)
             if snapshot["entries"]:
                 cursor = int(snapshot["entries"][-1]["record_id"])
             first = False
