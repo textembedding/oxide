@@ -183,12 +183,16 @@ def main() -> int:
     mcp = Mcp()
     try:
         item = mcp.tool("journal_search", f"query: worker:{worker}")
-        if field(item, "root_task_id") is None:
+        while field(item, "root_task_id") is None:
             ready = mcp.tool("journal_search", "query: queue:ready")
             claim = field(ready, "claim")
             if claim is None:
                 return 0
-            mcp.tool("journal_add", f"text: {claim}")
+            try:
+                mcp.tool("journal_add", f"text: {claim}")
+            except RuntimeError:
+                item = mcp.tool("journal_search", f"query: worker:{worker}")
+                continue
             item = mcp.tool("journal_search", f"query: worker:{worker}")
         task = str(field(item, "root_task_id"))
         role = str(field(item, "role"))

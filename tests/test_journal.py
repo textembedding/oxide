@@ -143,6 +143,22 @@ def _merge(
     )
 
 
+def _race_claim(socket: str, claim_text: str, workers: tuple[str, str]) -> dict[str, str]:
+    barrier = threading.Barrier(len(workers))
+
+    def claim(worker: str) -> tuple[str, str]:
+        contender = WorkflowClient(JournalClient(socket))
+        barrier.wait()
+        try:
+            contender.add("run", worker, claim_text)
+            return worker, "accepted"
+        except WorkflowError:
+            return worker, "rejected"
+
+    with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+        return dict(pool.map(claim, workers))
+
+
 def test_kernel_is_only_generic_ordered_append_and_search(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "kernel.sqlite3", clock=lambda: 7.0)
     first = journal.add("space", "alice", "anything: alpha")
@@ -159,25 +175,75 @@ def test_kernel_is_only_generic_ordered_append_and_search(tmp_path: Path) -> Non
 
 def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
     client, _, _ = workflow
-    barrier = threading.Barrier(2)
-
-    def claim(worker: str) -> str:
-        contender = WorkflowClient(JournalClient(client.socket_path))
-        barrier.wait()
-        try:
-            contender.add("run", worker, "claim: task:A")
-            return "accepted"
-        except WorkflowError:
-            return "rejected"
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(claim, ("worker-0", "worker-1")))
-    assert sorted(outcomes) == ["accepted", "rejected"]
+    outcomes = _race_claim(client.socket_path, "claim: task:A", ("worker-0", "worker-1"))
+    assert sorted(outcomes.values()) == ["accepted", "rejected"]
     work = client.search("run", "queue:all")
     assert [(item["task_id"], item["state"]) for item in work] == [
         ("A", "working"),
         ("B", "blocked"),
     ]
+
+
+def test_internal_verification_review_claim_uses_the_same_atomic_race(workflow) -> None:
+    client, database, socket = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    claim = "claim: review:A:1:1"
+    assert client.search("run", "queue:ready")[0]["claim"] == claim
+    assert WorkflowClient(JournalClient(socket)).search("run", "queue:ready")[0]["claim"] == claim
+
+    outcomes = _race_claim(client.socket_path, claim, ("worker-1", "worker-2"))
+    assert sorted(outcomes.values()) == ["accepted", "rejected"]
+    winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
+    loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
+    review = client.search("run", "task:A")[0]["reviews"][0]
+    assert (review["state"], review["worker_id"]) == ("claimed", winner)
+    assert all(
+        item["claim"] != claim
+        for item in WorkflowClient(JournalClient(socket)).search("run", "queue:ready")
+    )
+    assert loser not in {item["worker_id"] for item in client.search("run", "queue:all")}
+    assert len(Journal(database).search("run", claim)) == 2
+
+
+def test_revision_claim_uses_the_same_atomic_race(workflow) -> None:
+    client, database, socket = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    client.add("run", "worker-1", "claim: review:A:1:1")
+    client.add(
+        "run",
+        "worker-1",
+        f"challenge: review:A:1:1\nhead: {2:040x}\nverified: true\nreason: defect",
+    )
+    claim = "claim: task:A"
+    assert client.search("run", "queue:ready")[0]["claim"] == claim
+
+    outcomes = _race_claim(client.socket_path, claim, ("worker-2", "worker-3"))
+    assert sorted(outcomes.values()) == ["accepted", "rejected"]
+    winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
+    work = client.search("run", f"worker:{winner}")[0]
+    assert (work["role"], work["claim"]) == ("revision", claim)
+    loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
+    assert WorkflowClient(JournalClient(socket)).search("run", f"worker:{loser}") == []
+    assert len(Journal(database).search("run", claim)) == 3
+
+
+def test_merge_claim_uses_the_same_atomic_race(workflow) -> None:
+    client, database, socket = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    _approve(client, "run", "worker-1", "A", 1, 1, 2)
+    _approve(client, "run", "worker-2", "A", 1, 2, 2)
+    _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    claim = "claim: merge:A:1"
+    assert client.search("run", "queue:ready")[0]["claim"] == claim
+
+    outcomes = _race_claim(client.socket_path, claim, ("worker-4", "worker-5"))
+    assert sorted(outcomes.values()) == ["accepted", "rejected"]
+    winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
+    work = client.search("run", f"worker:{winner}")[0]
+    assert (work["role"], work["claim"]) == ("merge", claim)
+    loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
+    assert WorkflowClient(JournalClient(socket)).search("run", f"worker:{loser}") == []
+    assert len(Journal(database).search("run", claim)) == 2
 
 
 def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> None:
@@ -189,8 +255,6 @@ def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> N
         "adversarial",
         "integration",
     ]
-    assert client.search("run", "queue:ready", actor="worker-0") == []
-    assert len(client.search("run", "queue:ready", actor="worker-1")) == 3
     with pytest.raises(WorkflowError, match="own candidate"):
         client.add("run", "worker-0", "claim: review:A:1:1")
     client.add("run", "worker-1", "claim: review:A:1:1")

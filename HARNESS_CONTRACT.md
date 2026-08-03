@@ -25,6 +25,12 @@ all durably appended. Deterministic record order makes the first valid claim
 effective; later conflicting records have no projected effect and the workflow
 facade reports an error to their callers.
 
+Queue search is never a reservation. Multiple workers may observe the same
+ready author, revision, internal-review, or merge item. Every role submits the
+item's existing `claim:` text through `journal_add`; the workflow reducer uses
+the same ordered replay path to accept one owner. A loser searches again. No
+role introduces a lease, cursor, preassignment, or alternate tool operation.
+
 ## Exact worker interface
 
 Every Codex invocation receives one required MCP server named `journal`. Its

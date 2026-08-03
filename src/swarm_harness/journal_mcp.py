@@ -133,7 +133,7 @@ class JournalMcpServer:
             result = self.client.add(self.run_id, self.worker_id, text)
         elif params.get("name") == "journal_search":
             query = load_single_string_field(arguments["yaml"], "query")
-            result = {"matches": self.client.search(self.run_id, query, actor=self.worker_id)}
+            result = {"matches": self.client.search(self.run_id, query)}
         else:
             raise ValueError("unknown tool")
         return {

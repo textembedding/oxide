@@ -8,8 +8,9 @@ The disposable harness is ready when:
    generation, dependency, task, or lifecycle concepts in that kernel;
 3. all swarm semantics are replayed from generic records by `workflow.py`;
 4. MCP lists exactly `journal_add` and `journal_search`;
-5. deterministic journal order makes only the first of concurrent competing
-   claims effective;
+5. deterministic journal order makes only the first of concurrent author,
+   revision, internal-verification-review, and merge claims effective, while
+   losing workers can search again;
 6. every task uses its own PR branch and no integration branch is configured;
 7. a PR requires checkpoint, handoff, exact branch/base/head, author
    self-verification, and three internal reviews by default;

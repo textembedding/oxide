@@ -596,7 +596,7 @@ class WorkflowReducer:
             if task["state"] == "revision" or self._dependencies_complete(view, task)
             else "blocked"
         )
-        role = "revision" if task["state"] == "revision" else "author"
+        role = "revision" if task["generation"] else "author"
         value = self._base_work(task, state, role, f"claim: task:{task['task_id']}")
         value["worker_id"] = task["worker_id"]
         return self._body(value)
@@ -651,24 +651,7 @@ class WorkflowReducer:
                 values.append(self._summary(view, task))
         return values
 
-    def _eligible(self, view: Projection, value: dict[str, Any], actor: str) -> bool:
-        if self._owned(view, actor):
-            return False
-        if not str(value["role"]).startswith("review:"):
-            return True
-        task = view.tasks[str(value["root_task_id"])]
-        if task["author_id"] == actor:
-            return False
-        return not any(
-            review["generation"] == value["generation"]
-            and review["worker_id"] == actor
-            and review["state"] in {"claimed", "approved", "challenged"}
-            for review in task["reviews"]
-        )
-
-    def search(
-        self, view: Projection, query: str, actor: str | None = None
-    ) -> list[dict[str, Any]]:
+    def search(self, view: Projection, query: str) -> list[dict[str, Any]]:
         if view.stage is None:
             raise WorkflowError("workflow is not bootstrapped")
         if query == "run:state":
@@ -676,12 +659,7 @@ class WorkflowReducer:
         if query in {"queue:all", "queue:ready"} or query.startswith("worker:"):
             values = self.work_values(view)
             if query == "queue:ready":
-                ready = [value for value in values if value["state"] == "ready"]
-                return (
-                    [value for value in ready if self._eligible(view, value, actor)]
-                    if actor
-                    else ready
-                )
+                return [value for value in values if value["state"] == "ready"]
             if query.startswith("worker:"):
                 worker = query.removeprefix("worker:")
                 return [
@@ -738,10 +716,8 @@ class WorkflowClient:
         assert isinstance(value, dict)
         return {**value, "record_id": record_id}
 
-    def search(
-        self, namespace: str, query: str, *, actor: str | None = None
-    ) -> list[dict[str, Any]]:
+    def search(self, namespace: str, query: str) -> list[dict[str, Any]]:
         if not query or len(query.encode("utf-8")) > 4096:
             raise WorkflowError("query must be 1..4096 UTF-8 bytes")
         view = self._view(namespace)
-        return self.reducer.search(view, query, actor)
+        return self.reducer.search(view, query)
