@@ -905,6 +905,14 @@ def _observer_color(mode: str) -> bool:
     return mode == "always" or mode == "auto" and sys.stdout.isatty()
 
 
+def _scroll_lines(rendered: str, animate: bool) -> None:
+    rows = rendered.splitlines() or [""]
+    for index, row in enumerate(rows):
+        if animate and index:
+            time.sleep(0.75 / (len(rows) - 1))
+        print(row, flush=True)
+
+
 def command_observe(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     allowed = {"orchestrator"} | {f"worker-{i}" for i in range(int(config["workers"]))}
@@ -921,11 +929,13 @@ def command_observe(arguments: argparse.Namespace) -> int:
         if no_follow:
             return 0
         time.sleep(0.1)
+    history_end = path.stat().st_size
     with path.open("r", encoding="utf-8", errors="replace") as stream:
         while True:
             line = stream.readline()
             if line:
-                print(highlight_stream_line(line.rstrip("\n"), color=color, raw=raw), flush=True)
+                rendered = highlight_stream_line(line.rstrip("\n"), color=color, raw=raw)
+                _scroll_lines(rendered, stream.tell() > history_end)
                 continue
             state = _run_state(config)
             if no_follow or state in {"complete", "paused", "failed", "stopped"}:
@@ -935,11 +945,8 @@ def command_observe(arguments: argparse.Namespace) -> int:
 
 
 def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
-    socket_path = Path(config["socket"])
-    if not socket_path.exists():
-        return None
     try:
-        view = WorkflowClient(JournalClient(socket_path))._view(config["run_id"])
+        view = WorkflowClient(JournalClient(config["socket"]))._view(config["run_id"])
         return {
             "run_id": config["run_id"],
             "state": view.state,
@@ -989,12 +996,10 @@ def _render_queue(
         add(entry["author"], "author: ", "34")
         accepted = bool(entry["accepted"])
         add("accepted" if accepted else "rejected", "status: ", "32" if accepted else "31")
-        body = [
-            line
-            for raw in _safe(entry["body"]).split("\n")
-            for line in textwrap.wrap(raw, width=width, break_on_hyphens=False) or [""]
-        ]
-        body = [*body[:4], body[4][: width - 3] + "..."] if len(body) > 5 else body
+        body: list[str] = []
+        for raw in _safe(entry["body"]).split("\n"):
+            body.extend(textwrap.wrap(raw, width=width, break_on_hyphens=False) or [""])
+        body = [*body[:9], body[9][: width - 3] + "..."] if len(body) > 10 else body
         lines.extend((line, "36") for line in body)
         add("-" * width, code="2")
     return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
@@ -1015,11 +1020,7 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
                 rendered = _render_queue(
                     {**snapshot, "entries": entries}, color=color, width=width, header=first
                 )
-                rows = rendered.splitlines(keepends=True)
-                for index, row in enumerate(rows):
-                    if not first and index:
-                        time.sleep(0.75 / (len(rows) - 1))
-                    print(row, end="", flush=True)
+                _scroll_lines(rendered, not first)
             if snapshot["entries"]:
                 cursor = int(snapshot["entries"][-1]["record_id"])
             first = False

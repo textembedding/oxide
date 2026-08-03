@@ -90,6 +90,40 @@ def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
     )
 
 
+def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Path, capsys) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "worker-0.log"
+    history = {"type": "item.completed", "item": {"type": "agent_message", "text": "history"}}
+    live = {
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": "live line one\nlive line two"},
+    }
+    path.write_text(json.dumps(history) + "\n", encoding="utf-8")
+    config = {"workers": 1, "run_dir": str(tmp_path), "run_id": "stage0-test"}
+    states = iter(("running", "complete"))
+
+    def state(_config):
+        value = next(states)
+        if value == "running":
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(live) + "\n")
+        return value
+
+    delays = []
+    monkeypatch.setattr(cli, "_load_config", lambda _workload: config)
+    monkeypatch.setattr(cli, "_run_state", state)
+    monkeypatch.setattr(cli.time, "sleep", delays.append)
+    arguments = cli.argparse.Namespace(
+        workload="stage0", slot="worker-0", color="never", raw=False, no_follow=False
+    )
+    assert cli.command_observe(arguments) == 0
+    output = capsys.readouterr().out
+    assert output.index("history") < output.index("live line one") < output.index("live line two")
+    assert delays[0] == 0.2
+    assert sum(delays[1:]) == pytest.approx(0.75)
+
+
 def test_queue_renders_append_only_records_in_chronological_order() -> None:
     snapshot = {
         "run_id": "stage0-20260802-123456",
@@ -139,12 +173,12 @@ def test_queue_outputs_and_truncates_journal_body() -> None:
     rendered = cli._render_queue(snapshot, color=False)
     assert "JOURNAL #19" in rendered
     assert "journal line 1\n" in rendered
-    assert "journal line 4\njournal line 5...\n" in rendered
-    assert "journal line 6" not in rendered
+    assert "journal line 9\njournal line 10...\n" in rendered
+    assert "journal line 11" not in rendered
     snapshot["entries"][0]["body"] = "activation-bound " * 30 + "\nHIDDEN"
     rendered = cli._render_queue(snapshot, color=False, width=40)
     body = rendered.split("status: accepted\n", 1)[1].split("-" * 40, 1)[0].splitlines()
-    assert len(body) == 5
+    assert len(body) == 10
     assert all(len(line) <= 40 for line in body)
     assert body[-1].endswith("...")
     assert "HIDDEN" not in rendered
