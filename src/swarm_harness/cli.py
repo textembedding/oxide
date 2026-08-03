@@ -27,8 +27,6 @@ from .workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / ".swarm" / "runs"
-TIMESTAMP = re.compile(r"^(\[\d{2}:\d{2}:\d{2}\]) (.*)$")
-QUEUE_WIDTH = 40
 
 
 class HarnessError(RuntimeError):
@@ -811,10 +809,11 @@ def _safe(value: object) -> str:
 def _code(value: object, language: str, color: bool) -> str:
     if not (safe := _safe(value).rstrip("\n")) or not color:
         return safe
+    if language == "yaml":
+        return _YAML_KEY.sub(lambda m: m[1] + _style(m[2], "94", True) + m[3], safe)
     try:
         lexer = get_lexer_by_name(language) if language else guess_lexer(safe)
-        rendered = pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
-        return rendered.replace("\x1b[31m", "") if language == "yaml" else rendered
+        return pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
     except ClassNotFound:
         return safe
 
@@ -823,6 +822,7 @@ def _indent(value: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in value.splitlines())
 
 
+_YAML_KEY = re.compile(r"^(\s*(?:-\s+)?)([\w-]+)(:)", re.MULTILINE)
 _QUOTED_YAML = re.compile(r'^(\s*(?:(?:-\s+)?[\w-]+:\s+|-\s+))("(?:[^"\\]|\\.)*")$', re.MULTILINE)
 _YAML_WORDS = {"null", "true", "false", "yes", "no", "on", "off", "~"}
 
@@ -893,7 +893,7 @@ def _event_value(event: Any, color: bool) -> str:
 def highlight_stream_line(line: str, *, color: bool, raw: bool = False) -> str:
     if raw:
         return line
-    match = TIMESTAMP.match(line)
+    match = re.match(r"^(\[\d{2}:\d{2}:\d{2}\]) (.*)$", line)
     body = match.group(2) if match else line
     try:
         rendered = _event_value(json.loads(body), color)
@@ -994,7 +994,7 @@ def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
 def _render_queue(
     snapshot: dict[str, Any] | None, *, color: bool, width: int = 40, header: bool = True
 ) -> str:
-    width = max(20, min(QUEUE_WIDTH, width))
+    width = max(20, min(40, width))
     lines: list[tuple[str, str]] = []
 
     def add(value: object = "", prefix: str = "", code: str = "0") -> None:
@@ -1035,7 +1035,7 @@ def _render_queue(
 def command_observe_queue(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     color = _observer_color(arguments.color)
-    width = min(QUEUE_WIDTH, shutil.get_terminal_size(fallback=(QUEUE_WIDTH, 24)).columns)
+    width = min(40, shutil.get_terminal_size(fallback=(40, 24)).columns)
     first, waiting, cursor = True, False, 0
     while True:
         snapshot = _queue_snapshot(config)

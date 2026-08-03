@@ -126,12 +126,12 @@ def test_observer_highlights_yaml_structure_without_coloring_journal_prose() -> 
         "yaml",
         True,
     )
-    assert "\x1b[94mtext\x1b[39;49;00m:" in rendered
-    assert "\x1b[94mverified\x1b[39;49;00m:" in rendered
+    assert "\x1b[94mtext\x1b[0m: |-" in rendered
+    assert "\x1b[94mblocked\x1b[0m: task:S0-POLICY-SEARCH-VERIFIERS" in rendered
+    assert "\x1b[94mreason\x1b[0m: The assigned revision requires fetching origin." in rendered
+    assert "\x1b[94mverified\x1b[0m: false" in rendered
     assert "\x1b[31m" not in rendered
     assert "\x1b[33m" not in rendered
-    assert "blocked: task:S0-POLICY-SEARCH-VERIFIERS" in rendered
-    assert "reason: The assigned revision requires fetching origin." in rendered
 
 
 def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Path, capsys) -> None:
