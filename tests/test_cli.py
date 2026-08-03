@@ -101,18 +101,18 @@ def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Pat
     }
     path.write_text(json.dumps(history) + "\n", encoding="utf-8")
     config = {"workers": 1, "run_dir": str(tmp_path), "run_id": "stage0-test"}
-    states = iter(("running", "complete"))
+    states = iter(("initial", "running", "complete"))
 
-    def state(_config):
+    def context(_config, _slot):
         value = next(states)
         if value == "running":
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(live) + "\n")
-        return value
+        return "running" if value == "initial" else value, ("test-model", "task-a", "author")
 
     delays = []
     monkeypatch.setattr(cli, "_load_config", lambda _workload: config)
-    monkeypatch.setattr(cli, "_run_state", state)
+    monkeypatch.setattr(cli, "_observer_context", context)
     monkeypatch.setattr(cli.time, "sleep", delays.append)
     arguments = cli.argparse.Namespace(
         workload="stage0", slot="worker-0", color="never", raw=False, no_follow=False
@@ -122,6 +122,33 @@ def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Pat
     assert output.index("history") < output.index("live line one") < output.index("live line two")
     assert delays[0] == 0.2
     assert sum(delays[1:]) == pytest.approx(1.0)
+
+
+def test_worker_observer_pins_only_model_task_and_role_in_bottom_row(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "worker-0.log").write_text(json.dumps("history") + "\n", encoding="utf-8")
+    config = {"workers": 1, "run_dir": str(tmp_path), "run_id": "run", "model": "gpt-test"}
+    context = ("complete", ("gpt-test", "S0-STABLE-SEAMS", "review:integration"))
+    monkeypatch.setattr(cli, "_load_config", lambda _workload: config)
+    monkeypatch.setattr(cli, "_observer_context", lambda _config, _slot: context)
+    monkeypatch.setattr(
+        cli.shutil, "get_terminal_size", lambda **_kwargs: os.terminal_size((60, 20))
+    )
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    arguments = cli.argparse.Namespace(
+        workload="stage0", slot="worker-0", color="never", raw=False, no_follow=False
+    )
+    assert cli.command_observe(arguments) == 0
+    output = capsys.readouterr().out
+    assert "\x1b[?25l\x1b[?4h" in output
+    assert "model: gpt-test" in output
+    assert "task: S0-STABLE-SE" in output
+    assert "role: review:integ" in output
+    assert "thread:" not in output and "state:" not in output and "worker:" not in output
+    assert output.endswith("\x1b[?4l\x1b[?25h")
 
 
 def test_queue_renders_append_only_records_in_chronological_order() -> None:
@@ -227,11 +254,11 @@ def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Pa
         def __init__(self, _client) -> None:
             pass
 
-        def search(self, _run_id, _query):
+        def _view(self, _run_id):
             raise json.JSONDecodeError("Expecting value", "", 0)
 
     monkeypatch.setattr(cli, "WorkflowClient", EmptyResponse)
-    assert cli._run_state(config) == "starting"
+    assert cli._observer_context(config, "worker-0") == ("starting", ("default", "-", "-"))
 
 
 def test_macos_commands_and_controls_remain_available() -> None:

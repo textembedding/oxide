@@ -456,15 +456,17 @@ def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]
         thread.join(timeout=5)
 
 
-def _run_state(config: dict[str, Any]) -> str:
-    socket_path = Path(config["socket"])
-    if not socket_path.exists():
-        return "starting"
+def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str, str, str]]:
+    status = (str(config.get("model") or "default"), "-", "-")
     try:
-        client = WorkflowClient(JournalClient(socket_path))
-        return str(client.search(config["run_id"], "run:state")[0]["state"])
+        client = WorkflowClient(JournalClient(config["socket"]))
+        view = client._view(config["run_id"])
+        matches = client.reducer.search(view, f"worker:{slot}")
+        if matches:
+            status = (status[0], str(matches[0]["root_task_id"]), str(matches[0]["role"]))
+        return view.state, status
     except (JournalError, WorkflowError, json.JSONDecodeError, OSError, IndexError, KeyError):
-        return "starting"
+        return "starting", status
 
 
 def _process_table() -> list[tuple[int, str]]:
@@ -905,12 +907,25 @@ def _observer_color(mode: str) -> bool:
     return mode == "always" or mode == "auto" and sys.stdout.isatty()
 
 
-def _scroll_lines(rendered: str, animate: bool) -> None:
+def _draw_footer(status: tuple[str, str, str] | None) -> None:
+    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+    text = ""
+    if status is not None:
+        cell = max(6, columns // 3)
+        fields = zip(("model", "task", "role"), status)
+        text = "".join(f"{label}: {value}"[:cell].ljust(cell) for label, value in fields)
+        text = _style(text[:columns].ljust(columns), "2;37;49", True)
+    print(f"\x1b[s\x1b[{rows};1H\x1b[2K{text}\x1b[u", end="", flush=True)
+
+
+def _scroll_lines(rendered: str, animate: bool, footer: tuple[str, str, str] | None = None) -> None:
     rows = rendered.splitlines() or [""]
     for index, row in enumerate(rows):
         if animate and index:
             time.sleep(1.0 / (len(rows) - 1))
+        footer and _draw_footer(None)
         print(row, flush=True)
+        footer and _draw_footer(footer)
 
 
 def command_observe(arguments: argparse.Namespace) -> int:
@@ -922,26 +937,35 @@ def command_observe(arguments: argparse.Namespace) -> int:
     color = _observer_color(getattr(arguments, "color", "auto"))
     raw = bool(getattr(arguments, "raw", False))
     no_follow = bool(arguments.no_follow)
-    index = 0 if arguments.slot == "orchestrator" else int(arguments.slot.split("-")[1]) + 1
-    print(f"[observer] slot={arguments.slot} index={index}")
-    print(f"[observer] invocation={config['run_id']}:{arguments.slot} slot={arguments.slot}")
     while not path.exists():
         if no_follow:
             return 0
         time.sleep(0.1)
+    state, status = _observer_context(config, arguments.slot)
+    tui = arguments.slot != "orchestrator" and sys.stdout.isatty() and not no_follow
+    if tui:
+        sys.stdout.write("\x1b[?25l\x1b[?4h")
+        _draw_footer(status)
     history_end = path.stat().st_size
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
-        while True:
-            line = stream.readline()
-            if line:
-                rendered = highlight_stream_line(line.rstrip("\n"), color=color, raw=raw)
-                _scroll_lines(rendered, stream.tell() > history_end)
-                continue
-            state = _run_state(config)
-            if no_follow or state in {"complete", "paused", "failed", "stopped"}:
-                print(f"[observer] state={state.upper()}")
-                return 1 if state == "failed" else 0
-            time.sleep(0.2)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            while True:
+                line = stream.readline()
+                if line:
+                    rendered = highlight_stream_line(line.rstrip("\n"), color=color, raw=raw)
+                    _scroll_lines(rendered, stream.tell() > history_end, status if tui else None)
+                    continue
+                state, status = _observer_context(config, arguments.slot)
+                if tui:
+                    _draw_footer(status)
+                if no_follow or state in {"complete", "paused", "failed", "stopped"}:
+                    print(f"[observer] state={state.upper()}")
+                    return 1 if state == "failed" else 0
+                time.sleep(0.2)
+    finally:
+        if tui:
+            _draw_footer(None)
+            print("\x1b[?4l\x1b[?25h", end="", flush=True)
 
 
 def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
