@@ -120,8 +120,8 @@ def test_queue_outputs_and_truncates_journal_body() -> None:
     assert "journal: #19" in rendered
     assert "body:" not in rendered
     assert "journal line 1\n" in rendered
-    assert "journal line 9\njournal line 10...\n" in rendered
-    assert "journal line 11" not in rendered
+    assert "journal line 4\njournal line 5...\n" in rendered
+    assert "journal line 6" not in rendered
 
 
 def test_queue_uses_the_same_fields_for_reviews() -> None:
