@@ -824,7 +824,7 @@ def _display_yaml(value: object) -> str:
         prefix, encoded = match.groups()
         scalar = json.loads(encoded)
         plain = bool(scalar and scalar == scalar.strip() and scalar.isprintable())
-        plain &= scalar[0].isalnum() and scalar.lower() not in _YAML_WORDS
+        plain = plain and scalar[0].isalnum() and scalar.lower() not in _YAML_WORDS
         plain &= all(marker not in scalar for marker in (": ", " #"))
         if plain:
             return prefix + scalar

@@ -57,6 +57,7 @@ def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
         '    title: "Readable title"\n'
         '    claim: "claim: task:A"\n'
         '    boolean: "true"\n'
+        '    empty: ""\n'
         "    body: |-\n"
         "      unchanged"
     )
@@ -67,6 +68,8 @@ def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
         "      claim: task:A\n"
         "    boolean: |-\n"
         "      true\n"
+        "    empty: |-\n"
+        "      \n"
         "    body: |-\n"
         "      unchanged"
     )
