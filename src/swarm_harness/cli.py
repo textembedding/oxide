@@ -809,12 +809,12 @@ def _safe(value: object) -> str:
 
 
 def _code(value: object, language: str, color: bool) -> str:
-    safe = _safe(value).rstrip("\n")
-    if not color or not safe:
+    if not (safe := _safe(value).rstrip("\n")) or not color:
         return safe
     try:
         lexer = get_lexer_by_name(language) if language else guess_lexer(safe)
-        return pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
+        rendered = pygments_highlight(safe, lexer, TerminalFormatter()).removesuffix("\n")
+        return rendered.replace("\x1b[31m", "") if language == "yaml" else rendered
     except ClassNotFound:
         return safe
 

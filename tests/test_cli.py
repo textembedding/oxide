@@ -115,6 +115,23 @@ def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
     )
 
 
+def test_observer_highlights_yaml_structure_without_coloring_journal_prose() -> None:
+    rendered = cli._code(
+        "text: |-\n"
+        "  blocked: task:S0-POLICY-SEARCH-VERIFIERS\n"
+        "  reason: The assigned revision requires fetching origin.\n"
+        "verified: false",
+        "yaml",
+        True,
+    )
+    assert "\x1b[94mtext\x1b[39;49;00m:" in rendered
+    assert "\x1b[94mverified\x1b[39;49;00m:" in rendered
+    assert "\x1b[31m" not in rendered
+    assert "\x1b[33m" not in rendered
+    assert "blocked: task:S0-POLICY-SEARCH-VERIFIERS" in rendered
+    assert "reason: The assigned revision requires fetching origin." in rendered
+
+
 def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Path, capsys) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
