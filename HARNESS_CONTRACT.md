@@ -31,6 +31,32 @@ item's existing `claim:` text through `journal_add`; the workflow reducer uses
 the same ordered replay path to accept one owner. A loser searches again. No
 role introduces a lease, cursor, preassignment, or alternate tool operation.
 
+## Multiprocess concurrency qualification
+
+Stage 0 is gated by `harness validate-concurrency`. The model-free campaign
+uses real OS processes against one live journal service. For author, review,
+verification, revision, and merge work, every contender must first replay and
+observe the identical available claim before a shared start gate releases the
+race. Random per-process delays perturb scheduling.
+
+Every contender appends that same claim. The evidence must show exactly one
+effective owner, one protected-work record authored by that owner, no protected
+work from any loser, and no owned work reconstructed by a loser. Alternating
+rounds terminate the winning process immediately after its accepted claim and
+before protected work. A replacement process must recover that exact owner
+solely from journal replay and perform the protected step once.
+
+After each race stabilizes, one fresh replay process per configured worker
+reads only the journal. All record and derived-workflow digests must be
+identical. A failure aborts the campaign and produces no passing receipt.
+
+The passing receipt binds the coordination source digest, worker count, round
+count, random seed, every role case, winner-crash cases, owners, append counts,
+protected-work counts, and replay digests. Stage 0 requires a current receipt
+with at least four rounds and at least its configured worker count. Queue
+filtering, prompt assignment, a timing delay, or a model assertion cannot
+substitute for this empirical gate.
+
 ## Exact worker interface
 
 Every Codex invocation receives one required MCP server named `journal`. Its

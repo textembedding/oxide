@@ -5,7 +5,10 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from swarm_harness import cli
+from swarm_harness.concurrency import ConcurrencyError
 
 ROOT = Path(__file__).parents[1]
 
@@ -78,12 +81,44 @@ def test_macos_commands_and_controls_remain_available() -> None:
         ]
     )
     assert configured.reviews == 2
+    concurrency = parser.parse_args(["harness", "validate-concurrency"])
+    assert concurrency.handler is cli.command_validate_concurrency
+    assert concurrency.workers == 7
+    assert concurrency.rounds == 6
     for command in ("pause", "resume", "reset", "observe", "observe-queue", "status"):
         arguments = ["harness", command, "--workload", "stage0"]
         if command == "observe":
             arguments += ["--slot", "worker-0"]
         parsed = parser.parse_args(arguments)
         assert parsed.workload == "stage0"
+
+
+def test_stage0_is_blocked_before_staging_without_a_qualified_receipt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    arguments = cli.build_parser().parse_args(
+        [
+            "harness",
+            "run",
+            "--workload",
+            "stage0",
+            "--target",
+            str(tmp_path / "target"),
+            "--workers",
+            "7",
+        ]
+    )
+    monkeypatch.setattr(cli, "load_stage", lambda _: {"stage": "0"})
+    monkeypatch.setattr(cli, "_config_path", lambda _: tmp_path / "run.json")
+
+    def reject(_root: Path, _receipt: Path, *, required_workers: int):
+        assert required_workers == 7
+        raise ConcurrencyError("qualification required")
+
+    monkeypatch.setattr(cli, "validate_receipt", reject)
+    with pytest.raises(ConcurrencyError, match="qualification required"):
+        cli.command_run(arguments)
+    assert not (tmp_path / "run.json").exists()
 
 
 def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -> None:

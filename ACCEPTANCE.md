@@ -11,24 +11,31 @@ The disposable harness is ready when:
 5. deterministic journal order makes only the first of concurrent author,
    revision, internal-verification-review, and merge claims effective, while
    losing workers can search again;
-6. every task uses its own PR branch and no integration branch is configured;
-7. a PR requires checkpoint, handoff, exact branch/base/head, author
+6. a real multiprocess campaign repeatedly makes every contender observe and
+   append the same claim for author, review, verification, revision, and merge
+   work under randomized scheduling;
+7. winner-crash injection, protected-work auditing, and fresh per-worker replay
+   prove one owner, no losing work, exact recovery, and identical derived state;
+8. Stage 0 rejects an absent, stale, undersized, or incomplete concurrency
+   receipt before creating a run;
+9. every task uses its own PR branch and no integration branch is configured;
+10. a PR requires checkpoint, handoff, exact branch/base/head, author
    self-verification, and three internal reviews by default;
-8. authors cannot review their own candidate, reviewers are distinct, and a
+11. authors cannot review their own candidate, reviewers are distinct, and a
    challenge invalidates the candidate generation's remaining review work;
-9. a changed candidate creates a new generation and repeats the full configured
+12. a changed candidate creates a new generation and repeats the full configured
    review count;
-10. only a fully approved generation exposes merge work, and the launcher
+13. only a fully approved generation exposes merge work, and the launcher
     verifies the prospective merge tree before merging it directly to the
     target branch;
-11. dependencies become ready immediately after their prerequisite PRs merge;
-12. claims have no timer and a replacement stable slot recovers owned work
+14. dependencies become ready immediately after their prerequisite PRs merge;
+15. claims have no timer and a replacement stable slot recovers owned work
     through `journal_search`;
-13. seven workers can traverse the complete real Stage 0 graph in a model-free
+16. seven workers can traverse the complete real Stage 0 graph in a model-free
     workflow simulation;
-14. stream highlighting, safe indentation, compact queue, pause, resume, reset,
+17. stream highlighting, safe indentation, compact queue, pause, resume, reset,
     and all native macOS commands work;
-15. the end-to-end model-free run performs authoring, three reviews, merge
+18. the end-to-end model-free run performs authoring, three reviews, merge
     authorization, prospective verification, three merge commits, final gate,
     completion, and reset against a real Git checkout.
 

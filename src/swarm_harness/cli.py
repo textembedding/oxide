@@ -24,6 +24,7 @@ from pygments.formatters import TerminalFormatter
 from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.util import ClassNotFound
 
+from .concurrency import ConcurrencyError, run_campaign, validate_receipt
 from .journal import JournalClient, JournalError, serve_in_thread
 from .worker import Worker
 from .workflow import WorkflowClient, WorkflowError
@@ -585,6 +586,20 @@ def _start(config: dict[str, Any], foreground: bool) -> int:
     return 0
 
 
+def _validate_bound_concurrency(config: dict[str, Any]) -> None:
+    if str(config.get("stage")) != "0":
+        return
+    receipt = validate_receipt(
+        ROOT,
+        ROOT / ".swarm" / "validation" / "latest.json",
+        required_workers=int(config["workers"]),
+    )
+    bound = config.get("concurrency_validation")
+    fields = ("source_digest", "workers", "rounds", "seed", "report_path")
+    if not isinstance(bound, dict) or any(bound.get(name) != receipt.get(name) for name in fields):
+        raise ConcurrencyError("Stage 0 run is not bound to the current concurrency receipt")
+
+
 def command_run(arguments: argparse.Namespace) -> int:
     if arguments.resume:
         return command_resume(arguments)
@@ -599,6 +614,13 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError("reviews must be between 1 and 16")
     if arguments.workers < arguments.reviews + 1:
         raise HarnessError("workers must include an author plus distinct reviewers")
+    concurrency_receipt = None
+    if str(stage["stage"]) == "0":
+        concurrency_receipt = validate_receipt(
+            ROOT,
+            ROOT / ".swarm" / "validation" / "latest.json",
+            required_workers=arguments.workers,
+        )
     if (
         not target.is_dir()
         or _git(target, "rev-parse", "--is-inside-work-tree", check=False) != "true"
@@ -628,12 +650,21 @@ def command_run(arguments: argparse.Namespace) -> int:
         "branch_prefix": f"codex/swarm-{_slug(run_id)}",
         "stage": stage["stage"],
     }
+    if concurrency_receipt is not None:
+        config["concurrency_validation"] = {
+            "source_digest": concurrency_receipt["source_digest"],
+            "workers": concurrency_receipt["workers"],
+            "rounds": concurrency_receipt["rounds"],
+            "seed": concurrency_receipt["seed"],
+            "report_path": concurrency_receipt["report_path"],
+        }
     _atomic_json(_config_path(arguments.workload), config)
     return _start(config, arguments.foreground)
 
 
 def command_launch(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
+    _validate_bound_concurrency(config)
     log = _Log(Path(config["run_dir"]) / "logs" / "orchestrator.log")
     server, thread = serve_in_thread(config["database"], config["socket"])
     client = WorkflowClient(JournalClient(config["socket"]))
@@ -712,6 +743,7 @@ def command_pause(arguments: argparse.Namespace) -> int:
 
 def command_resume(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
+    _validate_bound_concurrency(config)
     if any(kind == "launcher" for _, kind in _run_processes(config)):
         raise HarnessError("workload already has a live launcher")
     _using_journal(
@@ -979,6 +1011,23 @@ def command_verify(_arguments: argparse.Namespace) -> int:
     return 0
 
 
+def command_validate_concurrency(arguments: argparse.Namespace) -> int:
+    seed = arguments.seed if arguments.seed is not None else time.time_ns()
+    report = run_campaign(
+        ROOT,
+        ROOT / ".swarm" / "validation",
+        workers=arguments.workers,
+        rounds=arguments.rounds,
+        seed=seed,
+    )
+    print(
+        f"Concurrency validation PASSED: {report['case_count']} cases, "
+        f"{report['winner_crash_cases']} winner crashes"
+    )
+    print(f"Receipt: {report['report_path']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="swarmctl")
     root = parser.add_subparsers(dest="group", required=True)
@@ -995,6 +1044,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--foreground", action="store_true")
     run.add_argument("--resume", action="store_true")
     run.set_defaults(handler=command_run)
+    concurrency = commands.add_parser("validate-concurrency")
+    concurrency.add_argument("--workers", type=int, default=7)
+    concurrency.add_argument("--rounds", type=int, default=6)
+    concurrency.add_argument("--seed", type=int)
+    concurrency.set_defaults(handler=command_validate_concurrency)
     for name, handler in (("pause", command_pause), ("reset", command_reset)):
         command = commands.add_parser(name)
         command.add_argument("--workload", required=True)
@@ -1032,7 +1086,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = build_parser().parse_args(argv)
         return int(arguments.handler(arguments))
-    except (HarnessError, JournalError, WorkflowError, OSError, ValueError) as error:
+    except (
+        ConcurrencyError,
+        HarnessError,
+        JournalError,
+        WorkflowError,
+        OSError,
+        ValueError,
+    ) as error:
         print(f"swarmctl: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

@@ -16,6 +16,25 @@ not require porting any workflow policy.
 
 ## Run Stage 0
 
+First qualify the current coordination implementation with real competing
+processes:
+
+```bash
+./swarmctl harness validate-concurrency \
+  --workers 7 \
+  --rounds 6
+```
+
+This model-free campaign races every worker against the same author, review,
+verification, revision, and merge claims. It randomizes dispatch, crashes the
+effective winner in alternating rounds, recovers that owner through journal
+replay, and launches an independent replay process for every worker. Its
+content-bound receipt is written under `.swarm/validation/`.
+
+Stage 0 refuses to start unless the latest receipt passes every invariant,
+matches the current coordination source, contains at least four rounds, and
+used at least as many workers as the requested Stage 0 run.
+
 ```bash
 ./swarmctl harness run \
   --workload stage0 \

@@ -12,13 +12,14 @@ def test_runtime_has_only_the_small_two_tool_implementation() -> None:
     assert modules == {
         "__init__.py",
         "cli.py",
+        "concurrency.py",
         "journal.py",
         "journal_mcp.py",
         "worker.py",
         "workflow.py",
         "yaml_payload.py",
     }
-    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 2600
+    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 3300
 
 
 def test_sqlite_is_confined_to_swappable_prototype() -> None:
