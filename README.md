@@ -1,16 +1,18 @@
 # Swarm Harness
 
 This is a disposable native macOS launcher for Codex workers implementing the
-memory roadmap. It exists to dogfood the future Rust journal kernel's complete
-worker interface:
+memory roadmap. It dogfoods the future Rust journal kernel's complete worker
+interface:
 
 - `journal_search`
 - `journal_add`
 
-The current backend is a small SQLite prototype in
-`src/swarm_harness/journal.py`. No other module imports SQLite or performs a
-task-state transition. Workers select, claim, implement, verify, integrate, and
-complete their own tasks through those two operations.
+The current kernel prototype is the generic append-only SQLite store in
+`src/swarm_harness/journal.py`. It knows only namespaces, authors, immutable
+text records, and generic text search. All task, PR, review, generation,
+dependency, and merge behavior is implemented above it by the replayable
+reducer in `src/swarm_harness/workflow.py`. Replacing the prototype kernel does
+not require porting any workflow policy.
 
 ## Run Stage 0
 
@@ -18,16 +20,23 @@ complete their own tasks through those two operations.
 ./swarmctl harness run \
   --workload stage0 \
   --target /Users/cat/Documents/code/memory \
-  --workers 7
+  --workers 7 \
+  --reviews 3
 ```
 
-`stage0` is the workload name. `pilot` is no longer used. A run opens one thin
-launcher terminal and seven worker terminals. Each worker receives an
-independent clone and a stable slot; 15 of the 16 Stage 0 tasks are immediately
-available, so all seven workers can claim work. After every task is integrated,
-the launcher verifies the journaled commits and fast-forwards the original
-target branch. `COMPLETE` therefore means the files are present in the target
-checkout, not merely on a temporary integration branch.
+`stage0` is the workload name; `pilot` is no longer used. Three internal
+approvals per task PR is the default, so `--reviews 3` may be omitted. A run
+opens one thin launcher terminal and seven worker terminals. Each Codex session
+may author, revise, review, or authorize a merge according to the ready work it
+claims from the journal.
+
+Every task uses its own branch under the run's `codex/swarm-*` prefix. There is
+no shared integration branch. After author self-verification, three distinct
+workers review the exact candidate head. A worker then authorizes its merge;
+the launcher re-runs the task checks on the prospective merge tree and merges
+that exact tree directly into the target branch. Dependencies are released
+only after that merge. `COMPLETE` therefore means all reviewed task changes are
+present in the target checkout and the 76-command Stage 0 gate passed there.
 
 ## Observe
 
@@ -56,19 +65,19 @@ timestamp.
 ./swarmctl harness pause --workload stage0
 ./swarmctl harness resume --workload stage0
 
-# Stop, archive the complete run directory, and delete only its integration ref.
+# Stop, archive the run directory, and delete its task PR branches.
 ./swarmctl harness reset --workload stage0
 ```
 
-Pause terminates launcher, worker, and Codex processes after recording
-`control: pause`. Claims and worker clones remain. Resume records
-`control: resume`, relaunches the same stable slots, and each worker recovers by
-searching its journal records and continuing in its existing clone.
+Pause records `control: pause` and terminates launcher, worker, and Codex
+processes. Claims, records, and worker clones remain. Resume records
+`control: resume`, relaunches the stable slots, and each replacement reconstructs
+its work from `journal_search`.
 
-Reset archives the run under `.swarm/archive/`; it does not delete the target
-repository or revert changes already published to its current branch. Run the
-Stage 0 command again after reset to start a fresh campaign from the branch's
-current commit.
+Reset archives the run under `.swarm/archive/` and deletes only branches under
+that run's task-branch prefix. It does not delete the target repository or
+revert changes already merged into its current branch. Run the Stage 0 command
+again after reset to start from the branch's current commit.
 
-See `HARNESS_CONTRACT.md` for the complete disposable protocol and
-`ACCEPTANCE.md` for the model-free proof suite.
+See `HARNESS_CONTRACT.md` for the disposable workflow and `ACCEPTANCE.md` for
+the model-free proof suite.

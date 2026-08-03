@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model-free Codex JSONL fixture for the native end-to-end smoke test."""
+"""Model-free Codex fixture for author, internal-review, and merge roles."""
 
 from __future__ import annotations
 
@@ -29,8 +29,7 @@ class Mcp:
     def request(self, method: str, params: dict) -> dict:
         self.number += 1
         request = {"jsonrpc": "2.0", "id": self.number, "method": method, "params": params}
-        assert self.process.stdin is not None
-        assert self.process.stdout is not None
+        assert self.process.stdin is not None and self.process.stdout is not None
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
         response = json.loads(self.process.stdout.readline())
@@ -60,77 +59,153 @@ class Mcp:
             raise RuntimeError("MCP fixture failed")
 
 
-def git(*arguments: str) -> str:
+def git(*arguments: str, check: bool = True) -> str:
     result = subprocess.run(["git", *arguments], text=True, capture_output=True, check=False)
-    if result.returncode:
+    if check and result.returncode:
         raise RuntimeError(result.stderr)
     return result.stdout.strip()
 
 
-def block(field: str, value: str) -> str:
-    return field + ": |-\n" + "\n".join("  " + line for line in value.splitlines())
+def block(field_name: str, value: str) -> str:
+    return field_name + ": |-\n" + "\n".join("  " + line for line in value.splitlines())
 
 
-def task_id(document: str) -> str | None:
-    match = re.search(r'^\s+task_id: "([^"]+)"$', document, re.MULTILINE)
-    return match.group(1) if match else None
+def field(document: str, name: str):
+    match = re.search(rf"^\s+{re.escape(name)}: (.+)$", document, re.MULTILINE)
+    if match is None:
+        return None
+    raw = match.group(1)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def author(mcp: Mcp, item: str, task: str, target_branch: str) -> None:
+    branch = str(field(item, "branch"))
+    role = str(field(item, "role"))
+    git("fetch", "origin")
+    main_ref = f"refs/remotes/origin/{target_branch}"
+    base = git("rev-parse", main_ref)
+    remote_pr = "refs/remotes/origin/swarm-pr"
+    git("update-ref", "-d", remote_pr, check=False)
+    git("fetch", "origin", f"refs/heads/{branch}:{remote_pr}", check=False)
+    if git("rev-parse", "--verify", remote_pr, check=False):
+        git("checkout", "-B", "swarm-work", remote_pr)
+        if role == "revision":
+            git("merge", "--no-edit", main_ref)
+    else:
+        git("checkout", "-B", "swarm-work", main_ref)
+
+    mcp.tool("journal_add", block("text", f"checkpoint: task:{task}\nfixture edit written"))
+    output = Path("toy-output")
+    output.mkdir(exist_ok=True)
+    if task == "TOY-01":
+        (output / "one.txt").write_text("one\n", encoding="utf-8")
+    elif task == "TOY-02":
+        (output / "two.txt").write_text("two\n", encoding="utf-8")
+    elif task == "TOY-03":
+        one = (output / "one.txt").read_text(encoding="utf-8").strip()
+        two = (output / "two.txt").read_text(encoding="utf-8").strip()
+        (output / "combined.txt").write_text(f"{one}\n{two}\n", encoding="utf-8")
+    else:
+        raise RuntimeError(f"unexpected fixture task: {task}")
+    git("add", "toy-output")
+    git("commit", "-m", f"Complete {task}")
+    git("push", "origin", f"HEAD:refs/heads/{branch}")
+    head = git("rev-parse", "HEAD")
+    mcp.tool("journal_add", block("text", f"handoff: task:{task}\nchecks passed"))
+    mcp.tool(
+        "journal_add",
+        block(
+            "text",
+            "\n".join(
+                (
+                    f"open-pr: task:{task}",
+                    f"branch: {branch}",
+                    f"base: {base}",
+                    f"head: {head}",
+                    "verified: true",
+                )
+            ),
+        ),
+    )
+
+
+def review(mcp: Mcp, item: str, task: str) -> None:
+    branch = str(field(item, "branch"))
+    head = str(field(item, "head_sha"))
+    generation = int(field(item, "generation"))
+    ordinal = int(field(item, "review_ordinal"))
+    remote_pr = "refs/remotes/origin/swarm-pr"
+    git("fetch", "origin", f"refs/heads/{branch}:{remote_pr}")
+    if git("rev-parse", remote_pr) != head:
+        raise RuntimeError("review fixture observed a different PR head")
+    git("checkout", "--detach", head)
+    if git("status", "--porcelain=v1", "--untracked-files=all"):
+        raise RuntimeError("review clone is dirty")
+    mcp.tool(
+        "journal_add",
+        block(
+            "text",
+            "\n".join(
+                (
+                    f"approve: review:{task}:{generation}:{ordinal}",
+                    f"head: {head}",
+                    "verified: true",
+                    "evidence: fixture diff and acceptance check passed",
+                )
+            ),
+        ),
+    )
+
+
+def merge(mcp: Mcp, item: str, task: str) -> None:
+    mcp.tool(
+        "journal_add",
+        block(
+            "text",
+            "\n".join(
+                (
+                    f"merge: task:{task}",
+                    f"generation: {field(item, 'generation')}",
+                    f"head: {field(item, 'head_sha')}",
+                )
+            ),
+        ),
+    )
 
 
 def main() -> int:
     prompt = sys.argv[-1]
-    worker = re.search(r"Implement one Stage task as ([^.]*)\.", prompt).group(1)
-    branch = re.search(r"refs/heads/([^`]+)` from origin", prompt).group(1)
+    worker = re.search(r"as ([^.]+)\.", prompt).group(1)
+    target_branch = re.search(r"origin/([^`]+)`", prompt).group(1)
     mcp = Mcp()
     try:
-        active = mcp.tool("journal_search", f"query: worker:{worker}")
-        task = task_id(active)
-        if task is None:
+        item = mcp.tool("journal_search", f"query: worker:{worker}")
+        if field(item, "root_task_id") is None:
             ready = mcp.tool("journal_search", "query: queue:ready")
-            task = task_id(ready)
-            if task is None:
+            claim = field(ready, "claim")
+            if claim is None:
                 return 0
-            mcp.tool("journal_add", f"text: claim: task:{task}")
+            mcp.tool("journal_add", f"text: {claim}")
+            item = mcp.tool("journal_search", f"query: worker:{worker}")
+        task = str(field(item, "root_task_id"))
+        role = str(field(item, "role"))
         mcp.tool("journal_search", f"query: task:{task}")
-
-        output = Path("toy-output")
-        output.mkdir(exist_ok=True)
-        if task == "TOY-01":
-            (output / "one.txt").write_text("one\n", encoding="utf-8")
-        elif task == "TOY-02":
-            (output / "two.txt").write_text("two\n", encoding="utf-8")
-        elif task == "TOY-03":
-            one = (output / "one.txt").read_text(encoding="utf-8").strip()
-            two = (output / "two.txt").read_text(encoding="utf-8").strip()
-            (output / "combined.txt").write_text(f"{one}\n{two}\n", encoding="utf-8")
+        if role in {"author", "revision"}:
+            author(mcp, item, task, target_branch)
+        elif role.startswith("review:"):
+            review(mcp, item, task)
+        elif role == "merge":
+            merge(mcp, item, task)
         else:
-            raise RuntimeError(f"unexpected fixture task: {task}")
-
-        mcp.tool(
-            "journal_add",
-            block("text", f"checkpoint: task:{task}\nfixture edit written"),
-        )
-        git("add", "toy-output")
-        git("commit", "-m", f"Complete {task}")
-        git("fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/swarm-integration")
-        git("rebase", "refs/remotes/origin/swarm-integration")
-        git("push", "origin", f"HEAD:refs/heads/{branch}")
-        commit = git("rev-parse", "HEAD")
-        mcp.tool(
-            "journal_add",
-            block("text", f"handoff: task:{task}\nchecks passed\ncommit: {commit}"),
-        )
-        mcp.tool(
-            "journal_add",
-            block(
-                "text",
-                f"complete: task:{task}\ncommit: {commit}\nverified: true",
-            ),
-        )
+            raise RuntimeError(f"unexpected fixture role: {role}")
         print(
             json.dumps(
                 {
                     "type": "item.completed",
-                    "item": {"type": "agent_message", "text": f"Completed {task}."},
+                    "item": {"type": "agent_message", "text": f"Finished {role} for {task}."},
                 }
             ),
             flush=True,

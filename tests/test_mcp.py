@@ -6,8 +6,10 @@ from pathlib import Path
 
 from swarm_harness.journal import JournalClient, serve_in_thread
 from swarm_harness.journal_mcp import PROTOCOL_VERSION, JournalMcpServer
+from swarm_harness.workflow import WorkflowClient
 
 STAGE = {
+    "required_reviews": 3,
     "tasks": [
         {
             "id": "A",
@@ -16,7 +18,7 @@ STAGE = {
             "depends_on": [],
             "checks": ["test A"],
         }
-    ]
+    ],
 }
 
 
@@ -29,7 +31,7 @@ def _request(server: JournalMcpServer, number: int, method: str, params: dict) -
 def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
     socket = Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
     service, thread = serve_in_thread(tmp_path / "journal.sqlite3", socket)
-    client = JournalClient(socket)
+    client = WorkflowClient(JournalClient(socket))
     client.add(
         "run",
         "launcher",

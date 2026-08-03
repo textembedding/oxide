@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -25,6 +26,7 @@ from pygments.util import ClassNotFound
 
 from .journal import JournalClient, JournalError, serve_in_thread
 from .worker import Worker
+from .workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / ".swarm" / "runs"
@@ -185,16 +187,10 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
         != config["target_branch"]
     ):
         raise HarnessError("target must remain on its staged branch")
-    if _git(target, "rev-parse", "HEAD") != config["base_commit"]:
-        raise HarnessError("target branch changed after the run was staged")
+    if not _git_succeeds(target, "merge-base", "--is-ancestor", config["base_commit"], "HEAD"):
+        raise HarnessError("target branch no longer descends from the staged base")
     if _git(target, "status", "--porcelain=v1", "--untracked-files=no"):
         raise HarnessError("target has tracked changes; commit or stash them first")
-    branch = str(config["integration_branch"])
-    ref = f"refs/heads/{branch}"
-    if not _git(target, "show-ref", "--verify", ref, check=False):
-        _git(target, "update-ref", ref, config["base_commit"])
-    if not _git_succeeds(target, "merge-base", "--is-ancestor", config["base_commit"], ref):
-        raise HarnessError("integration branch does not descend from the staged base")
     worker_root = Path(config["run_dir"]) / "workers"
     worker_root.mkdir(parents=True, exist_ok=True)
     for index in range(int(config["workers"])):
@@ -210,48 +206,203 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
                 raise HarnessError(result.stderr.strip() or "could not clone worker repository")
             _git(clone, "config", "user.name", "Swarm Worker")
             _git(clone, "config", "user.email", "swarm-worker@localhost")
-        remote = "refs/remotes/origin/swarm-integration"
-        _git(clone, "fetch", "origin", f"{ref}:{remote}")
+        remote = "refs/remotes/origin/swarm-base"
+        _git(
+            clone,
+            "fetch",
+            "origin",
+            f"refs/heads/{config['target_branch']}:{remote}",
+        )
         if not _git(clone, "status", "--porcelain=v1", "--untracked-files=all"):
             _git(clone, "checkout", "-B", "swarm-worker", remote)
 
 
-def _publish(config: dict[str, Any], client: JournalClient) -> str:
+def _run_checks(
+    repository: Path, checks: list[str], log: Callable[[str], None]
+) -> tuple[bool, str]:
+    for check in checks:
+        log(f"verify: {check}")
+        result = subprocess.run(
+            ["/bin/zsh", "-lc", check],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode:
+            output = (result.stdout + result.stderr).strip()
+            return False, f"check failed ({result.returncode}): {check}: {output[-1200:]}"
+    return True, ""
+
+
+def _merge_failed(
+    config: dict[str, Any], client: WorkflowClient, task: dict[str, Any], reason: str
+) -> None:
+    client.add(
+        config["run_id"],
+        "launcher",
+        "\n".join(
+            (
+                "control: merge-failed",
+                f"task: {task['root_task_id']}",
+                f"generation: {task['generation']}",
+                f"head: {task['head_sha']}",
+                f"reason: {' '.join(reason.splitlines())[:1800]}",
+            )
+        ),
+    )
+
+
+def _merge_task(
+    config: dict[str, Any],
+    client: WorkflowClient,
+    task: dict[str, Any],
+    log: Callable[[str], None],
+) -> None:
     target = Path(config["target_repo"])
     target_branch = str(config["target_branch"])
-    base = str(config["base_commit"])
-    integration_branch = str(config["integration_branch"])
-    integration_ref = f"refs/heads/{integration_branch}"
+    branch = str(task["branch"])
+    head = str(task["head_sha"])
+    if _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False) != target_branch:
+        raise HarnessError("cannot merge: target is not on its staged branch")
+    if _git(target, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise HarnessError("cannot merge over tracked target changes")
+    if _git(target, "rev-parse", "--verify", f"refs/heads/{branch}", check=False) != head:
+        _merge_failed(config, client, task, "PR branch no longer matches approved head")
+        return
+    checks = [str(item) for item in task.get("checks", [])]
+    before = _git(target, "rev-parse", "HEAD")
+    if _git_succeeds(target, "merge-base", "--is-ancestor", head, before):
+        passed, reason = _run_checks(target, checks, log)
+        if not passed:
+            _merge_failed(config, client, task, reason)
+            return
+        merged = before
+        tree = _git(target, "rev-parse", "HEAD^{tree}")
+    else:
+        with tempfile.TemporaryDirectory(
+            prefix="verify-merge-", dir=Path(config["run_dir"])
+        ) as temporary:
+            verification = Path(temporary) / "repo"
+            clone = subprocess.run(
+                ["git", "clone", "--no-hardlinks", str(target), str(verification)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if clone.returncode:
+                raise HarnessError(clone.stderr.strip() or "could not clone merge verifier")
+            _git(verification, "checkout", target_branch)
+            candidate = f"refs/remotes/origin/{branch}"
+            if _git(verification, "rev-parse", "--verify", candidate, check=False) != head:
+                _merge_failed(config, client, task, "verification clone saw a different PR head")
+                return
+            prospective = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(verification),
+                    "-c",
+                    "user.name=Swarm Merge",
+                    "-c",
+                    "user.email=swarm-merge@localhost",
+                    "merge",
+                    "--no-ff",
+                    "--no-edit",
+                    candidate,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if prospective.returncode:
+                _merge_failed(
+                    config,
+                    client,
+                    task,
+                    prospective.stderr.strip() or "PR conflicts with current main",
+                )
+                return
+            passed, reason = _run_checks(verification, checks, log)
+            if not passed:
+                _merge_failed(config, client, task, reason)
+                return
+            expected_tree = _git(verification, "rev-parse", "HEAD^{tree}")
+        if _git(target, "rev-parse", "HEAD") != before:
+            raise HarnessError("target changed during prospective merge verification")
+        if _git(target, "rev-parse", f"refs/heads/{branch}") != head:
+            raise HarnessError("PR head changed during prospective merge verification")
+        actual = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(target),
+                "-c",
+                "user.name=Swarm Merge",
+                "-c",
+                "user.email=swarm-merge@localhost",
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                branch,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if actual.returncode:
+            _git(target, "merge", "--abort", check=False)
+            _merge_failed(config, client, task, actual.stderr.strip() or "merge failed")
+            return
+        merged = _git(target, "rev-parse", "HEAD")
+        tree = _git(target, "rev-parse", "HEAD^{tree}")
+        if tree != expected_tree:
+            raise HarnessError("actual merge tree differs from the verified prospective tree")
+    client.add(
+        config["run_id"],
+        "launcher",
+        "\n".join(
+            (
+                "control: merged",
+                f"task: {task['root_task_id']}",
+                f"generation: {task['generation']}",
+                f"head: {head}",
+                f"merge: {merged}",
+                f"tree: {tree}",
+            )
+        ),
+    )
+    log(f"merged {task['root_task_id']} PR#{task['generation']} at {merged[:12]}")
+
+
+def _publish(config: dict[str, Any], client: WorkflowClient, log: Callable[[str], None]) -> str:
+    target = Path(config["target_repo"])
+    target_branch = str(config["target_branch"])
     if _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False) != target_branch:
         raise HarnessError("cannot publish: target is not on its staged branch")
     if _git(target, "status", "--porcelain=v1", "--untracked-files=no"):
         raise HarnessError("cannot publish over tracked target changes")
-    tip = _git(target, "rev-parse", "--verify", integration_ref)
-    if not _git_succeeds(target, "merge-base", "--is-ancestor", base, tip):
-        raise HarnessError("cannot publish integration history unrelated to the staged base")
+    tip = _git(target, "rev-parse", "HEAD")
     tasks = client.search(config["run_id"], "queue:all")
     if not tasks or any(task.get("state") != "complete" for task in tasks):
-        raise HarnessError("cannot publish before every task is complete")
+        raise HarnessError("cannot publish before every reviewed PR is merged")
     for task in tasks:
-        commit = str(task.get("commit_sha") or "")
+        commit = str(task.get("merged_sha") or "")
         if not re.fullmatch(r"[0-9a-f]{40}", commit) or not _git_succeeds(
             target, "merge-base", "--is-ancestor", commit, tip
         ):
-            raise HarnessError(f"task {task['task_id']} is absent from the integration tip")
-    head = _git(target, "rev-parse", "HEAD")
-    if head == base:
-        _git(target, "merge", "--ff-only", integration_branch)
-    elif head != tip:
-        raise HarnessError("cannot publish: target branch changed during the run")
-    if _git(target, "rev-parse", "HEAD") != tip:
-        raise HarnessError("publication did not update the target to the integration tip")
+            raise HarnessError(f"task {task['task_id']} merge is absent from main")
+    stage = load_stage(config["stage_path"])
+    passed, reason = _run_checks(target, [str(item) for item in stage["stage_gate"]], log)
+    if not passed:
+        raise HarnessError(f"stage gate failed: {reason}")
     result = client.add(
         config["run_id"],
         "launcher",
         f"control: published\ncommit: {tip}",
     )
     if result.get("state") != "complete":
-        raise HarnessError("journal did not accept publication")
+        raise HarnessError("workflow did not accept publication")
     return tip
 
 
@@ -288,16 +439,16 @@ def _wait_socket(path: Path, timeout: float = 30) -> None:
         time.sleep(0.1)
 
 
-def _using_journal(config: dict[str, Any], call: Callable[[JournalClient], Any]) -> Any:
+def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]) -> Any:
     socket_path = Path(config["socket"])
     if socket_path.exists():
         try:
-            return call(JournalClient(socket_path, timeout=0.5))
+            return call(WorkflowClient(JournalClient(socket_path, timeout=0.5)))
         except (ConnectionError, OSError):
             pass
     server, thread = serve_in_thread(config["database"], socket_path)
     try:
-        return call(JournalClient(socket_path))
+        return call(WorkflowClient(JournalClient(socket_path)))
     finally:
         server.shutdown()
         server.server_close()
@@ -444,6 +595,10 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError("run already exists; use resume or reset")
     if arguments.workers < 1:
         raise HarnessError("workers must be positive")
+    if not 1 <= arguments.reviews <= 16:
+        raise HarnessError("reviews must be between 1 and 16")
+    if arguments.workers < arguments.reviews + 1:
+        raise HarnessError("workers must include an author plus distinct reviewers")
     if (
         not target.is_dir()
         or _git(target, "rev-parse", "--is-inside-work-tree", check=False) != "true"
@@ -457,7 +612,7 @@ def command_run(arguments: argparse.Namespace) -> int:
     base_commit = _git(target, "rev-parse", "HEAD")
     run_id = f"{arguments.workload}-{time.strftime('%Y%m%d-%H%M%S')}"
     config = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "workload": arguments.workload,
         "stage_path": str(_stage_path(arguments.workload)),
@@ -468,8 +623,9 @@ def command_run(arguments: argparse.Namespace) -> int:
         "database": str(run_dir / "journal.sqlite3"),
         "socket": str(run_dir / "journal.sock"),
         "workers": arguments.workers,
+        "required_reviews": arguments.reviews,
         "model": arguments.model,
-        "integration_branch": f"codex/swarm-{_slug(run_id)}/integration",
+        "branch_prefix": f"codex/swarm-{_slug(run_id)}",
         "stage": stage["stage"],
     }
     _atomic_json(_config_path(arguments.workload), config)
@@ -480,9 +636,12 @@ def command_launch(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     log = _Log(Path(config["run_dir"]) / "logs" / "orchestrator.log")
     server, thread = serve_in_thread(config["database"], config["socket"])
-    client = JournalClient(config["socket"])
+    client = WorkflowClient(JournalClient(config["socket"]))
     try:
         stage = load_stage(config["stage_path"])
+        stage["required_reviews"] = int(config["required_reviews"])
+        for task in stage["tasks"]:
+            task["branch"] = f"{config['branch_prefix']}/{_slug(str(task['id']))}"
         result = client.add(
             config["run_id"],
             "launcher",
@@ -500,14 +659,16 @@ def command_launch(arguments: argparse.Namespace) -> int:
         while True:
             state = str(client.search(config["run_id"], "run:state")[0]["state"])
             if state == "publishing":
-                tip = _publish(config, client)
-                log(f"published {tip[:12]} to {config['target_branch']}")
+                tip = _publish(config, client, log)
+                log(f"verified reviewed main {tip[:12]} on {config['target_branch']}")
                 log(f"run {config['run_id']}: COMPLETE")
                 return 0
             if state != "running":
                 log(f"run {config['run_id']}: {state.upper()}")
                 return 0 if state in {"paused", "complete", "stopped"} else 1
             assert supervisor is not None
+            for task in client.search(config["run_id"], "merge:requested"):
+                _merge_task(config, client, task, log)
             supervisor.tick()
             time.sleep(0.5)
     finally:
@@ -521,11 +682,11 @@ def command_worker(arguments: argparse.Namespace) -> int:
     _wait_socket(Path(config["socket"]))
     log = _Log(Path(config["run_dir"]) / "logs" / f"{arguments.slot}.log")
     worker = Worker(
-        JournalClient(config["socket"]),
+        WorkflowClient(JournalClient(config["socket"])),
         config["run_id"],
         arguments.slot,
         Path(config["run_dir"]) / "workers" / arguments.slot,
-        config["integration_branch"],
+        config["target_branch"],
         config["target_repo"],
         model=config.get("model"),
         log=log,
@@ -564,8 +725,14 @@ def command_reset(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     command_pause(argparse.Namespace(workload=arguments.workload))
     target = Path(config["target_repo"])
-    ref = f"refs/heads/{config['integration_branch']}"
-    _git(target, "update-ref", "-d", ref)
+    refs = _git(
+        target,
+        "for-each-ref",
+        "--format=%(refname)",
+        f"refs/heads/{config['branch_prefix']}/",
+    ).splitlines()
+    for ref in refs:
+        _git(target, "update-ref", "-d", ref)
     run_dir = Path(config["run_dir"])
     archive = RUNS.parent / "archive" / f"{arguments.workload}-{config['run_id']}"
     archive.parent.mkdir(parents=True, exist_ok=True)
@@ -751,8 +918,15 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         counts[state] = counts.get(state, 0) + 1
         add(state)
         add(task["task_id"])
+        if task.get("role") and task["role"] != "task":
+            add(task["role"], "role: ")
         if task.get("worker_id"):
             add(task["worker_id"], "owner: ")
+        if task.get("required_reviews"):
+            add(
+                f"{task.get('approvals', 0)}/{task['required_reviews']}",
+                "reviews: ",
+            )
         if task.get("commit_sha"):
             add(str(task["commit_sha"])[:12], "commit: ")
         add("-" * width)
@@ -815,7 +989,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run")
     run.add_argument("--workload", required=True)
     run.add_argument("--target", default=str(ROOT.parent / "memory"))
-    run.add_argument("--workers", type=int, default=1)
+    run.add_argument("--workers", type=int, default=7)
+    run.add_argument("--reviews", type=int, default=3)
     run.add_argument("--model")
     run.add_argument("--foreground", action="store_true")
     run.add_argument("--resume", action="store_true")
@@ -857,7 +1032,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         arguments = build_parser().parse_args(argv)
         return int(arguments.handler(arguments))
-    except (HarnessError, JournalError, OSError, ValueError) as error:
+    except (HarnessError, JournalError, WorkflowError, OSError, ValueError) as error:
         print(f"swarmctl: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .journal import JournalClient, JournalError
+from .workflow import WorkflowClient, WorkflowError
 from .yaml_payload import YamlPayloadError, dump_yaml, load_single_string_field
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -18,7 +19,7 @@ TOOLS = (
         "name": "journal_add",
         "description": (
             "Atomically add durable journal text. Queue claims and task completion are "
-            "ordinary journal records interpreted by the swappable journal backend."
+            "ordinary records interpreted by the workflow layer above the generic store."
         ),
         "inputSchema": {
             "type": "object",
@@ -76,7 +77,7 @@ def _environment(name: str) -> str:
 
 class JournalMcpServer:
     def __init__(self) -> None:
-        self.client = JournalClient(Path(_environment("SWARM_JOURNAL_SOCKET")))
+        self.client = WorkflowClient(JournalClient(Path(_environment("SWARM_JOURNAL_SOCKET"))))
         self.run_id = _environment("SWARM_RUN_ID")
         self.worker_id = _environment("SWARM_WORKER_ID")
 
@@ -110,7 +111,7 @@ class JournalMcpServer:
             if method == "tools/call":
                 return self._result(request_id, self._call_tool(request.get("params")))
             return self._error(request_id, -32601, "Method not found")
-        except (JournalError, YamlPayloadError, ValueError, OSError) as error:
+        except (JournalError, WorkflowError, YamlPayloadError, ValueError, OSError) as error:
             if method == "tools/call":
                 return self._result(
                     request_id,
@@ -132,7 +133,7 @@ class JournalMcpServer:
             result = self.client.add(self.run_id, self.worker_id, text)
         elif params.get("name") == "journal_search":
             query = load_single_string_field(arguments["yaml"], "query")
-            result = {"matches": self.client.search(self.run_id, query)}
+            result = {"matches": self.client.search(self.run_id, query, actor=self.worker_id)}
         else:
             raise ValueError("unknown tool")
         return {

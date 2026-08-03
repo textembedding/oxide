@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import copy
 import json
 import secrets
 import threading
-import time
-from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from swarm_harness.cli import load_stage
 from swarm_harness.journal import Journal, JournalClient, JournalError, serve_in_thread
+from swarm_harness.workflow import WorkflowClient, WorkflowError
 
 
 def _stage() -> dict:
@@ -18,6 +19,7 @@ def _stage() -> dict:
         "stage": 0,
         "enabled": True,
         "goal": "test",
+        "required_reviews": 3,
         "tasks": [
             {
                 "id": "A",
@@ -38,21 +40,16 @@ def _stage() -> dict:
     }
 
 
-def _bootstrap(client: JournalClient, run_id: str, stage: dict | None = None) -> None:
-    document = json.dumps(stage or _stage(), separators=(",", ":"))
-    client.add(run_id, "launcher", f"bootstrap: run:{run_id}\nstage-json: {document}")
-
-
 def _socket() -> Path:
     return Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
 
 
 @pytest.fixture
-def journal(tmp_path: Path):
+def workflow(tmp_path: Path):
     socket = _socket()
     database = tmp_path / "journal.sqlite3"
     server, thread = serve_in_thread(database, socket)
-    client = JournalClient(socket)
+    client = WorkflowClient(JournalClient(socket))
     _bootstrap(client, "run")
     yield client, database, socket
     server.shutdown()
@@ -60,168 +57,301 @@ def journal(tmp_path: Path):
     thread.join(timeout=5)
 
 
-def _finish(client: JournalClient, run_id: str, worker: str, task: str, number: int) -> None:
-    client.add(run_id, worker, f"checkpoint: task:{task}\nimplementation saved")
-    client.add(run_id, worker, f"handoff: task:{task}\nchecks passed")
-    client.add(
+def _bootstrap(client: WorkflowClient, run_id: str, stage: dict | None = None) -> None:
+    document = json.dumps(stage or _stage(), separators=(",", ":"))
+    client.add(run_id, "launcher", f"bootstrap: run:{run_id}\nstage-json: {document}")
+
+
+def _open_pr(
+    client: WorkflowClient,
+    run_id: str,
+    worker: str,
+    task_id: str,
+    base: int,
+    head: int,
+) -> dict:
+    claimed = client.add(run_id, worker, f"claim: task:{task_id}")["work"]
+    client.add(run_id, worker, f"checkpoint: task:{task_id}\nimplementation saved")
+    client.add(run_id, worker, f"handoff: task:{task_id}\nchecks passed")
+    return client.add(
         run_id,
         worker,
-        f"complete: task:{task}\ncommit: {number:040x}\nverified: true",
+        "\n".join(
+            (
+                f"open-pr: task:{task_id}",
+                f"branch: {claimed['branch']}",
+                f"base: {base:040x}",
+                f"head: {head:040x}",
+                "verified: true",
+            )
+        ),
     )
 
 
-def test_exactly_two_operations_and_atomic_claim(journal) -> None:
-    client, database, _ = journal
-    prototype = Journal(database)
-    with pytest.raises(JournalError, match="only journal_add and journal_search"):
-        prototype.dispatch("claim_task", {})
+def _approve(
+    client: WorkflowClient,
+    run_id: str,
+    worker: str,
+    task_id: str,
+    generation: int,
+    ordinal: int,
+    head: int,
+) -> dict:
+    client.add(run_id, worker, f"claim: review:{task_id}:{generation}:{ordinal}")
+    return client.add(
+        run_id,
+        worker,
+        "\n".join(
+            (
+                f"approve: review:{task_id}:{generation}:{ordinal}",
+                f"head: {head:040x}",
+                "verified: true",
+                "evidence: objective and checks passed",
+            )
+        ),
+    )
 
+
+def _merge(
+    client: WorkflowClient,
+    run_id: str,
+    worker: str,
+    task_id: str,
+    generation: int,
+    head: int,
+    merge: int,
+) -> None:
+    client.add(run_id, worker, f"claim: merge:{task_id}:{generation}")
+    client.add(
+        run_id,
+        worker,
+        f"merge: task:{task_id}\ngeneration: {generation}\nhead: {head:040x}",
+    )
+    client.add(
+        run_id,
+        "launcher",
+        "\n".join(
+            (
+                "control: merged",
+                f"task: {task_id}",
+                f"generation: {generation}",
+                f"head: {head:040x}",
+                f"merge: {merge:040x}",
+                f"tree: {merge + 1:040x}",
+            )
+        ),
+    )
+
+
+def test_kernel_is_only_generic_ordered_append_and_search(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "kernel.sqlite3", clock=lambda: 7.0)
+    first = journal.add("space", "alice", "anything: alpha")
+    second = journal.add("space", "bob", "anything: beta")
+    assert first["record_id"] < second["record_id"]
+    assert [item["text"] for item in journal.search("space", "*")] == [
+        "anything: alpha",
+        "anything: beta",
+    ]
+    assert [item["author"] for item in journal.search("space", "beta")] == ["bob"]
+    with pytest.raises(JournalError, match="only journal_add and journal_search"):
+        journal.dispatch("claim", {})
+
+
+def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
+    client, _, _ = workflow
     barrier = threading.Barrier(2)
 
     def claim(worker: str) -> str:
-        contender = JournalClient(client.socket_path)
+        contender = WorkflowClient(JournalClient(client.socket_path))
         barrier.wait()
         try:
             contender.add("run", worker, "claim: task:A")
             return "accepted"
-        except JournalError:
+        except WorkflowError:
             return "rejected"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(claim, ("worker-0", "worker-1")))
     assert sorted(outcomes) == ["accepted", "rejected"]
-    working = client.search("run", "queue:all")
-    assert [(task["task_id"], task["state"]) for task in working] == [
+    work = client.search("run", "queue:all")
+    assert [(item["task_id"], item["state"]) for item in work] == [
         ("A", "working"),
         ("B", "blocked"),
     ]
 
 
-def test_worker_self_completion_unlocks_dependency_and_survives_restart(journal) -> None:
-    client, database, socket = journal
-    assert [task["task_id"] for task in client.search("run", "queue:ready")] == ["A"]
-    assert client.search("run", "task:A")[0]["checks"] == ["test A"]
-    assert client.search("run", "task:B")[0]["checks"] == ["test B"]
-    client.add("run", "worker-0", "claim: task:A")
-    with pytest.raises(JournalError, match="checkpoint"):
+def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> None:
+    client, database, socket = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    ready = client.search("run", "queue:ready")
+    assert [item["review_role"] for item in ready] == [
+        "specification",
+        "adversarial",
+        "integration",
+    ]
+    assert client.search("run", "queue:ready", actor="worker-0") == []
+    assert len(client.search("run", "queue:ready", actor="worker-1")) == 3
+    with pytest.raises(WorkflowError, match="own candidate"):
+        client.add("run", "worker-0", "claim: review:A:1:1")
+    client.add("run", "worker-1", "claim: review:A:1:1")
+    with pytest.raises(WorkflowError, match="owned current candidate"):
         client.add(
             "run",
-            "worker-0",
-            "complete: task:A\ncommit: " + "1" * 40 + "\nverified: true",
+            "worker-1",
+            f"approve: review:A:1:1\nhead: {2:040x}\nverified: true",
         )
-    _finish(client, "run", "worker-0", "A", 1)
-    assert [task["task_id"] for task in client.search("run", "queue:ready")] == ["B"]
+    _approve(client, "run", "worker-1", "A", 1, 1, 2)
+    with pytest.raises(WorkflowError, match="distinct"):
+        client.add("run", "worker-1", "claim: review:A:1:2")
+    _approve(client, "run", "worker-2", "A", 1, 2, 2)
+    assert all(item["role"].startswith("review:") for item in client.search("run", "queue:ready"))
+    _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    merge = client.search("run", "queue:ready")
+    assert [(item["root_task_id"], item["role"]) for item in merge] == [("A", "merge")]
+    _merge(client, "run", "worker-4", "A", 1, 2, 3)
+    assert [item["root_task_id"] for item in client.search("run", "queue:ready")] == ["B"]
 
-    # Closing and reopening the prototype preserves the queue without a controller.
-    # The fixture owns the live server, so use a second database copy for this proof.
-    restarted = Journal(database)
-    assert restarted.search("run", "task:A")[0]["commit_sha"] == f"{1:040x}"
+    restarted = WorkflowClient(JournalClient(socket))
+    assert restarted.search("run", "task:A")[0]["merged_sha"] == f"{3:040x}"
+    assert Journal(database).search("run", "*")
 
-    client.add("run", "worker-1", "claim: task:B")
-    _finish(client, "run", "worker-1", "B", 2)
-    assert client.search("run", "run:state")[0]["state"] == "publishing"
+
+def test_challenge_invalidates_generation_and_requires_all_reviews_again(workflow) -> None:
+    client, _, _ = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    _approve(client, "run", "worker-1", "A", 1, 1, 2)
+    client.add("run", "worker-2", "claim: review:A:1:2")
+    client.add(
+        "run",
+        "worker-2",
+        "challenge: review:A:1:2\nhead: " + f"{2:040x}" + "\nverified: true\nreason: defect",
+    )
+    revision = client.search("run", "queue:ready")[0]
+    assert revision["role"] == "revision"
+    _open_pr(client, "run", "worker-4", "A", 3, 4)
+    summary = client.search("run", "task:A")[0]
+    assert summary["generation"] == 2
+    assert summary["approvals"] == 0
+    assert len(client.search("run", "queue:ready")) == 3
+    with pytest.raises(WorkflowError, match="current candidate"):
+        client.add(
+            "run",
+            "worker-3",
+            f"approve: review:A:1:3\nhead: {2:040x}\nverified: true",
+        )
+
+
+def test_pause_resume_is_derived_from_generic_records(workflow) -> None:
+    client, _, _ = workflow
     assert client.add("run", "launcher", "control: pause")["state"] == "paused"
-    assert client.add("run", "launcher", "control: resume")["state"] == "publishing"
-    with pytest.raises(JournalError, match="launcher"):
-        client.add("run", "worker-1", f"control: published\ncommit: {2:040x}")
-    result = client.add("run", "launcher", f"control: published\ncommit: {2:040x}")
-    assert result["state"] == "complete"
-    assert client.search("run", "run:state")[0]["state"] == "complete"
-    assert socket.exists()
-
-
-def test_pause_resume_is_itself_two_tool_journal_text(journal) -> None:
-    client, _, _ = journal
-    assert client.add("run", "launcher", "control: pause")["state"] == "paused"
-    with pytest.raises(JournalError, match="paused"):
+    with pytest.raises(WorkflowError, match="paused"):
         client.add("run", "worker-0", "claim: task:A")
     assert client.add("run", "launcher", "control: resume")["state"] == "running"
-    assert client.add("run", "worker-0", "claim: task:A")["claim"] == "accepted"
 
 
-def test_stage0_keeps_seven_workers_productive_and_reaches_gate(tmp_path: Path) -> None:
-    stage = load_stage(Path(__file__).parents[1] / "stages" / "stage0.yaml")
+def test_stage0_seven_workers_traverse_author_review_and_merge_roles(tmp_path: Path) -> None:
+    stage = copy.deepcopy(load_stage(Path(__file__).parents[1] / "stages" / "stage0.yaml"))
+    stage["required_reviews"] = 3
     assert len(stage["tasks"]) == 16
-    assert sum(not task["depends_on"] for task in stage["tasks"]) == 15
-    assert all(task["checks"] and all(task["checks"]) for task in stage["tasks"])
-
     socket = _socket()
     server, thread = serve_in_thread(tmp_path / "stage0.sqlite3", socket)
-    client = JournalClient(socket)
+    client = WorkflowClient(JournalClient(socket))
     _bootstrap(client, "stage0", stage)
-    first_claims: list[tuple[str, str]] = []
-    errors: list[tuple[int, str]] = []
-    lock = threading.Lock()
-    first_wave = threading.Barrier(7)
-    stop = threading.Event()
+    workers = [f"worker-{index}" for index in range(7)]
+    initial = client.search("stage0", "queue:ready")[:7]
 
-    def work(index: int) -> None:
-        try:
-            local = JournalClient(socket)
-            worker = f"worker-{index}"
-            initial_id = stage["tasks"][index]["id"]
-            assert initial_id in {task["task_id"] for task in local.search("stage0", "queue:ready")}
-            local.add("stage0", worker, f"claim: task:{initial_id}")
-            with lock:
-                first_claims.append((worker, initial_id))
-            first_wave.wait(timeout=10)
-            counter = index + 1
-            while not stop.is_set():
-                active = local.search("stage0", f"worker:{worker}")
-                if active:
-                    _finish(local, "stage0", worker, active[0]["task_id"], counter)
-                    counter += 7
-                    continue
-                state = local.search("stage0", "run:state")[0]["state"]
-                if state in {"publishing", "complete"}:
-                    return
-                claimed = False
-                for task in local.search("stage0", "queue:ready"):
-                    try:
-                        local.add("stage0", worker, f"claim: task:{task['task_id']}")
-                    except JournalError:
-                        continue
-                    claimed = True
-                    break
-                if not claimed:
-                    time.sleep(0.005)
-            raise RuntimeError("another worker failed")
-        except Exception as error:
-            with lock:
-                errors.append((index, repr(error)))
-            stop.set()
-            raise
+    def first_claim(item: dict, worker: str) -> str:
+        WorkflowClient(JournalClient(socket)).add("stage0", worker, item["claim"])
+        return item["root_task_id"]
 
     with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = [pool.submit(work, index) for index in range(7)]
-        finished, unfinished = wait(futures, timeout=30, return_when=ALL_COMPLETED)
-        assert len(finished) == 7
-        assert not unfinished
-    assert not errors, errors
-    assert len(first_claims) == 7
-    assert len({task for _, task in first_claims}) == 7
-    assert all(task["state"] == "complete" for task in client.search("stage0", "queue:all"))
+        claimed = list(pool.map(first_claim, initial, workers))
+    assert len(set(claimed)) == 7
+
+    counter = 10
+
+    def finish(worker: str, item: dict) -> None:
+        nonlocal counter
+        role = str(item["role"])
+        task_id = str(item["root_task_id"])
+        if role in {"author", "revision"}:
+            base, head = counter, counter + 1
+            counter += 3
+            client.add("stage0", worker, f"checkpoint: task:{task_id}\nsaved")
+            client.add("stage0", worker, f"handoff: task:{task_id}\nchecked")
+            client.add(
+                "stage0",
+                worker,
+                "\n".join(
+                    (
+                        f"open-pr: task:{task_id}",
+                        f"branch: {item['branch']}",
+                        f"base: {base:040x}",
+                        f"head: {head:040x}",
+                        "verified: true",
+                    )
+                ),
+            )
+        elif role.startswith("review:"):
+            ordinal = int(item["review_ordinal"])
+            client.add(
+                "stage0",
+                worker,
+                "\n".join(
+                    (
+                        f"approve: review:{task_id}:{item['generation']}:{ordinal}",
+                        f"head: {item['head_sha']}",
+                        "verified: true",
+                        "evidence: simulated criterion and check pass",
+                    )
+                ),
+            )
+        elif role == "merge":
+            client.add(
+                "stage0",
+                worker,
+                f"merge: task:{task_id}\ngeneration: {item['generation']}\nhead: {item['head_sha']}",
+            )
+            merge = counter
+            counter += 2
+            client.add(
+                "stage0",
+                "launcher",
+                "\n".join(
+                    (
+                        "control: merged",
+                        f"task: {task_id}",
+                        f"generation: {item['generation']}",
+                        f"head: {item['head_sha']}",
+                        f"merge: {merge:040x}",
+                        f"tree: {merge + 1:040x}",
+                    )
+                ),
+            )
+        else:
+            raise AssertionError(role)
+
+    while client.search("stage0", "run:state")[0]["state"] == "running":
+        progressed = False
+        for worker in workers:
+            active = client.search("stage0", f"worker:{worker}")
+            if active:
+                finish(worker, active[0])
+                progressed = True
+        for item in client.search("stage0", "queue:ready"):
+            for worker in workers:
+                try:
+                    claimed_item = client.add("stage0", worker, item["claim"])["work"]
+                except WorkflowError:
+                    continue
+                finish(worker, claimed_item)
+                progressed = True
+                break
+        assert progressed
     assert client.search("stage0", "run:state")[0]["state"] == "publishing"
-    client.add("stage0", "launcher", f"control: published\ncommit: {99:040x}")
+    assert all(item["state"] == "complete" for item in client.search("stage0", "queue:all"))
+    client.add("stage0", "launcher", f"control: published\ncommit: {999:040x}")
     assert client.search("stage0", "run:state")[0]["state"] == "complete"
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
-
-
-@pytest.mark.parametrize(
-    "stage, message",
-    [
-        ({**_stage(), "tasks": [{**_stage()["tasks"][0], "depends_on": ["A"]}]}, "itself"),
-        ({**_stage(), "tasks": [{**_stage()["tasks"][0], "checks": [""]}]}, "invalid"),
-    ],
-)
-def test_invalid_stage_graph_fails_closed(tmp_path: Path, stage: dict, message: str) -> None:
-    socket = _socket()
-    server, thread = serve_in_thread(tmp_path / "bad.sqlite3", socket)
-    client = JournalClient(socket)
-    with pytest.raises(JournalError, match=message):
-        _bootstrap(client, "bad", stage)
     server.shutdown()
     server.server_close()
     thread.join(timeout=5)

@@ -46,7 +46,7 @@ print(json.dumps({'type':'turn.completed'}))
         "run",
         "worker-0",
         tmp_path,
-        "codex/swarm-stage0/integration",
+        "main",
         tmp_path,
         codex_argv=(sys.executable, str(fake)),
         log=logs.append,
@@ -64,8 +64,9 @@ print(json.dumps({'type':'turn.completed'}))
     }
     prompt = record["argv"][-1]
     assert "queue:ready" in prompt
-    assert "claim: task:<id>" in prompt
-    assert "fetch, rebase, recheck, and retry" in prompt
+    assert "INTERNAL REVIEW" in prompt
+    assert "configured approval count" in prompt
+    assert "There is no integration branch" in prompt
     assert "lease" not in prompt.lower()
     assert client.queries == ["run:state", "worker:worker-0", "queue:ready"]
     assert any("turn.completed" in line for line in logs)

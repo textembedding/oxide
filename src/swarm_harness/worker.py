@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .journal import JournalClient
+from .workflow import WorkflowClient
 
 
 class WorkerError(RuntimeError):
@@ -33,11 +33,11 @@ def _git(repository: Path, *arguments: str, check: bool = True) -> str:
 class Worker:
     def __init__(
         self,
-        client: JournalClient,
+        client: WorkflowClient,
         run_id: str,
         worker_id: str,
         repository: str | Path,
-        integration_branch: str,
+        target_branch: str,
         target_repo: str | Path,
         *,
         codex_argv: Sequence[str] = ("codex", "exec"),
@@ -48,7 +48,7 @@ class Worker:
         self.run_id = run_id
         self.worker_id = worker_id
         self.repository = Path(repository)
-        self.integration_branch = integration_branch
+        self.target_branch = target_branch
         self.target_repo = Path(target_repo)
         self.codex_argv = list(codex_argv)
         self.model = model
@@ -57,45 +57,66 @@ class Worker:
     def _sync(self) -> None:
         if _git(self.repository, "status", "--porcelain=v1", "--untracked-files=all"):
             return
-        remote = "refs/remotes/origin/swarm-integration"
+        remote = "refs/remotes/origin/swarm-base"
         _git(
             self.repository,
             "fetch",
             "origin",
-            f"refs/heads/{self.integration_branch}:{remote}",
+            f"refs/heads/{self.target_branch}:{remote}",
         )
         _git(self.repository, "checkout", "-B", "swarm-worker", remote)
 
     def _prompt(self) -> str:
-        return f"""Implement one Stage task as {self.worker_id}.
+        return f"""Perform exactly one journal-assigned role as {self.worker_id}.
 
 The journal is the entire coordination interface. You have exactly two journal
 tools: journal_search and journal_add. Never open or inspect the harness,
 journal socket, or journal database by shell command.
 
-1. Call journal_search with `query: worker:{self.worker_id}`. If it returns a
-   working task, resume it and search `task:<id>` for its checkpoints.
-2. Otherwise call journal_search with `query: queue:ready`, choose one task, and
-   atomically claim it with journal_add text whose first line is exactly
-   `claim: task:<id>`. If the claim conflicts, search again and choose another.
-3. Implement only that task in this clone. After the first durable edit, call
-   journal_add with first line `checkpoint: task:<id>` and summarize the state.
-4. Run every check returned in the task record. Fix failures. Commit all task
-   files to Git.
-5. Integrate without a coordinator: fetch
-   `refs/heads/{self.integration_branch}` from origin, rebase your commit onto
-   it, rerun the task checks, and push HEAD to that same branch. A rejected push
-   means another worker won the race; fetch, rebase, recheck, and retry.
-6. Call journal_add with first line `handoff: task:<id>` and record files,
-   checks, risks, and the pushed commit. Then call journal_add once more with:
+1. Search `worker:{self.worker_id}` and resume an owned item if present.
+   Otherwise search `queue:ready`, choose one item, and journal_add the exact
+   `claim` string returned in that item. On conflict, search again. Then search
+   `task:<root_task_id>` for the complete PR and review history.
+2. Follow the assigned role. A fresh session may receive any role.
 
-   complete: task:<id>
-   commit: <the exact 40-character pushed HEAD>
-   verified: true
+AUTHOR or REVISION
+- Fetch origin. For a new PR, create the assigned branch at the returned base.
+  For a revision, check out the assigned branch and merge current
+  `origin/{self.target_branch}` before editing. There is no integration branch.
+- Implement only the objective. Add `checkpoint: task:<root_task_id>` after the
+  first durable edit. Run every returned check, fix failures, commit, and push
+  HEAD to the exact assigned branch.
+- Add `handoff: task:<root_task_id>` with files and check evidence, then add:
 
-Do not claim a second task in this session. Do not edit roadmap checkboxes
-unless the claimed task explicitly requires them. Finish after the completion
-record is accepted.
+  open-pr: task:<root_task_id>
+  branch: <exact assigned branch>
+  base: <exact commit the candidate is based on>
+  head: <exact pushed HEAD>
+  verified: true
+
+INTERNAL REVIEW
+- Work read-only. Fetch the assigned branch, detach at exact `head_sha`, inspect
+  the complete base-to-head diff against the objective, and run every returned
+  check. Do not edit, commit, or push. The author cannot review its own PR.
+- On pass, add the exact review identity from the work item:
+
+  approve: review:<root_task_id>:<generation>:<review_ordinal>
+  head: <exact reviewed head>
+  verified: true
+  evidence: <criterion-level evidence>
+
+- On any defect use `challenge:` with the same identity, exact head,
+  `verified: true`, and `reason:`. A changed candidate requires all reviews again.
+
+MERGE
+- Re-search the task and confirm the exact head and configured approval count.
+  Add `merge: task:<root_task_id>` with exact `generation:` and `head:`. This is
+  the worker-owned merge authorization. The thin launcher runs the task checks
+  on the prospective merge tree and performs only that authorized merge to
+  `{self.target_branch}`.
+
+Do not claim a second item in this session. Finish after the terminal record is
+accepted.
 
 Both tools take one `yaml` argument. Its value is YAML containing exactly one
 string field: `query` for journal_search or `text` for journal_add.

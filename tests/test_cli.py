@@ -62,6 +62,22 @@ def test_queue_is_single_column_bounded_and_hides_blocked() -> None:
 def test_macos_commands_and_controls_remain_available() -> None:
     parser = cli.build_parser()
     assert parser.parse_args(["verify"]).handler is cli.command_verify
+    run = parser.parse_args(["harness", "run", "--workload", "stage0", "--target", "/tmp/memory"])
+    assert run.workers == 7
+    assert run.reviews == 3
+    configured = parser.parse_args(
+        [
+            "harness",
+            "run",
+            "--workload",
+            "stage0",
+            "--target",
+            "/tmp/memory",
+            "--reviews",
+            "2",
+        ]
+    )
+    assert configured.reviews == 2
     for command in ("pause", "resume", "reset", "observe", "observe-queue", "status"):
         arguments = ["harness", command, "--workload", "stage0"]
         if command == "observe":
@@ -97,23 +113,31 @@ def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -
             "--target",
             str(target),
             "--workers",
-            "2",
+            "4",
             "--foreground",
         ],
         cwd=ROOT,
         env=environment,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=60,
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    branch = config["integration_branch"]
-    assert config["schema_version"] == 3
+    assert config["schema_version"] == 4
+    assert config["required_reviews"] == 3
+    assert "integration_branch" not in config
+    assert config["branch_prefix"].startswith("codex/swarm-smoke-")
     assert (
         subprocess.run(
-            ["git", "-C", str(target), "show", f"{branch}:toy-output/combined.txt"],
+            [
+                "git",
+                "-C",
+                str(target),
+                "show",
+                f"{config['target_branch']}:toy-output/combined.txt",
+            ],
             text=True,
             capture_output=True,
             check=True,
@@ -121,25 +145,54 @@ def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -
         == "one\ntwo\n"
     )
     assert (target / "toy-output" / "combined.txt").read_text(encoding="utf-8") == "one\ntwo\n"
-    integration_tip = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", branch],
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
     target_tip = subprocess.run(
         ["git", "-C", str(target), "rev-parse", config["target_branch"]],
         text=True,
         capture_output=True,
         check=True,
     ).stdout.strip()
-    assert target_tip == integration_tip
-    assert "published " in (run_dir / "logs" / "orchestrator.log").read_text(encoding="utf-8")
+    assert target_tip != config["base_commit"]
+    merge_count = int(
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(target),
+                "rev-list",
+                "--count",
+                "--merges",
+                f"{config['base_commit']}..{target_tip}",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
+    assert merge_count == 3
+    task_refs = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(target),
+            "for-each-ref",
+            "--format=%(refname:short)",
+            f"refs/heads/{config['branch_prefix']}/",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    assert len(task_refs) == 3
+    assert "verified reviewed main " in (run_dir / "logs" / "orchestrator.log").read_text(
+        encoding="utf-8"
+    )
     worker_logs = "\n".join(
         path.read_text(encoding="utf-8") for path in (run_dir / "logs").glob("worker-*.log")
     )
     assert '"tool": "journal_search"' in worker_logs
     assert '"tool": "journal_add"' in worker_logs
+    assert "approve: review:" in worker_logs
+    assert "merge: task:" in worker_logs
 
     reset = subprocess.run(
         [str(ROOT / "swarmctl"), "harness", "reset", "--workload", "smoke"],
@@ -152,3 +205,16 @@ def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -
     )
     assert reset.returncode == 0, reset.stdout + reset.stderr
     assert not run_dir.exists()
+    assert not subprocess.run(
+        [
+            "git",
+            "-C",
+            str(target),
+            "for-each-ref",
+            "--format=%(refname)",
+            f"refs/heads/{config['branch_prefix']}/",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout

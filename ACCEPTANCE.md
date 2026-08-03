@@ -2,30 +2,41 @@
 
 The disposable harness is ready when:
 
-1. the source tree contains only the thin CLI, generic worker, two-tool MCP
-   facade, YAML codec, and one swappable journal prototype;
-2. only the journal prototype imports SQLite or implements task transitions;
-3. MCP lists exactly `journal_add` and `journal_search`;
-4. two concurrent workers cannot both claim one task through `journal_add`;
-5. checkpoint, handoff, exact commit, and `verified: true` are required before
-   self-completion;
-6. dependencies become ready immediately after their prerequisites complete;
-7. claims have no timer and a replacement stable slot recovers them through
-   `journal_search`;
-8. seven concurrent workers can claim seven distinct tasks and traverse the
-   complete real Stage 0 graph;
-9. stream highlighting, safe indentation, the compact queue, pause, resume,
-   reset, and all native macOS commands work;
-10. an end-to-end model-free run can launch workers, prove all task commits are
-    integrated, fast-forward the target checkout, complete, and reset;
-11. one authorized paid run exposes visible calls to both journal tools and
-    completes a real task through worker-owned Git integration.
+1. `journal.py` is a workflow-agnostic append/search kernel and the only module
+   importing SQLite;
+2. an automated boundary test rejects PR, review, verification, merge,
+   generation, dependency, task, or lifecycle concepts in that kernel;
+3. all swarm semantics are replayed from generic records by `workflow.py`;
+4. MCP lists exactly `journal_add` and `journal_search`;
+5. deterministic journal order makes only the first of concurrent competing
+   claims effective;
+6. every task uses its own PR branch and no integration branch is configured;
+7. a PR requires checkpoint, handoff, exact branch/base/head, author
+   self-verification, and three internal reviews by default;
+8. authors cannot review their own candidate, reviewers are distinct, and a
+   challenge invalidates the candidate generation's remaining review work;
+9. a changed candidate creates a new generation and repeats the full configured
+   review count;
+10. only a fully approved generation exposes merge work, and the launcher
+    verifies the prospective merge tree before merging it directly to the
+    target branch;
+11. dependencies become ready immediately after their prerequisite PRs merge;
+12. claims have no timer and a replacement stable slot recovers owned work
+    through `journal_search`;
+13. seven workers can traverse the complete real Stage 0 graph in a model-free
+    workflow simulation;
+14. stream highlighting, safe indentation, compact queue, pause, resume, reset,
+    and all native macOS commands work;
+15. the end-to-end model-free run performs authoring, three reviews, merge
+    authorization, prospective verification, three merge commits, final gate,
+    completion, and reset against a real Git checkout.
 
-Run the model-free suite with:
+Run the complete model-free suite with:
 
 ```bash
 ./swarmctl verify
 ```
 
-The Python prototype freezes after these criteria pass. Production journal
-semantics belong in the Rust kernel behind the same two tools.
+The Python journal kernel freezes once these criteria pass. New application
+semantics belong in the workflow layer; the production Rust kernel replaces
+only the same generic two-operation store.

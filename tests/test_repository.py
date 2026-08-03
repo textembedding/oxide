@@ -15,9 +15,10 @@ def test_runtime_has_only_the_small_two_tool_implementation() -> None:
         "journal.py",
         "journal_mcp.py",
         "worker.py",
+        "workflow.py",
         "yaml_payload.py",
     }
-    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 2000
+    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 2600
 
 
 def test_sqlite_is_confined_to_swappable_prototype() -> None:
@@ -30,6 +31,22 @@ def test_sqlite_is_confined_to_swappable_prototype() -> None:
             if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
                 importers.append(path.name)
     assert importers == ["journal.py"]
+
+
+def test_journal_kernel_contains_no_workflow_semantics() -> None:
+    source = (SOURCE / "journal.py").read_text(encoding="utf-8").lower()
+    for forbidden in (
+        "task",
+        "pull request",
+        "review",
+        "quorum",
+        "verification",
+        "merge policy",
+        "generation",
+        "dependency",
+        "lifecycle",
+    ):
+        assert forbidden not in source
 
 
 def test_no_old_coordination_api_survives() -> None:
