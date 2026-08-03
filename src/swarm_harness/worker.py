@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -46,12 +47,10 @@ The journal is the entire coordination interface. You have exactly two journal
 tools: journal_search and journal_add. Never open or inspect the harness,
 journal socket, or journal database by shell command.
 
-1. Immediately search `worker:{self.worker_id}` and resume an owned item if present.
-   Otherwise immediately search `queue:ready`. Before inspecting history or the
-   repository, rotate that returned list left by {ordinal} modulo its length and
-   journal_add each exact `claim` in that order until one is accepted. A rejected
-   race is normal: try the next returned item without deliberation. Re-search only
-   after exhausting that snapshot. Then search `task:<root_task_id>`.
+1. Search `worker:{self.worker_id}`; the host normally preclaims its work. If empty,
+   search `queue:ready`, rotate that list left by {ordinal} modulo its length, and
+   journal_add each exact `claim` until accepted. Try the next item immediately
+   after a rejected race. Then search `task:<root_task_id>`.
 2. Follow the assigned role. A fresh session may receive any role.
 
 AUTHOR or REVISION
@@ -138,6 +137,24 @@ string field: `query` for journal_search or `text` for journal_add.
             return True
         return False
 
+    @staticmethod
+    def _terminal_record(line: str) -> bool:
+        try:
+            item = json.loads(line).get("item", {})
+        except (json.JSONDecodeError, AttributeError):
+            return False
+        if not isinstance(item, dict):
+            return False
+        arguments = item.get("arguments", {})
+        text = str(arguments.get("yaml", "")) if isinstance(arguments, dict) else ""
+        return (
+            (item.get("server"), item.get("tool"), item.get("status"))
+            == ("journal", "journal_add", "completed")
+            and "saved: true" in json.dumps(item.get("result"))
+            and re.search(r"open-pr: task:|(?:approve|challenge): review:|merge: task:", text)
+            is not None
+        )
+
     def _codex(self) -> int:
         argv = [
             *self.codex_argv,
@@ -179,6 +196,10 @@ string field: `query` for journal_search or `text` for journal_add.
         try:
             for line in process.stdout:
                 self.log(line.rstrip("\n"))
+                if self._terminal_record(line):
+                    os.killpg(process.pid, signal.SIGTERM)
+                    process.wait()
+                    return 0
             return process.wait()
         except BaseException:
             if process.poll() is None:
@@ -205,6 +226,7 @@ string field: `query` for journal_search or `text` for journal_add.
         code = self._codex()
         if code:
             self.log(f"Codex exited {code}; the same slot will reconstruct from the journal")
+            return "retry"
         return "worked"
 
     def run(self, idle_seconds: float = 1.0) -> str:
@@ -212,4 +234,5 @@ string field: `query` for journal_search or `text` for journal_add.
             state = self.run_once()
             if state in {"publishing", "complete", "paused", "stopped", "failed"}:
                 return state
-            time.sleep(idle_seconds)
+            if state != "worked":
+                time.sleep(idle_seconds)

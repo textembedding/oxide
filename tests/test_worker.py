@@ -82,8 +82,8 @@ print(json.dumps({'type':'turn.completed'}))
     }
     prompt = record["argv"][-1]
     assert "queue:ready" in prompt
-    assert "rotate that returned list left by 0" in prompt
-    assert "Before inspecting history or the" in prompt
+    assert "rotate that list left by 0" in prompt
+    assert "host normally preclaims" in prompt
     assert "Prior-generation\n  authorship is not" in prompt
     assert "INTERNAL REVIEW" in prompt
     assert "configured approval count" in prompt
@@ -99,3 +99,19 @@ def test_worker_claims_rotated_ready_work_before_model_launch(monkeypatch, tmp_p
     monkeypatch.setattr(worker, "_codex", lambda: 0)
     assert worker.run_once() == "worked"
     assert client.claims == ["claim: task:B"]
+
+
+def test_worker_detects_accepted_terminal_journal_record() -> None:
+    event = {
+        "item": {
+            "type": "mcp_tool_call",
+            "server": "journal",
+            "tool": "journal_add",
+            "status": "completed",
+            "arguments": {"yaml": "text: 'approve: review:A:1:1'"},
+            "result": {"content": [{"text": "saved: true"}]},
+        }
+    }
+    assert Worker._terminal_record(json.dumps(event))
+    event["item"]["arguments"] = {"yaml": "text: 'checkpoint: task:A'"}
+    assert not Worker._terminal_record(json.dumps(event))
