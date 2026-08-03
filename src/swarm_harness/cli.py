@@ -935,20 +935,31 @@ def command_observe(arguments: argparse.Namespace) -> int:
 
 
 def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
+    socket_path = Path(config["socket"])
+    if not socket_path.exists():
+        return None
     try:
-        return _using_journal(
-            config,
-            lambda client: {
-                "run_id": config["run_id"],
-                "state": client.search(config["run_id"], "run:state")[0]["state"],
-                "tasks": client.search(config["run_id"], "queue:all"),
-            },
-        )
-    except (JournalError, OSError, IndexError):
+        view = WorkflowClient(JournalClient(socket_path))._view(config["run_id"])
+        return {
+            "run_id": config["run_id"],
+            "state": view.state,
+            "entries": [
+                {
+                    "record_id": record["record_id"],
+                    "author": record["author"],
+                    "body": record["text"],
+                    "accepted": view.outcomes[int(record["record_id"])][0],
+                }
+                for record in view.records
+            ],
+        }
+    except (JournalError, json.JSONDecodeError, OSError, IndexError):
         return None
 
 
-def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 40) -> str:
+def _render_queue(
+    snapshot: dict[str, Any] | None, *, color: bool, width: int = 40, header: bool = True
+) -> str:
     width = max(20, min(QUEUE_WIDTH, width))
     lines: list[tuple[str, str]] = []
 
@@ -963,74 +974,57 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         )
         lines.extend((line, code) for line in wrapped or [""])
 
-    add("SWARM QUEUE", code="1;36")
+    if header:
+        add("SWARM JOURNAL", code="1;36")
     if snapshot is None:
         add("WAITING FOR JOURNAL", code="1;33")
         return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
-    add(snapshot["run_id"])
-    state = str(snapshot["state"]).upper()
-    add(state, code={"RUNNING": "1;32", "FAILED": "1;31"}.get(state, "1;33"))
-    add("-" * width, code="2")
-    tasks = [task for task in snapshot["tasks"] if task["state"] == "working"]
-    for task in tasks:
-        add("IN PROGRESS", code="1;33")
-        add(task.get("root_task_id") or task["task_id"], code="1;37")
-        role = str(task.get("role") or "task")
-        owner = str(task.get("worker_id") or "unowned")
-        generation = int(task.get("generation") or 0)
-        if role == "author":
-            assignment = "implementation"
-            status = "running checks" if task.get("checkpoint") else "editing files"
-        elif role == "revision":
-            assignment = "revision"
-            status = "running checks" if task.get("checkpoint") else "editing files"
-        elif role.startswith("review:"):
-            focus = role.removeprefix("review:").replace("-", " ")
-            assignment = f"{focus} review"
-            status = f"{task.get('approvals', 0)} of {task['required_reviews']} reviews passed"
-        elif role == "merge":
-            assignment = "merge approval"
-            status = "final merge check"
-        else:
-            assignment, status = role, "working"
-        if role in {"author", "revision"} and task.get("checkpoint") and task.get("handoff"):
-            status = "submitting candidate"
-        candidate = str(generation + 1 if role in {"author", "revision"} else generation)
-        if task.get("head_sha") and (role.startswith("review:") or role == "merge"):
-            candidate += f" @ {str(task['head_sha'])[:12]}"
-        add(owner, "worker: ", "34")
-        add(assignment, "role: ", "35")
-        add(candidate, "candidate: ", "36")
-        add(status, "status: ", "33")
-        if task.get("last_journal_record_id") is not None:
-            add(f"#{task['last_journal_record_id']}", "journal: ", "36")
-            body = [
-                line
-                for raw in _safe(str(task.get("last_journal_body") or "")).split("\n")
-                for line in textwrap.wrap(raw, width=width, break_on_hyphens=False) or [""]
-            ]
-            body = [*body[:4], body[4][: width - 3] + "..."] if len(body) > 5 else body
-            lines.extend((line, "36") for line in body)
+    if header:
+        add(snapshot["run_id"])
+        state = str(snapshot["state"]).upper()
+        add(state, code={"RUNNING": "1;32", "FAILED": "1;31"}.get(state, "1;33"))
         add("-" * width, code="2")
-    if tasks:
-        add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}", code="1;32")
-    else:
-        add("NO TASKS IN PROGRESS", code="1;33")
+    for entry in snapshot["entries"]:
+        add(f"JOURNAL #{entry['record_id']}", code="1;37")
+        add(entry["author"], "author: ", "34")
+        accepted = bool(entry["accepted"])
+        add("accepted" if accepted else "rejected", "status: ", "32" if accepted else "31")
+        body = [
+            line
+            for raw in _safe(entry["body"]).split("\n")
+            for line in textwrap.wrap(raw, width=width, break_on_hyphens=False) or [""]
+        ]
+        body = [*body[:4], body[4][: width - 3] + "..."] if len(body) > 5 else body
+        lines.extend((line, "36") for line in body)
+        add("-" * width, code="2")
     return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
 
 
 def command_observe_queue(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     color = _observer_color(arguments.color)
-    redraw = not arguments.no_follow and sys.stdout.isatty()
     width = min(QUEUE_WIDTH, shutil.get_terminal_size(fallback=(QUEUE_WIDTH, 24)).columns)
-    last = None
+    first, waiting, cursor = True, False, 0
     while True:
         snapshot = _queue_snapshot(config)
-        rendered = _render_queue(snapshot, color=color, width=width)
-        if rendered != last:
-            print(("\033[2J\033[H" if redraw else "") + rendered, end="", flush=True)
-            last = rendered
+        if snapshot is not None:
+            entries = [item for item in snapshot["entries"] if int(item["record_id"]) > cursor]
+            if first and not arguments.no_follow:
+                entries = entries[-10:]
+            if first or entries:
+                print(
+                    _render_queue(
+                        {**snapshot, "entries": entries}, color=color, width=width, header=first
+                    ),
+                    end="",
+                    flush=True,
+                )
+            if snapshot["entries"]:
+                cursor = int(snapshot["entries"][-1]["record_id"])
+            first = False
+        elif first and not waiting:
+            print(_render_queue(None, color=color, width=width), end="", flush=True)
+            waiting = True
         if arguments.no_follow:
             return 0
         state = snapshot["state"] if snapshot else "starting"
@@ -1041,7 +1035,13 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
 
 def command_status(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
-    snapshot = _queue_snapshot(config)
+    snapshot = _using_journal(
+        config,
+        lambda client: {
+            "state": client.search(config["run_id"], "run:state")[0]["state"],
+            "tasks": client.search(config["run_id"], "queue:all"),
+        },
+    )
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
 

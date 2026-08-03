@@ -90,122 +90,90 @@ def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
     )
 
 
-def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress() -> None:
+def test_queue_renders_append_only_records_in_chronological_order() -> None:
     snapshot = {
         "run_id": "stage0-20260802-123456",
         "state": "running",
-        "tasks": [
+        "entries": [
             {
-                "task_id": "ACTIVE-LONG-TASK-NAME",
-                "root_task_id": "ACTIVE-LONG-TASK-NAME",
-                "state": "working",
-                "role": "revision",
-                "worker_id": "worker-0",
-                "workflow_state": "authoring",
-                "claim_state": "accepted",
-                "generation": 2,
-                "checkpoint": False,
-                "handoff": False,
-                "last_journal_record_id": 140,
-                "last_journal_body": "claim: task:ACTIVE-LONG-TASK-NAME",
+                "record_id": 140,
+                "author": "worker-0",
+                "accepted": True,
+                "body": "claim: task:ACTIVE-LONG-TASK-NAME",
             },
-            {"task_id": "READY", "state": "ready", "worker_id": None},
-            {"task_id": "NOISE", "state": "blocked", "worker_id": None},
-            {"task_id": "DONE", "state": "complete", "worker_id": None},
+            {
+                "record_id": 141,
+                "author": "worker-1",
+                "accepted": False,
+                "body": "claim: task:ACTIVE-LONG-TASK-NAME",
+            },
         ],
     }
     rendered = cli._render_queue(snapshot, color=False, width=40)
     colored = cli._render_queue(snapshot, color=True, width=40)
+    assert "SWARM JOURNAL" in rendered
     assert "ACTIVE-LONG-TASK-NAME" in rendered
-    assert "READY" not in rendered
-    assert "NOISE" not in rendered
-    assert "DONE" not in rendered
-    assert "worker: worker-0" in rendered
-    assert "role: revision" in rendered
-    assert "candidate: 3" in rendered
-    assert "status: editing files" in rendered
-    assert "journal: #140" in rendered
-    assert "claim: task:ACTIVE-LONG-TASK-NAME" in rendered
-    assert "body:" not in rendered
-    assert "detail:" not in rendered
-    assert "authoring" not in rendered
-    assert "claim accepted" not in rendered
-    assert "checkpoint no" not in rendered
+    assert rendered.index("JOURNAL #140") < rendered.index("JOURNAL #141")
+    assert "author: worker-0\nstatus: accepted" in rendered
+    assert "author: worker-1\nstatus: rejected" in rendered
+    assert "[" not in rendered
     assert "-" * 40 in rendered
     assert "|" not in rendered
-    assert "\x1b[1;33mIN PROGRESS\x1b[0m" in colored
-    assert "\x1b[34mworker: worker-0" in colored
+    assert "\x1b[1;36mSWARM JOURNAL\x1b[0m" in colored
+    assert "\x1b[31mstatus: rejected\x1b[0m" in colored
 
 
 def test_queue_outputs_and_truncates_journal_body() -> None:
     snapshot = {
         "run_id": "stage0-test",
         "state": "running",
-        "tasks": [
+        "entries": [
             {
-                "task_id": "A",
-                "state": "working",
-                "role": "revision",
-                "worker_id": "worker-2",
-                "generation": 1,
-                "checkpoint": True,
-                "handoff": False,
-                "last_journal_record_id": 19,
-                "last_journal_body": "\n".join(f"journal line {number}" for number in range(1, 13)),
+                "record_id": 19,
+                "author": "worker-2",
+                "accepted": True,
+                "body": "\n".join(f"journal line {number}" for number in range(1, 13)),
             }
         ],
     }
     rendered = cli._render_queue(snapshot, color=False)
-    assert "journal: #19" in rendered
-    assert "body:" not in rendered
+    assert "JOURNAL #19" in rendered
     assert "journal line 1\n" in rendered
     assert "journal line 4\njournal line 5...\n" in rendered
     assert "journal line 6" not in rendered
-    snapshot["tasks"][0]["last_journal_body"] = "activation-bound " * 30 + "\nHIDDEN"
+    snapshot["entries"][0]["body"] = "activation-bound " * 30 + "\nHIDDEN"
     rendered = cli._render_queue(snapshot, color=False, width=40)
-    body = rendered.split("journal: #19\n", 1)[1].split("-" * 40, 1)[0].splitlines()
+    body = rendered.split("status: accepted\n", 1)[1].split("-" * 40, 1)[0].splitlines()
     assert len(body) == 5
     assert all(len(line) <= 40 for line in body)
     assert body[-1].endswith("...")
     assert "HIDDEN" not in rendered
 
 
-def test_queue_uses_the_same_fields_for_reviews() -> None:
-    snapshot = {
-        "run_id": "stage0-test",
+def test_following_queue_appends_new_records_without_redrawing(monkeypatch, capsys) -> None:
+    first = {
         "state": "running",
-        "tasks": [
-            {
-                "task_id": "A/review-2",
-                "root_task_id": "A",
-                "state": "working",
-                "role": "review:adversarial",
-                "worker_id": "worker-1",
-                "generation": 11,
-                "approvals": 0,
-                "required_reviews": 3,
-                "head_sha": "e8d72c3862801234567890123456789012345678",
-                "last_journal_record_id": 826,
-                "last_journal_body": "claim: review:A:11:2",
-            }
+        "run_id": "stage0-test",
+        "entries": [{"record_id": 1, "author": "worker-0", "accepted": True, "body": "one"}],
+    }
+    second = {
+        "state": "complete",
+        "run_id": "stage0-test",
+        "entries": [
+            *first["entries"],
+            {"record_id": 2, "author": "launcher", "accepted": True, "body": "two"},
         ],
     }
-    rendered = cli._render_queue(snapshot, color=False)
-    assert (
-        "worker: worker-1\nrole: adversarial review\n"
-        "candidate: 11 @ e8d72c386280\nstatus: 0 of 3 reviews passed\n"
-        "journal: #826\nclaim: review:A:11:2"
-    ) in rendered
-
-
-def test_following_queue_redraws_one_terminal_view(monkeypatch, capsys) -> None:
-    snapshot = {"state": "complete", "tasks": [], "run_id": "stage0-test"}
+    snapshots = iter((first, second))
     monkeypatch.setattr(cli, "_load_config", lambda _workload: {})
-    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config: snapshot)
-    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config: next(snapshots))
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
     arguments = cli.argparse.Namespace(workload="stage0", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
-    assert capsys.readouterr().out.startswith("\x1b[2J\x1b[H")
+    output = capsys.readouterr().out
+    assert output.count("SWARM JOURNAL") == 1
+    assert output.index("JOURNAL #1") < output.index("JOURNAL #2")
+    assert "\x1b[2J\x1b[H" not in output
 
 
 def test_macos_commands_and_controls_remain_available() -> None:
