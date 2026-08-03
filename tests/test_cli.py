@@ -145,9 +145,9 @@ def test_worker_observer_pins_only_model_task_and_role_in_bottom_row(
     output = capsys.readouterr().out
     assert "\x1b[?25l\x1b[?4h" in output
     footer = output.split("\x1b[2K\x1b[2;37;49m", 1)[1].split("\x1b[0m", 1)[0]
-    assert footer.startswith("model: gpt-test")
-    assert footer.endswith("task: S0-STABLE-SEAMS")
-    assert "role:" not in output
+    assert footer.startswith("gpt-test")
+    assert footer.endswith("S0-STABLE-SEAMS")
+    assert not any(label in output for label in ("model:", "task:", "role:"))
     assert output.endswith("\x1b[?4l\x1b[?25h")
 
 

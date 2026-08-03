@@ -912,8 +912,8 @@ def _draw_footer(status: tuple[str, str] | None) -> None:
     text = ""
     if status is not None:
         left = columns // 2
-        model = f"model: {status[0]}"[:left].ljust(left)
-        task = f"task: {status[1]}"[: columns - left].rjust(columns - left)
+        model = status[0][:left].ljust(left)
+        task = status[1][: columns - left].rjust(columns - left)
         text = model + task
         text = _style(text[:columns].ljust(columns), "2;37;49", True)
     print(f"\x1b[s\x1b[{rows};1H\x1b[2K{text}\x1b[u", end="", flush=True)
