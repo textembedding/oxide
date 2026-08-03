@@ -5,7 +5,7 @@ This disposable harness does not provide:
 - a trusted verifier or acceptance authority;
 - independent review, voting, proposals, or quorum;
 - task leases, heartbeats, or distributed failure detection;
-- a privileged planning or merge process;
+- a privileged planning or conflict-resolving merge process;
 - production security isolation or process receipts;
 - remote workers, deployment, or production journal durability;
 - custom trace capture or terminal multiplexing;

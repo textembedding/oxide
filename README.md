@@ -24,7 +24,10 @@ complete their own tasks through those two operations.
 `stage0` is the workload name. `pilot` is no longer used. A run opens one thin
 launcher terminal and seven worker terminals. Each worker receives an
 independent clone and a stable slot; 15 of the 16 Stage 0 tasks are immediately
-available, so all seven workers can claim work.
+available, so all seven workers can claim work. After every task is integrated,
+the launcher verifies the journaled commits and fast-forwards the original
+target branch. `COMPLETE` therefore means the files are present in the target
+checkout, not merely on a temporary integration branch.
 
 ## Observe
 
@@ -63,8 +66,9 @@ Pause terminates launcher, worker, and Codex processes after recording
 searching its journal records and continuing in its existing clone.
 
 Reset archives the run under `.swarm/archive/`; it does not delete the target
-repository or its current branch. Run the Stage 0 command again after reset to
-start from scratch.
+repository or revert changes already published to its current branch. Run the
+Stage 0 command again after reset to start a fresh campaign from the branch's
+current commit.
 
 See `HARNESS_CONTRACT.md` for the complete disposable protocol and
 `ACCEPTANCE.md` for the model-free proof suite.

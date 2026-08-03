@@ -197,6 +197,6 @@ string field: `query` for journal_search or `text` for journal_add.
     def run(self, idle_seconds: float = 1.0) -> str:
         while True:
             state = self.run_once()
-            if state in {"complete", "paused", "stopped", "failed"}:
+            if state in {"publishing", "complete", "paused", "stopped", "failed"}:
                 return state
             time.sleep(idle_seconds)

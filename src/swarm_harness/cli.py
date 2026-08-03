@@ -160,6 +160,18 @@ def _git(repository: Path, *arguments: str, check: bool = True) -> str:
     return result.stdout.strip()
 
 
+def _git_succeeds(repository: Path, *arguments: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
 
@@ -168,10 +180,21 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
     target = Path(config["target_repo"])
     if _git(target, "rev-parse", "--is-inside-work-tree") != "true":
         raise HarnessError("target must be a Git worktree")
+    if (
+        _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+        != config["target_branch"]
+    ):
+        raise HarnessError("target must remain on its staged branch")
+    if _git(target, "rev-parse", "HEAD") != config["base_commit"]:
+        raise HarnessError("target branch changed after the run was staged")
+    if _git(target, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise HarnessError("target has tracked changes; commit or stash them first")
     branch = str(config["integration_branch"])
     ref = f"refs/heads/{branch}"
     if not _git(target, "show-ref", "--verify", ref, check=False):
-        _git(target, "update-ref", ref, _git(target, "rev-parse", "HEAD"))
+        _git(target, "update-ref", ref, config["base_commit"])
+    if not _git_succeeds(target, "merge-base", "--is-ancestor", config["base_commit"], ref):
+        raise HarnessError("integration branch does not descend from the staged base")
     worker_root = Path(config["run_dir"]) / "workers"
     worker_root.mkdir(parents=True, exist_ok=True)
     for index in range(int(config["workers"])):
@@ -191,6 +214,45 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
         _git(clone, "fetch", "origin", f"{ref}:{remote}")
         if not _git(clone, "status", "--porcelain=v1", "--untracked-files=all"):
             _git(clone, "checkout", "-B", "swarm-worker", remote)
+
+
+def _publish(config: dict[str, Any], client: JournalClient) -> str:
+    target = Path(config["target_repo"])
+    target_branch = str(config["target_branch"])
+    base = str(config["base_commit"])
+    integration_branch = str(config["integration_branch"])
+    integration_ref = f"refs/heads/{integration_branch}"
+    if _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False) != target_branch:
+        raise HarnessError("cannot publish: target is not on its staged branch")
+    if _git(target, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise HarnessError("cannot publish over tracked target changes")
+    tip = _git(target, "rev-parse", "--verify", integration_ref)
+    if not _git_succeeds(target, "merge-base", "--is-ancestor", base, tip):
+        raise HarnessError("cannot publish integration history unrelated to the staged base")
+    tasks = client.search(config["run_id"], "queue:all")
+    if not tasks or any(task.get("state") != "complete" for task in tasks):
+        raise HarnessError("cannot publish before every task is complete")
+    for task in tasks:
+        commit = str(task.get("commit_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}", commit) or not _git_succeeds(
+            target, "merge-base", "--is-ancestor", commit, tip
+        ):
+            raise HarnessError(f"task {task['task_id']} is absent from the integration tip")
+    head = _git(target, "rev-parse", "HEAD")
+    if head == base:
+        _git(target, "merge", "--ff-only", integration_branch)
+    elif head != tip:
+        raise HarnessError("cannot publish: target branch changed during the run")
+    if _git(target, "rev-parse", "HEAD") != tip:
+        raise HarnessError("publication did not update the target to the integration tip")
+    result = client.add(
+        config["run_id"],
+        "launcher",
+        f"control: published\ncommit: {tip}",
+    )
+    if result.get("state") != "complete":
+        raise HarnessError("journal did not accept publication")
+    return tip
 
 
 def _terminal_command(arguments: list[str]) -> str:
@@ -387,13 +449,21 @@ def command_run(arguments: argparse.Namespace) -> int:
         or _git(target, "rev-parse", "--is-inside-work-tree", check=False) != "true"
     ):
         raise HarnessError("target must be a Git worktree")
+    target_branch = _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if not target_branch:
+        raise HarnessError("target must have a checked-out branch")
+    if _git(target, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise HarnessError("target has tracked changes; commit or stash them first")
+    base_commit = _git(target, "rev-parse", "HEAD")
     run_id = f"{arguments.workload}-{time.strftime('%Y%m%d-%H%M%S')}"
     config = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": run_id,
         "workload": arguments.workload,
         "stage_path": str(_stage_path(arguments.workload)),
         "target_repo": str(target),
+        "target_branch": target_branch,
+        "base_commit": base_commit,
         "run_dir": str(run_dir),
         "database": str(run_dir / "journal.sqlite3"),
         "socket": str(run_dir / "journal.sock"),
@@ -419,15 +489,25 @@ def command_launch(arguments: argparse.Namespace) -> int:
             f"bootstrap: run:{config['run_id']}\nstage-json: {json.dumps(stage, separators=(',', ':'))}",
         )
         log(f"run {config['run_id']}: {'created' if result['saved'] else 'resumed'}")
-        if result["state"] != "running":
-            return 0
-        _prepare_repositories(config)
-        supervisor = _Supervisor(config, log)
+        state = str(result["state"])
+        supervisor: _Supervisor | None = None
+        if state == "running":
+            _prepare_repositories(config)
+            supervisor = _Supervisor(config, log)
+        elif state != "publishing":
+            log(f"run {config['run_id']}: {state.upper()}")
+            return 0 if state in {"paused", "complete", "stopped"} else 1
         while True:
-            state = client.search(config["run_id"], "run:state")[0]["state"]
+            state = str(client.search(config["run_id"], "run:state")[0]["state"])
+            if state == "publishing":
+                tip = _publish(config, client)
+                log(f"published {tip[:12]} to {config['target_branch']}")
+                log(f"run {config['run_id']}: COMPLETE")
+                return 0
             if state != "running":
-                log(f"run {config['run_id']}: {str(state).upper()}")
+                log(f"run {config['run_id']}: {state.upper()}")
                 return 0 if state in {"paused", "complete", "stopped"} else 1
+            assert supervisor is not None
             supervisor.tick()
             time.sleep(0.5)
     finally:
@@ -452,7 +532,7 @@ def command_worker(arguments: argparse.Namespace) -> int:
     )
     state = worker.run()
     log(f"slot stopped: {state}")
-    return 0 if state in {"paused", "complete", "stopped"} else 1
+    return 0 if state in {"paused", "publishing", "complete", "stopped"} else 1
 
 
 def command_pause(arguments: argparse.Namespace) -> int:

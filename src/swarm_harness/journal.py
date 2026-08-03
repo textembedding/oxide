@@ -329,13 +329,14 @@ class Journal:
             "SELECT COUNT(*) FROM tasks WHERE run_id=? AND state!='complete'", (run_id,)
         ).fetchone()[0]
         if int(remaining) == 0:
-            connection.execute("UPDATE runs SET state='complete' WHERE run_id=?", (run_id,))
+            connection.execute("UPDATE runs SET state='publishing' WHERE run_id=?", (run_id,))
         return {
             "saved": True,
             "journal_id": journal_id,
             "task": task_id,
             "state": "complete",
-            "run_complete": int(remaining) == 0,
+            "run_state": "publishing" if int(remaining) == 0 else "running",
+            "run_complete": False,
         }
 
     def add(self, run_id: str, worker_id: str, text: str) -> dict[str, Any]:
@@ -350,12 +351,35 @@ class Journal:
             run = connection.execute("SELECT state FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if run is None:
                 raise JournalError("run does not exist")
+            if first == "control: published":
+                if worker_id != "launcher":
+                    raise JournalError("only the launcher may publish a run")
+                if run["state"] != "publishing":
+                    raise JournalError(f"run is {run['state']}")
+                commit = _line_value(text, "commit") or ""
+                if not _COMMIT.fullmatch(commit):
+                    raise JournalError("publication requires an exact commit")
+                connection.execute("UPDATE runs SET state='complete' WHERE run_id=?", (run_id,))
+                journal_id = self._append(connection, run_id, worker_id, text)
+                return {
+                    "saved": True,
+                    "journal_id": journal_id,
+                    "state": "complete",
+                    "commit": commit,
+                }
             if first in {"control: pause", "control: resume"}:
                 if worker_id != "launcher":
                     raise JournalError("only the launcher may change run control state")
-                state = "paused" if first.endswith("pause") else "running"
                 if run["state"] == "complete":
                     raise JournalError("a complete run cannot change state")
+                if first.endswith("pause"):
+                    state = "paused"
+                else:
+                    remaining = connection.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE run_id=? AND state!='complete'",
+                        (run_id,),
+                    ).fetchone()[0]
+                    state = "publishing" if int(remaining) == 0 else "running"
                 connection.execute("UPDATE runs SET state=? WHERE run_id=?", (state, run_id))
                 journal_id = self._append(connection, run_id, worker_id, text)
                 return {"saved": True, "journal_id": journal_id, "state": state}

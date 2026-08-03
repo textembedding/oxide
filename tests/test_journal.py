@@ -119,6 +119,13 @@ def test_worker_self_completion_unlocks_dependency_and_survives_restart(journal)
 
     client.add("run", "worker-1", "claim: task:B")
     _finish(client, "run", "worker-1", "B", 2)
+    assert client.search("run", "run:state")[0]["state"] == "publishing"
+    assert client.add("run", "launcher", "control: pause")["state"] == "paused"
+    assert client.add("run", "launcher", "control: resume")["state"] == "publishing"
+    with pytest.raises(JournalError, match="launcher"):
+        client.add("run", "worker-1", f"control: published\ncommit: {2:040x}")
+    result = client.add("run", "launcher", f"control: published\ncommit: {2:040x}")
+    assert result["state"] == "complete"
     assert client.search("run", "run:state")[0]["state"] == "complete"
     assert socket.exists()
 
@@ -166,7 +173,7 @@ def test_stage0_keeps_seven_workers_productive_and_reaches_gate(tmp_path: Path) 
                     counter += 7
                     continue
                 state = local.search("stage0", "run:state")[0]["state"]
-                if state == "complete":
+                if state in {"publishing", "complete"}:
                     return
                 claimed = False
                 for task in local.search("stage0", "queue:ready"):
@@ -194,6 +201,8 @@ def test_stage0_keeps_seven_workers_productive_and_reaches_gate(tmp_path: Path) 
     assert len(first_claims) == 7
     assert len({task for _, task in first_claims}) == 7
     assert all(task["state"] == "complete" for task in client.search("stage0", "queue:all"))
+    assert client.search("stage0", "run:state")[0]["state"] == "publishing"
+    client.add("stage0", "launcher", f"control: published\ncommit: {99:040x}")
     assert client.search("stage0", "run:state")[0]["state"] == "complete"
     server.shutdown()
     server.server_close()

@@ -92,24 +92,31 @@ directory into the local archive.
 Workers perform their own task checks, commit their changes, fetch the shared
 integration ref, rebase, rerun checks, and push. A rejected push means another
 worker integrated first; the worker fetches, rebases, rechecks, and retries.
-There is no central merge actor.
+There is no central conflict-resolution or semantic merge actor.
 
 The journal admits completion only from the claiming worker and only after that
 worker has appended both checkpoint and handoff records plus an exact 40-byte
 hex commit and `verified: true`. Completing a task makes its dependants ready.
-Completing every task makes the run complete.
+Completing every task moves the run to `publishing`. The launcher proves that
+every journaled task commit is an ancestor of the shared integration tip, then
+fast-forwards the originally staged target branch from its exact base to that
+tip. Only the resulting `control: published` journal entry makes the run
+complete. A changed branch, tracked target edit, missing commit, non-linear
+history, or failed fast-forward leaves the run uncompleted.
 
 ## Thin launcher
 
-The persistent process has four mechanical jobs:
+The persistent process has five mechanical jobs:
 
 - start the Python journal prototype;
 - create missing worker clones and the integration ref;
 - ensure the configured worker slots have live host processes;
+- publish the exact completed integration tip with a checked fast-forward;
 - stop when the journal reports pause or completion.
 
-It does not choose tasks, reclaim claims, validate candidates, merge commits,
-change dependencies, or mark tasks complete.
+It does not choose tasks, reclaim claims, judge implementation correctness,
+resolve conflicts, create merge commits, change dependencies, or mark tasks
+complete.
 
 ## Observability
 

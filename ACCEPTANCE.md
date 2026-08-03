@@ -16,8 +16,8 @@ The disposable harness is ready when:
    complete real Stage 0 graph;
 9. stream highlighting, safe indentation, the compact queue, pause, resume,
    reset, and all native macOS commands work;
-10. an end-to-end model-free run can launch workers, complete a workload, stop,
-    resume, and reset;
+10. an end-to-end model-free run can launch workers, prove all task commits are
+    integrated, fast-forward the target checkout, complete, and reset;
 11. one authorized paid run exposes visible calls to both journal tools and
     completes a real task through worker-owned Git integration.
 

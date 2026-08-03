@@ -110,6 +110,7 @@ def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     branch = config["integration_branch"]
+    assert config["schema_version"] == 3
     assert (
         subprocess.run(
             ["git", "-C", str(target), "show", f"{branch}:toy-output/combined.txt"],
@@ -119,6 +120,21 @@ def test_native_launcher_worker_mcp_and_git_complete_toy_stage(tmp_path: Path) -
         ).stdout
         == "one\ntwo\n"
     )
+    assert (target / "toy-output" / "combined.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    integration_tip = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", branch],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    target_tip = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", config["target_branch"]],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    assert target_tip == integration_tip
+    assert "published " in (run_dir / "logs" / "orchestrator.log").read_text(encoding="utf-8")
     worker_logs = "\n".join(
         path.read_text(encoding="utf-8") for path in (run_dir / "logs").glob("worker-*.log")
     )

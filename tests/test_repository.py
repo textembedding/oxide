@@ -17,7 +17,7 @@ def test_runtime_has_only_the_small_two_tool_implementation() -> None:
         "worker.py",
         "yaml_payload.py",
     }
-    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 1900
+    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 2000
 
 
 def test_sqlite_is_confined_to_swappable_prototype() -> None:
