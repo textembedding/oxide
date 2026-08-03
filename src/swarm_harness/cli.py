@@ -446,10 +446,7 @@ def _wait_socket(path: Path, timeout: float = 30) -> None:
 def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]) -> Any:
     socket_path = Path(config["socket"])
     if socket_path.exists():
-        try:
-            return call(WorkflowClient(JournalClient(socket_path, timeout=0.5)))
-        except (ConnectionError, OSError):
-            pass
+        return call(WorkflowClient(JournalClient(socket_path)))
     server, thread = serve_in_thread(config["database"], socket_path)
     try:
         return call(WorkflowClient(JournalClient(socket_path)))
@@ -460,14 +457,13 @@ def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]
 
 
 def _run_state(config: dict[str, Any]) -> str:
+    socket_path = Path(config["socket"])
+    if not socket_path.exists():
+        return "starting"
     try:
-        return str(
-            _using_journal(
-                config,
-                lambda client: client.search(config["run_id"], "run:state")[0]["state"],
-            )
-        )
-    except (JournalError, OSError, IndexError):
+        client = WorkflowClient(JournalClient(socket_path))
+        return str(client.search(config["run_id"], "run:state")[0]["state"])
+    except (JournalError, WorkflowError, json.JSONDecodeError, OSError, IndexError, KeyError):
         return "starting"
 
 
@@ -737,7 +733,11 @@ def command_worker(arguments: argparse.Namespace) -> int:
 
 def command_pause(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
-    state = _run_state(config)
+    state = str(
+        _using_journal(
+            config, lambda client: client.search(config["run_id"], "run:state")[0]["state"]
+        )
+    )
     if state not in {"complete", "failed"}:
         result = _using_journal(
             config,
@@ -953,7 +953,7 @@ def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
                 for record in view.records
             ],
         }
-    except (JournalError, json.JSONDecodeError, OSError, IndexError):
+    except (JournalError, WorkflowError, json.JSONDecodeError, OSError, IndexError, KeyError):
         return None
 
 
@@ -1035,13 +1035,11 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
 
 def command_status(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
-    snapshot = _using_journal(
-        config,
-        lambda client: {
-            "state": client.search(config["run_id"], "run:state")[0]["state"],
-            "tasks": client.search(config["run_id"], "queue:all"),
-        },
-    )
+    client = WorkflowClient(JournalClient(config["socket"]))
+    snapshot = {
+        "state": client.search(config["run_id"], "run:state")[0]["state"],
+        "tasks": client.search(config["run_id"], "queue:all"),
+    }
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
 

@@ -176,6 +176,27 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
     assert "\x1b[2J\x1b[H" not in output
 
 
+def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Path) -> None:
+    socket = tmp_path / "journal.sock"
+    socket.touch()
+    config = {"socket": str(socket), "database": str(tmp_path / "journal.db"), "run_id": "run"}
+    monkeypatch.setattr(
+        cli, "serve_in_thread", lambda *_args: pytest.fail("observer replaced journal server")
+    )
+    with pytest.raises(OSError, match="slow response"):
+        cli._using_journal(config, lambda _client: (_ for _ in ()).throw(OSError("slow response")))
+
+    class EmptyResponse:
+        def __init__(self, _client) -> None:
+            pass
+
+        def search(self, _run_id, _query):
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setattr(cli, "WorkflowClient", EmptyResponse)
+    assert cli._run_state(config) == "starting"
+
+
 def test_macos_commands_and_controls_remain_available() -> None:
     parser = cli.build_parser()
     assert parser.parse_args(["verify"]).handler is cli.command_verify
