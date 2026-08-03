@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -332,6 +334,21 @@ def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Pa
         "starting",
         ("gpt 5.6 sol medium", "-"),
     )
+
+
+def test_controls_recover_a_stale_journal_socket() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        socket_path = root / "journal.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+            stale.bind(str(socket_path))
+        config = {"socket": str(socket_path), "database": str(root / "journal.db")}
+        result = cli._using_journal(
+            config,
+            lambda client: client.journal.add("run", "launcher", "control: recovery-probe"),
+        )
+        assert result == {"saved": True, "record_id": 1}
+        assert not socket_path.exists()
 
 
 def test_macos_commands_and_controls_remain_available() -> None:

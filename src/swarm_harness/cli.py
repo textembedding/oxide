@@ -443,15 +443,15 @@ def _wait_socket(path: Path, timeout: float = 30) -> None:
 
 def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]) -> Any:
     socket_path = Path(config["socket"])
-    if socket_path.exists():
+    try:
         return call(WorkflowClient(JournalClient(socket_path)))
-    server, thread = serve_in_thread(config["database"], socket_path)
+    except (ConnectionRefusedError, FileNotFoundError):
+        server, _ = serve_in_thread(config["database"], socket_path)
     try:
         return call(WorkflowClient(JournalClient(socket_path)))
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
 
 
 def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str, str]]:
