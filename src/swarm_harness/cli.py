@@ -909,7 +909,7 @@ def _scroll_lines(rendered: str, animate: bool) -> None:
     rows = rendered.splitlines() or [""]
     for index, row in enumerate(rows):
         if animate and index:
-            time.sleep(0.75 / (len(rows) - 1))
+            time.sleep(1.0 / (len(rows) - 1))
         print(row, flush=True)
 
 

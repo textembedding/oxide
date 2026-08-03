@@ -121,7 +121,7 @@ def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Pat
     output = capsys.readouterr().out
     assert output.index("history") < output.index("live line one") < output.index("live line two")
     assert delays[0] == 0.2
-    assert sum(delays[1:]) == pytest.approx(0.75)
+    assert sum(delays[1:]) == pytest.approx(1.0)
 
 
 def test_queue_renders_append_only_records_in_chronological_order() -> None:
@@ -210,7 +210,7 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
     assert output.index("JOURNAL #1") < output.index("JOURNAL #2")
     assert "\x1b[2J\x1b[H" not in output
     assert delays[0] == 1
-    assert sum(delays[1:]) == pytest.approx(0.75)
+    assert sum(delays[1:]) == pytest.approx(1.0)
 
 
 def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Path) -> None:
