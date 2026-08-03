@@ -84,7 +84,8 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "worker-0 is revising candidate 3" in rendered
     assert "step: editing files" in rendered
     assert "journal #140" in rendered
-    assert "body:\nclaim: task:ACTIVE-LONG-TASK-NAME" in rendered
+    assert "claim: task:ACTIVE-LONG-TASK-NAME" in rendered
+    assert "body:" not in rendered
     assert "detail:" not in rendered
     assert "authoring" not in rendered
     assert "claim accepted" not in rendered
@@ -95,7 +96,7 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "\x1b[1;34mworker-0 is revising" in colored
 
 
-def test_queue_outputs_journal_body() -> None:
+def test_queue_outputs_and_truncates_journal_body() -> None:
     snapshot = {
         "run_id": "stage0-test",
         "state": "running",
@@ -109,19 +110,16 @@ def test_queue_outputs_journal_body() -> None:
                 "checkpoint": True,
                 "handoff": False,
                 "last_journal_record_id": 19,
-                "last_journal_body": (
-                    "checkpoint: task:A\nfiles: artifacts/*\n"
-                    "status: executable compatibility probes now pass"
-                ),
+                "last_journal_body": "\n".join(f"journal line {number}" for number in range(1, 13)),
             }
         ],
     }
     rendered = cli._render_queue(snapshot, color=False)
     assert "journal #19" in rendered
-    assert (
-        "body:\ncheckpoint: task:A\nfiles: artifacts/*\n"
-        "status: executable compatibility probes now pass"
-    ) in rendered
+    assert "body:" not in rendered
+    assert "journal line 1\n" in rendered
+    assert "journal line 9\njournal line 10...\n" in rendered
+    assert "journal line 11" not in rendered
 
 
 def test_following_queue_redraws_one_terminal_view(monkeypatch, capsys) -> None:

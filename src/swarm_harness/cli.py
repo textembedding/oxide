@@ -981,9 +981,9 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
             add(str(task["head_sha"])[:12], "commit: ", "36")
         if task.get("last_journal_record_id") is not None:
             add(f"journal #{task['last_journal_record_id']}", code="36")
-            body = str(task.get("last_journal_body") or "")
-            add("body:", code="36")
-            lines.extend((line, "36") for line in _safe(body).split("\n"))
+            body = _safe(str(task.get("last_journal_body") or "")).split("\n")
+            body = [*body[:9], body[9] + "..."] if len(body) > 10 else body
+            lines.extend((line, "36") for line in body)
         add("-" * width, code="2")
     if tasks:
         add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}", code="1;32")
