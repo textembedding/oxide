@@ -975,8 +975,12 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         add(status, "status: ", "33")
         if task.get("last_journal_record_id") is not None:
             add(f"#{task['last_journal_record_id']}", "journal: ", "36")
-            body = _safe(str(task.get("last_journal_body") or "")).split("\n")
-            body = [*body[:4], body[4] + "..."] if len(body) > 5 else body
+            body = [
+                line
+                for raw in _safe(str(task.get("last_journal_body") or "")).split("\n")
+                for line in textwrap.wrap(raw, width=width, break_on_hyphens=False) or [""]
+            ]
+            body = [*body[:4], body[4][: width - 3] + "..."] if len(body) > 5 else body
             lines.extend((line, "36") for line in body)
         add("-" * width, code="2")
     if tasks:

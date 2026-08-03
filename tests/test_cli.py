@@ -122,6 +122,13 @@ def test_queue_outputs_and_truncates_journal_body() -> None:
     assert "journal line 1\n" in rendered
     assert "journal line 4\njournal line 5...\n" in rendered
     assert "journal line 6" not in rendered
+    snapshot["tasks"][0]["last_journal_body"] = "activation-bound " * 30 + "\nHIDDEN"
+    rendered = cli._render_queue(snapshot, color=False, width=40)
+    body = rendered.split("journal: #19\n", 1)[1].split("-" * 40, 1)[0].splitlines()
+    assert len(body) == 5
+    assert all(len(line) <= 40 for line in body)
+    assert body[-1].endswith("...")
+    assert "HIDDEN" not in rendered
 
 
 def test_queue_uses_the_same_fields_for_reviews() -> None:
