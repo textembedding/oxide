@@ -950,37 +950,31 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         owner = str(task.get("worker_id") or "unowned")
         generation = int(task.get("generation") or 0)
         if role == "author":
-            add(f"{owner} is implementing candidate {generation + 1}", code="1;34")
+            assignment = "implementation"
+            status = "running checks" if task.get("checkpoint") else "editing files"
         elif role == "revision":
-            add(f"{owner} is revising candidate {generation + 1}", code="1;34")
+            assignment = "revision"
+            status = "running checks" if task.get("checkpoint") else "editing files"
         elif role.startswith("review:"):
-            add(f"{owner} is reviewing candidate {generation}", code="1;34")
             focus = role.removeprefix("review:").replace("-", " ")
-            add(focus, "focus: ", "35")
+            assignment = f"{focus} review"
+            status = f"{task.get('approvals', 0)} of {task['required_reviews']} reviews passed"
         elif role == "merge":
-            add(f"{owner} is approving candidate {generation}", code="1;34")
+            assignment = "merge approval"
+            status = "final merge check"
         else:
-            add(f"{owner} is working")
-        if role in {"author", "revision"}:
-            if not task.get("checkpoint"):
-                step = "editing files"
-            elif not task.get("handoff"):
-                step = "running checks"
-            else:
-                step = "submitting candidate"
-            add(step, "step: ", "33")
-        elif role == "merge":
-            add("final merge check", "step: ", "33")
-        if role.startswith("review:") or role == "merge":
-            add(
-                f"{task.get('approvals', 0)} of {task['required_reviews']}",
-                "reviews passed: ",
-                "32",
-            )
+            assignment, status = role, "working"
+        if role in {"author", "revision"} and task.get("checkpoint") and task.get("handoff"):
+            status = "submitting candidate"
+        candidate = str(generation + 1 if role in {"author", "revision"} else generation)
         if task.get("head_sha") and (role.startswith("review:") or role == "merge"):
-            add(str(task["head_sha"])[:12], "commit: ", "36")
+            candidate += f" @ {str(task['head_sha'])[:12]}"
+        add(owner, "worker: ", "34")
+        add(assignment, "role: ", "35")
+        add(candidate, "candidate: ", "36")
+        add(status, "status: ", "33")
         if task.get("last_journal_record_id") is not None:
-            add(f"journal #{task['last_journal_record_id']}", code="36")
+            add(f"#{task['last_journal_record_id']}", "journal: ", "36")
             body = _safe(str(task.get("last_journal_body") or "")).split("\n")
             body = [*body[:9], body[9] + "..."] if len(body) > 10 else body
             lines.extend((line, "36") for line in body)

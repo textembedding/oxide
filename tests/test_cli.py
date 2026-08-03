@@ -81,9 +81,11 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "READY" not in rendered
     assert "NOISE" not in rendered
     assert "DONE" not in rendered
-    assert "worker-0 is revising candidate 3" in rendered
-    assert "step: editing files" in rendered
-    assert "journal #140" in rendered
+    assert "worker: worker-0" in rendered
+    assert "role: revision" in rendered
+    assert "candidate: 3" in rendered
+    assert "status: editing files" in rendered
+    assert "journal: #140" in rendered
     assert "claim: task:ACTIVE-LONG-TASK-NAME" in rendered
     assert "body:" not in rendered
     assert "detail:" not in rendered
@@ -93,7 +95,7 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "-" * 40 in rendered
     assert "|" not in rendered
     assert "\x1b[1;33mIN PROGRESS\x1b[0m" in colored
-    assert "\x1b[1;34mworker-0 is revising" in colored
+    assert "\x1b[34mworker: worker-0" in colored
 
 
 def test_queue_outputs_and_truncates_journal_body() -> None:
@@ -115,11 +117,39 @@ def test_queue_outputs_and_truncates_journal_body() -> None:
         ],
     }
     rendered = cli._render_queue(snapshot, color=False)
-    assert "journal #19" in rendered
+    assert "journal: #19" in rendered
     assert "body:" not in rendered
     assert "journal line 1\n" in rendered
     assert "journal line 9\njournal line 10...\n" in rendered
     assert "journal line 11" not in rendered
+
+
+def test_queue_uses_the_same_fields_for_reviews() -> None:
+    snapshot = {
+        "run_id": "stage0-test",
+        "state": "running",
+        "tasks": [
+            {
+                "task_id": "A/review-2",
+                "root_task_id": "A",
+                "state": "working",
+                "role": "review:adversarial",
+                "worker_id": "worker-1",
+                "generation": 11,
+                "approvals": 0,
+                "required_reviews": 3,
+                "head_sha": "e8d72c3862801234567890123456789012345678",
+                "last_journal_record_id": 826,
+                "last_journal_body": "claim: review:A:11:2",
+            }
+        ],
+    }
+    rendered = cli._render_queue(snapshot, color=False)
+    assert (
+        "worker: worker-1\nrole: adversarial review\n"
+        "candidate: 11 @ e8d72c386280\nstatus: 0 of 3 reviews passed\n"
+        "journal: #826\nclaim: review:A:11:2"
+    ) in rendered
 
 
 def test_following_queue_redraws_one_terminal_view(monkeypatch, capsys) -> None:
