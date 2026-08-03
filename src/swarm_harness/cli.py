@@ -950,6 +950,9 @@ def command_observe(arguments: argparse.Namespace) -> int:
     history_end = path.stat().st_size
     try:
         with path.open("r", encoding="utf-8", errors="replace") as stream:
+            stream.seek(0 if no_follow else max(0, history_end - 8_192))
+            if stream.tell():
+                stream.readline()
             while True:
                 line = stream.readline()
                 if line:

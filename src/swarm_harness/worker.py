@@ -43,12 +43,7 @@ class Worker:
 
     def _configs(self) -> list[str]:
         python = str(Path(sys.executable).resolve())
-        forwarded = [
-            "PYTHONPATH",
-            "SWARM_JOURNAL_SOCKET",
-            "SWARM_RUN_ID",
-            "SWARM_WORKER_ID",
-        ]
+        forwarded = ["PYTHONPATH", "SWARM_JOURNAL_SOCKET", "SWARM_RUN_ID", "SWARM_WORKER_ID"]
         writable = [
             str((self.repository / ".git").resolve()),
             str((self.target_repo / ".git").resolve()),

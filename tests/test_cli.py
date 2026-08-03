@@ -124,7 +124,35 @@ def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Pat
     assert sum(delays[1:]) == pytest.approx(1.0)
 
 
-def test_worker_observer_pins_only_model_task_and_role_in_bottom_row(
+def test_worker_observer_bounds_initial_follow_replay(monkeypatch, tmp_path: Path, capsys) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "worker-0.log"
+    path.write_text(
+        json.dumps("old history")
+        + "\n"
+        + json.dumps("x" * 70_000)
+        + "\n"
+        + json.dumps("recent")
+        + "\n",
+        encoding="utf-8",
+    )
+    config = {"workers": 1, "run_dir": str(tmp_path), "run_id": "run"}
+    monkeypatch.setattr(cli, "_load_config", lambda _workload: config)
+    monkeypatch.setattr(
+        cli, "_observer_context", lambda _config, _slot: ("complete", ("model", "task"))
+    )
+    arguments = cli.argparse.Namespace(
+        workload="stage0", slot="worker-0", color="never", raw=False, no_follow=False
+    )
+    assert cli.command_observe(arguments) == 0
+    output = capsys.readouterr().out
+    assert "recent" in output
+    assert "old history" not in output
+    assert "x" * 100 not in output
+
+
+def test_worker_observer_pins_only_model_and_task_in_bottom_row(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     logs = tmp_path / "logs"
