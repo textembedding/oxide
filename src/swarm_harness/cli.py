@@ -978,22 +978,22 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
         if task.get("head_sha") and (role.startswith("review:") or role == "merge"):
             add(str(task["head_sha"])[:12], "commit: ", "36")
         if task.get("last_journal_record_id") is not None:
-            action = str(task.get("last_journal_event") or "").split(":", 1)[0]
-            if action == "checkpoint":
-                update = "changes saved"
-            elif action == "handoff":
-                update = "checks completed"
-            elif action == "claim" and role == "revision":
-                update = "revision began"
-            elif action == "claim" and role.startswith("review:"):
-                update = "review began"
-            elif action == "claim" and role == "merge":
-                update = "merge check began"
-            elif action == "claim":
-                update = "implementation began"
-            else:
-                update = action.replace("-", " ") or "work updated"
-            add(update, f"journal #{task['last_journal_record_id']}: ", "36")
+            entry = str(task.get("last_journal_entry") or "")
+            first, *payload = entry.splitlines() or [""]
+            action = first.partition(":")[0].replace("-", " ") or "update"
+            detail = next(
+                (
+                    line.partition(":")[2].strip()
+                    for line in payload
+                    if line.strip().startswith(("status:", "evidence:"))
+                ),
+                "",
+            )
+            if not detail and payload:
+                detail = payload[0].partition(":")[2].strip() or payload[0].strip()
+            add(f"{action} by {owner}", f"journal #{task['last_journal_record_id']}: ", "36")
+            detail = textwrap.shorten(detail, width=width * 2 - 8, placeholder="…")
+            add(detail or "none recorded", "detail: ", "36")
         add("-" * width, code="2")
     if tasks:
         add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}", code="1;32")

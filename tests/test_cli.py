@@ -62,10 +62,8 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
                 "generation": 2,
                 "checkpoint": False,
                 "handoff": False,
-                "journal_record_count": 1,
                 "last_journal_record_id": 140,
-                "last_journal_worker_id": "worker-0",
-                "last_journal_event": "claim: task:ACTIVE-LONG-TASK-NAME",
+                "last_journal_entry": "claim: task:ACTIVE-LONG-TASK-NAME",
             },
             {"task_id": "READY", "state": "ready", "worker_id": None},
             {"task_id": "NOISE", "state": "blocked", "worker_id": None},
@@ -80,7 +78,8 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "DONE" not in rendered
     assert "worker-0 is revising candidate 3" in rendered
     assert "step: editing files" in rendered
-    assert "journal #140: revision began" in rendered
+    assert "journal #140: claim by worker-0" in rendered
+    assert "detail: none recorded" in rendered
     assert "authoring" not in rendered
     assert "claim accepted" not in rendered
     assert "checkpoint no" not in rendered
@@ -88,6 +87,32 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "|" not in rendered
     assert "\x1b[1;33mIN PROGRESS\x1b[0m" in colored
     assert "\x1b[1;34mworker-0 is revising" in colored
+
+
+def test_queue_shows_actual_journal_entry_detail() -> None:
+    snapshot = {
+        "run_id": "stage0-test",
+        "state": "running",
+        "tasks": [
+            {
+                "task_id": "A",
+                "state": "working",
+                "role": "revision",
+                "worker_id": "worker-2",
+                "generation": 1,
+                "checkpoint": True,
+                "handoff": False,
+                "last_journal_record_id": 19,
+                "last_journal_entry": (
+                    "checkpoint: task:A\nfiles: artifacts/*\n"
+                    "status: executable compatibility probes now pass"
+                ),
+            }
+        ],
+    }
+    rendered = cli._render_queue(snapshot, color=False)
+    assert "journal #19: checkpoint by worker-2" in rendered
+    assert "detail: executable compatibility" in rendered
 
 
 def test_following_queue_redraws_one_terminal_view(monkeypatch, capsys) -> None:
