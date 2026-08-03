@@ -919,45 +919,44 @@ def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
 
 def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 40) -> str:
     width = max(20, min(QUEUE_WIDTH, width))
-    lines: list[str] = []
+    lines: list[tuple[str, str]] = []
 
-    def add(value: object = "", prefix: str = "") -> None:
-        lines.extend(
-            textwrap.wrap(
-                str(value),
-                width=width,
-                initial_indent=prefix,
-                subsequent_indent="  " if prefix else "",
-                break_long_words=True,
-                break_on_hyphens=False,
-            )
-            or [""]
+    def add(value: object = "", prefix: str = "", code: str = "0") -> None:
+        wrapped = textwrap.wrap(
+            str(value),
+            width=width,
+            initial_indent=prefix,
+            subsequent_indent="  " if prefix else "",
+            break_long_words=True,
+            break_on_hyphens=False,
         )
+        lines.extend((line, code) for line in wrapped or [""])
 
-    add("SWARM QUEUE")
+    add("SWARM QUEUE", code="1;36")
     if snapshot is None:
-        add("WAITING FOR JOURNAL")
-        return "\n".join(lines) + "\n"
+        add("WAITING FOR JOURNAL", code="1;33")
+        return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
     add(snapshot["run_id"])
-    add(str(snapshot["state"]).upper())
-    add("-" * width)
+    state = str(snapshot["state"]).upper()
+    add(state, code={"RUNNING": "1;32", "FAILED": "1;31"}.get(state, "1;33"))
+    add("-" * width, code="2")
     tasks = [task for task in snapshot["tasks"] if task["state"] == "working"]
     for task in tasks:
-        add("IN PROGRESS")
-        add(task.get("root_task_id") or task["task_id"])
+        add("IN PROGRESS", code="1;33")
+        add(task.get("root_task_id") or task["task_id"], code="1;37")
         role = str(task.get("role") or "task")
         owner = str(task.get("worker_id") or "unowned")
         generation = int(task.get("generation") or 0)
         if role == "author":
-            add(f"{owner} is implementing candidate {generation + 1}")
+            add(f"{owner} is implementing candidate {generation + 1}", code="1;34")
         elif role == "revision":
-            add(f"{owner} is revising candidate {generation + 1}")
+            add(f"{owner} is revising candidate {generation + 1}", code="1;34")
         elif role.startswith("review:"):
-            add(f"{owner} is reviewing candidate {generation}")
+            add(f"{owner} is reviewing candidate {generation}", code="1;34")
             focus = role.removeprefix("review:").replace("-", " ")
-            add(focus, "focus: ")
+            add(focus, "focus: ", "35")
         elif role == "merge":
-            add(f"{owner} is approving candidate {generation}")
+            add(f"{owner} is approving candidate {generation}", code="1;34")
         else:
             add(f"{owner} is working")
         if role in {"author", "revision"}:
@@ -967,16 +966,17 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
                 step = "running checks"
             else:
                 step = "submitting candidate"
-            add(step, "step: ")
+            add(step, "step: ", "33")
         elif role == "merge":
-            add("final merge check", "step: ")
+            add("final merge check", "step: ", "33")
         if role.startswith("review:") or role == "merge":
             add(
                 f"{task.get('approvals', 0)} of {task['required_reviews']}",
                 "reviews passed: ",
+                "32",
             )
         if task.get("head_sha") and (role.startswith("review:") or role == "merge"):
-            add(str(task["head_sha"])[:12], "commit: ")
+            add(str(task["head_sha"])[:12], "commit: ", "36")
         if task.get("last_journal_record_id") is not None:
             action = str(task.get("last_journal_event") or "").split(":", 1)[0]
             if action == "checkpoint":
@@ -993,28 +993,26 @@ def _render_queue(snapshot: dict[str, Any] | None, *, color: bool, width: int = 
                 update = "implementation began"
             else:
                 update = action.replace("-", " ") or "work updated"
-            add(update, f"journal #{task['last_journal_record_id']}: ")
-        add("-" * width)
+            add(update, f"journal #{task['last_journal_record_id']}: ", "36")
+        add("-" * width, code="2")
     if tasks:
-        add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}")
+        add(f"{len(tasks)} active assignment{'s' if len(tasks) != 1 else ''}", code="1;32")
     else:
-        add("NO TASKS IN PROGRESS")
-    return (
-        "\n".join(_style(line, "1;36" if line == "SWARM QUEUE" else "0", color) for line in lines)
-        + "\n"
-    )
+        add("NO TASKS IN PROGRESS", code="1;33")
+    return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
 
 
 def command_observe_queue(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
     color = _observer_color(arguments.color)
+    redraw = not arguments.no_follow and sys.stdout.isatty()
     width = min(QUEUE_WIDTH, shutil.get_terminal_size(fallback=(QUEUE_WIDTH, 24)).columns)
     last = None
     while True:
         snapshot = _queue_snapshot(config)
         rendered = _render_queue(snapshot, color=color, width=width)
         if rendered != last:
-            print(rendered, end="", flush=True)
+            print(("\033[2J\033[H" if redraw else "") + rendered, end="", flush=True)
             last = rendered
         if arguments.no_follow:
             return 0

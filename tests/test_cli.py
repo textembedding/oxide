@@ -73,6 +73,7 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
         ],
     }
     rendered = cli._render_queue(snapshot, color=False, width=40)
+    colored = cli._render_queue(snapshot, color=True, width=40)
     assert "ACTIVE-LONG-TASK-NAME" in rendered
     assert "READY" not in rendered
     assert "NOISE" not in rendered
@@ -85,6 +86,18 @@ def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress()
     assert "checkpoint no" not in rendered
     assert all(len(line) <= 40 for line in rendered.splitlines())
     assert "|" not in rendered
+    assert "\x1b[1;33mIN PROGRESS\x1b[0m" in colored
+    assert "\x1b[1;34mworker-0 is revising" in colored
+
+
+def test_following_queue_redraws_one_terminal_view(monkeypatch, capsys) -> None:
+    snapshot = {"state": "complete", "tasks": [], "run_id": "stage0-test"}
+    monkeypatch.setattr(cli, "_load_config", lambda _workload: {})
+    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config: snapshot)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    arguments = cli.argparse.Namespace(workload="stage0", color="never", no_follow=False)
+    assert cli.command_observe_queue(arguments) == 0
+    assert capsys.readouterr().out.startswith("\x1b[2J\x1b[H")
 
 
 def test_macos_commands_and_controls_remain_available() -> None:
