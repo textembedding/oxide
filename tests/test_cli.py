@@ -51,6 +51,27 @@ def test_observer_accepts_json_string_records() -> None:
     assert cli.highlight_stream_line(json.dumps(message), color=False) == message
 
 
+def test_observer_normalizes_quoted_yaml_strings_before_highlighting() -> None:
+    document = (
+        '  - kind: "work"\n'
+        '    title: "Readable title"\n'
+        '    claim: "claim: task:A"\n'
+        '    boolean: "true"\n'
+        "    body: |-\n"
+        "      unchanged"
+    )
+    assert cli._display_yaml(document) == (
+        "  - kind: work\n"
+        "    title: Readable title\n"
+        "    claim: |-\n"
+        "      claim: task:A\n"
+        "    boolean: |-\n"
+        "      true\n"
+        "    body: |-\n"
+        "      unchanged"
+    )
+
+
 def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress() -> None:
     snapshot = {
         "run_id": "stage0-20260802-123456",

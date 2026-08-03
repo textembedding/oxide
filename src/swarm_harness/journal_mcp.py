@@ -1,5 +1,3 @@
-"""Exact two-tool MCP facade for the swappable journal prototype."""
-
 from __future__ import annotations
 
 import json

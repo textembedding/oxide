@@ -1,7 +1,3 @@
-"""Replayable swarm workflow interpreted entirely above the generic journal."""
-
-from __future__ import annotations
-
 import json
 import re
 from dataclasses import dataclass, field
@@ -60,8 +56,6 @@ class Projection:
 
 
 class WorkflowReducer:
-    """Pure ordered-log reduction; it never writes to the journal."""
-
     def reduce(self, namespace: str, records: list[dict[str, Any]]) -> Projection:
         view = Projection(namespace=namespace, records=records)
         for record in records:
@@ -738,8 +732,6 @@ class WorkflowReducer:
 
 
 class WorkflowClient:
-    """Two-call workflow facade backed only by generic journal records."""
-
     def __init__(self, journal: JournalClient) -> None:
         self.journal = journal
         self.socket_path = journal.socket_path

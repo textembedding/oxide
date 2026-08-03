@@ -1,5 +1,3 @@
-"""Real multiprocess validation for workflow claims over the generic journal."""
-
 from __future__ import annotations
 
 import argparse

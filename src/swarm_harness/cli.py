@@ -1,5 +1,3 @@
-"""Small native macOS launcher for the two-tool swarm."""
-
 from __future__ import annotations
 
 import argparse
@@ -817,6 +815,26 @@ def _indent(value: str, prefix: str = "  ") -> str:
     return "\n".join(prefix + line for line in value.splitlines())
 
 
+_QUOTED_YAML = re.compile(r'^(\s*(?:(?:-\s+)?[\w-]+:\s+|-\s+))("(?:[^"\\]|\\.)*")$', re.MULTILINE)
+_YAML_WORDS = {"null", "true", "false", "yes", "no", "on", "off", "~"}
+
+
+def _display_yaml(value: object) -> str:
+    def replace(match: re.Match[str]) -> str:
+        prefix, encoded = match.groups()
+        scalar = json.loads(encoded)
+        plain = bool(scalar and scalar == scalar.strip() and scalar.isprintable())
+        plain &= scalar[0].isalnum() and scalar.lower() not in _YAML_WORDS
+        plain &= all(marker not in scalar for marker in (": ", " #"))
+        if plain:
+            return prefix + scalar
+        offset = 4 if prefix.lstrip().startswith("- ") and ":" in prefix else 2
+        indentation = " " * (len(prefix) - len(prefix.lstrip()) + offset)
+        return prefix + "|-\n" + indentation + scalar.replace("\n", "\n" + indentation)
+
+    return _QUOTED_YAML.sub(replace, _safe(value))
+
+
 def _tool_value(item: dict[str, Any], phase: str, color: bool) -> str:
     server = item.get("server", "")
     tool = item.get("tool", item.get("name", ""))
@@ -824,12 +842,16 @@ def _tool_value(item: dict[str, Any], phase: str, color: bool) -> str:
     arguments = item.get("arguments", item.get("input", {}))
     result = item.get("result", item.get("output"))
     if server == "journal" and isinstance(arguments, dict) and "yaml" in arguments:
-        blocks = [heading, "input.yaml:\n" + _indent(_code(arguments["yaml"], "yaml", color))]
+        blocks = [
+            heading,
+            "input.yaml:\n" + _indent(_code(_display_yaml(arguments["yaml"]), "yaml", color)),
+        ]
         if isinstance(result, dict):
             content = result.get("content")
             if isinstance(content, list) and content and isinstance(content[0], dict):
                 blocks.append(
-                    "output.yaml:\n" + _indent(_code(content[0].get("text", ""), "yaml", color))
+                    "output.yaml:\n"
+                    + _indent(_code(_display_yaml(content[0].get("text", "")), "yaml", color))
                 )
         return "\n".join(blocks)
     return heading + "\n" + _indent(json.dumps(arguments, indent=2, sort_keys=True))

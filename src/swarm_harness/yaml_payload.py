@@ -1,7 +1,3 @@
-"""Closed YAML subset used by the two model-visible journal tools."""
-
-from __future__ import annotations
-
 import json
 import math
 import re

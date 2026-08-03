@@ -1,5 +1,3 @@
-"""Replaceable Codex slot that coordinates exclusively through two journal tools."""
-
 from __future__ import annotations
 
 import json
