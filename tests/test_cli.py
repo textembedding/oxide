@@ -46,6 +46,11 @@ def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
     assert json.dumps(event) not in colored
 
 
+def test_observer_accepts_json_string_records() -> None:
+    message = "ERROR apply_patch verification failed\nTraceback (most recent call last)"
+    assert cli.highlight_stream_line(json.dumps(message), color=False) == message
+
+
 def test_queue_is_single_column_bounded_and_shows_only_active_journal_progress() -> None:
     snapshot = {
         "run_id": "stage0-20260802-123456",

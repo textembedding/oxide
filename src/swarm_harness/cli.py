@@ -835,7 +835,9 @@ def _tool_value(item: dict[str, Any], phase: str, color: bool) -> str:
     return heading + "\n" + _indent(json.dumps(arguments, indent=2, sort_keys=True))
 
 
-def _event_value(event: dict[str, Any], color: bool) -> str:
+def _event_value(event: Any, color: bool) -> str:
+    if not isinstance(event, dict):
+        return _safe(event) if isinstance(event, str) else _code(json.dumps(event), "json", color)
     event_type = str(event.get("type", "event"))
     phase = event_type.split(".", 1)[-1].upper()
     item = event.get("item")
