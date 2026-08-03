@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from .workflow import WorkflowClient
+from .workflow import WorkflowClient, WorkflowError
 
 
 class Worker:
@@ -127,6 +127,17 @@ string field: `query` for journal_search or `text` for journal_add.
             "mcp_servers.journal.tool_timeout_sec=10",
         ]
 
+    def _claim(self, ready: list[dict]) -> bool:
+        offset = int(self.worker_id.rsplit("-", 1)[-1]) % len(ready)
+        for item in ready[offset:] + ready[:offset]:
+            try:
+                self.client.add(self.run_id, self.worker_id, str(item["claim"]))
+            except WorkflowError:
+                continue
+            self.log(f"journal_add accepted: {item['claim']}")
+            return True
+        return False
+
     def _codex(self) -> int:
         argv = [
             *self.codex_argv,
@@ -187,6 +198,10 @@ string field: `query` for journal_search or `text` for journal_add.
         ready = self.client.search(self.run_id, "queue:ready")
         if not active and not ready:
             return "idle"
+        if not active and not self._claim(ready):
+            ready = self.client.search(self.run_id, "queue:ready")
+            if not ready or not self._claim(ready):
+                return "contended"
         code = self._codex()
         if code:
             self.log(f"Codex exited {code}; the same slot will reconstruct from the journal")

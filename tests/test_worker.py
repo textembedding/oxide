@@ -25,6 +25,24 @@ class SearchOnlyClient:
         raise AssertionError(query)
 
 
+class ClaimClient(SearchOnlyClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.claims: list[str] = []
+
+    def search(self, run_id: str, query: str) -> list[dict]:
+        if query == "worker:worker-1":
+            return []
+        if query == "queue:ready":
+            return [{"claim": f"claim: task:{task}"} for task in ("A", "B", "C")]
+        return super().search(run_id, query)
+
+    def add(self, run_id: str, worker: str, text: str) -> dict:
+        assert (run_id, worker) == ("run", "worker-1")
+        self.claims.append(text)
+        return {"claim": "accepted"}
+
+
 def test_worker_host_uses_only_search_and_codex_gets_exact_two_tools(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -73,3 +91,11 @@ print(json.dumps({'type':'turn.completed'}))
     assert "lease" not in prompt.lower()
     assert client.queries == ["run:state", "worker:worker-0", "queue:ready"]
     assert any("turn.completed" in line for line in logs)
+
+
+def test_worker_claims_rotated_ready_work_before_model_launch(monkeypatch, tmp_path: Path) -> None:
+    client = ClaimClient()
+    worker = Worker(client, "run", "worker-1", tmp_path, "main", tmp_path)  # type: ignore[arg-type]
+    monkeypatch.setattr(worker, "_codex", lambda: 0)
+    assert worker.run_once() == "worked"
+    assert client.claims == ["claim: task:B"]
