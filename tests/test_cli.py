@@ -22,6 +22,21 @@ def test_stage0_contract_parses_without_phantom_checks() -> None:
     assert len(stage["stage_gate"]) == 76
 
 
+def test_controller_checks_use_native_macos_capability_denial(monkeypatch, tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli._run_checks(tmp_path, ["cargo test -p verifier"], lambda _line: None) == (True, "")
+    assert calls[0][:3] == ["/usr/bin/sandbox-exec", "-p", cli._CHECK_PROFILE]
+    assert calls[0][-3:] == ["/bin/zsh", "-lc", "cargo test -p verifier"]
+    assert "(deny network*)" in cli._CHECK_PROFILE
+    assert "(deny signal)" in cli._CHECK_PROFILE
+
+
 def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
     event = {
         "type": "item.completed",

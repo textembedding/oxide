@@ -42,8 +42,7 @@ class Worker:
         return f"""Perform exactly one journal-assigned role as {self.worker_id}.
 The journal is the entire coordination interface. You have exactly journal_search and journal_add. Never inspect the harness, journal socket, or journal database by shell.
 1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, rotate that list left by {ordinal} modulo its length, and journal_add exact claims until accepted. Then search `task:<root_task_id>`.
-2. Follow the assigned role. A fresh session may receive any role.
-AUTHOR or REVISION
+2. Follow the assigned role. A fresh session may receive any role.\nAUTHOR or REVISION
 - Fetch origin. For a new PR, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.
 - Implement only the objective. Add `checkpoint: task:<root_task_id>` after the first durable edit. Run every returned check, fix failures, commit, and push HEAD to the exact branch.
 - Add `handoff: task:<root_task_id>` with files and check evidence, then add:

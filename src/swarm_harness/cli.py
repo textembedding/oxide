@@ -216,13 +216,18 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
             _git(clone, "checkout", "-B", "swarm-worker", remote)
 
 
+_CHECK_PROFILE = '(version 1) (allow default) (deny network*) (deny file-read* (subpath "/private/var/db/dslocal/nodes/Default/users")) (deny file-write* (literal "/System/feas-render-mutation")) (deny signal)'
+
+
 def _run_checks(
     repository: Path, checks: list[str], log: Callable[[str], None]
 ) -> tuple[bool, str]:
     for check in checks:
         log(f"verify: {check}")
+        command = ["/usr/bin/sandbox-exec", "-p", _CHECK_PROFILE]
+        command += ["/bin/zsh", "-lc", check]
         result = subprocess.run(
-            ["/bin/zsh", "-lc", check],
+            command,
             cwd=repository,
             text=True,
             capture_output=True,
