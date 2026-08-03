@@ -258,7 +258,10 @@ def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Pa
             raise json.JSONDecodeError("Expecting value", "", 0)
 
     monkeypatch.setattr(cli, "WorkflowClient", EmptyResponse)
-    assert cli._observer_context(config, "worker-0") == ("starting", ("default", "-", "-"))
+    assert cli._observer_context(config, "worker-0") == (
+        "starting",
+        ("gpt 5.6 sol medium", "-", "-"),
+    )
 
 
 def test_macos_commands_and_controls_remain_available() -> None:

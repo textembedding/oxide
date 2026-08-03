@@ -457,7 +457,7 @@ def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]
 
 
 def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str, str, str]]:
-    status = (str(config.get("model") or "default"), "-", "-")
+    status = (str(config.get("model") or "gpt 5.6 sol medium"), "-", "-")
     try:
         client = WorkflowClient(JournalClient(config["socket"]))
         view = client._view(config["run_id"])
