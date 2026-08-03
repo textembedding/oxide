@@ -191,6 +191,36 @@ def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
     assert active["last_journal_body"] == "checkpoint: task:A\nimplementation saved"
 
 
+def test_launcher_reclaims_crashed_author_review_and_merge_owners(workflow) -> None:
+    client, _, _ = workflow
+    client.add("run", "worker-0", "claim: task:A")
+    client.add("run", "worker-0", "checkpoint: task:A\nsaved")
+    with pytest.raises(WorkflowError, match="only the launcher"):
+        client.add("run", "worker-1", "control: reclaim worker:worker-0")
+    assert client.add("run", "launcher", "control: reclaim worker:worker-0") == {
+        "saved": True,
+        "reclaimed": "A",
+        "record_id": 5,
+    }
+    ready = client.search("run", "queue:ready")[0]
+    assert ready["root_task_id"] == "A" and not ready["checkpoint"]
+    _open_pr(client, "run", "worker-1", "A", 1, 2)
+
+    client.add("run", "worker-2", "claim: review:A:1:1")
+    assert client.add("run", "launcher", "control: reclaim worker:worker-2")["reclaimed"] == (
+        "A/review-1"
+    )
+    _approve(client, "run", "worker-3", "A", 1, 1, 2)
+    _approve(client, "run", "worker-4", "A", 1, 2, 2)
+    _approve(client, "run", "worker-5", "A", 1, 3, 2)
+
+    client.add("run", "worker-6", "claim: merge:A:1")
+    assert client.add("run", "launcher", "control: reclaim worker:worker-6")["reclaimed"] == (
+        "A/merge"
+    )
+    assert client.add("run", "worker-0", "claim: merge:A:1")["claim"] == "accepted"
+
+
 def test_internal_verification_review_claim_uses_the_same_atomic_race(workflow) -> None:
     client, database, socket = workflow
     _open_pr(client, "run", "worker-0", "A", 1, 2)

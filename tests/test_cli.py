@@ -13,6 +13,31 @@ from swarm_harness.concurrency import ConcurrencyError
 ROOT = Path(__file__).parents[1]
 
 
+def test_supervisor_reclaims_missing_worker_before_relaunch(monkeypatch) -> None:
+    class Client:
+        def search(self, run_id, query):
+            assert (run_id, query) == ("run", "queue:all")
+            return [{"state": "working", "worker_id": "worker-0"}]
+
+        def add(self, run_id, author, text):
+            assert (run_id, author, text) == (
+                "run",
+                "launcher",
+                "control: reclaim worker:worker-0",
+            )
+            return {"saved": True, "reclaimed": "A"}
+
+    launched, logged = [], []
+    monkeypatch.setattr(cli, "_live_slots", lambda _config: set())
+    monkeypatch.setattr(cli, "_launch_terminal", launched.append)
+    supervisor = cli._Supervisor(
+        {"workers": 2, "workload": "stage0", "run_id": "run"}, Client(), logged.append
+    )
+    supervisor.tick()
+    assert logged == ["reclaimed A from crashed worker-0", "launched worker-0", "launched worker-1"]
+    assert len(launched) == 2
+
+
 def test_stage0_contract_parses_without_phantom_checks() -> None:
     stage = cli.load_stage(Path(__file__).parents[1] / "stages" / "stage0.yaml")
     assert stage["stage"] == "0"

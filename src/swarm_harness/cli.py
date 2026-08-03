@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -516,20 +514,13 @@ def _live_slots(config: dict[str, Any]) -> set[str]:
 
 
 def _worker_argv(workload: str, slot: str) -> list[str]:
-    return [
-        str(ROOT / "swarmctl"),
-        "harness",
-        "worker",
-        "--workload",
-        workload,
-        "--slot",
-        slot,
-    ]
+    return [str(ROOT / "swarmctl"), "harness", "worker", "--workload", workload, "--slot", slot]
 
 
 class _Supervisor:
-    def __init__(self, config: dict[str, Any], log: Callable[[str], None]) -> None:
+    def __init__(self, config, client, log) -> None:
         self.config = config
+        self.client = client
         self.log = log
         self.expected = {f"worker-{index}" for index in range(int(config["workers"]))}
         self.starting: dict[str, float] = {}
@@ -541,6 +532,14 @@ class _Supervisor:
 
     def tick(self) -> None:
         live = _live_slots(self.config) & self.expected
+        for item in self.client.search(self.config["run_id"], "queue:all"):
+            owner = item.get("worker_id")
+            if item.get("state") == "working" and owner in self.expected - live:
+                result = self.client.add(
+                    self.config["run_id"], "launcher", f"control: reclaim worker:{owner}"
+                )
+                if result["saved"]:
+                    self.log(f"reclaimed {result['reclaimed']} from crashed {owner}")
         for slot in live:
             self.starting.pop(slot, None)
         now = time.monotonic()
@@ -689,7 +688,7 @@ def command_launch(arguments: argparse.Namespace) -> int:
         supervisor: _Supervisor | None = None
         if state == "running":
             _prepare_repositories(config)
-            supervisor = _Supervisor(config, log)
+            supervisor = _Supervisor(config, client, log)
         elif state != "publishing":
             log(f"run {config['run_id']}: {state.upper()}")
             return 0 if state in {"paused", "complete", "stopped"} else 1

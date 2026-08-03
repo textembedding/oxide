@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -18,14 +16,9 @@ from .workflow import WorkflowClient, WorkflowError, WorkflowReducer
 
 ROLES = ("author", "review", "verification", "revision", "merge")
 WINNER_CRASH = 86
-MIN_STAGE0_ROUNDS = 4
-SOURCE_PATHS = (
-    "src/swarm_harness/cli.py",
-    "src/swarm_harness/concurrency.py",
-    "src/swarm_harness/journal.py",
-    "src/swarm_harness/journal_mcp.py",
-    "src/swarm_harness/worker.py",
-    "src/swarm_harness/workflow.py",
+SOURCE_PATHS = tuple(
+    f"src/swarm_harness/{name}.py"
+    for name in ("cli", "concurrency", "journal", "journal_mcp", "worker", "workflow")
 )
 
 
@@ -59,21 +52,8 @@ def implementation_digest(root: Path) -> str:
     return hasher.hexdigest()
 
 
-def _stage(namespace: str) -> dict[str, Any]:
-    return {
-        "required_reviews": 3,
-        "tasks": [
-            {
-                "id": "A",
-                "title": "race target",
-                "prompt": "validate exclusive ownership",
-                "depends_on": [],
-                "checks": ["true"],
-                "branch": f"codex/concurrency/{namespace}",
-            }
-        ],
-        "stage_gate": ["true"],
-    }
+def _stage(_namespace: str) -> dict[str, Any]:
+    return {"required_reviews": 3, "tasks": [{"id": "A"}]}
 
 
 def _bootstrap(client: WorkflowClient, namespace: str) -> None:
@@ -547,7 +527,7 @@ def validate_receipt(
     receipt_path: Path,
     *,
     required_workers: int,
-    minimum_rounds: int = MIN_STAGE0_ROUNDS,
+    minimum_rounds: int = 4,
     require_current_source: bool = True,
 ) -> dict[str, Any]:
     try:

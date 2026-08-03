@@ -18,6 +18,7 @@ _MERGE_CLAIM = re.compile(r"^claim: merge:([^\s:]+):(\d+)$")
 _AUTHOR_MARKER = re.compile(r"^(checkpoint|handoff|open-pr): task:([^\s:]+)$")
 _REVIEW_DECISION = re.compile(r"^(approve|challenge): review:([^\s:]+):(\d+):(\d+)$")
 _MERGE_REQUEST = re.compile(r"^merge: task:([^\s:]+)$")
+_RECLAIM = re.compile(r"^control: reclaim worker:([^\s:]+)$")
 _REVIEW_ROLES = ("specification", "adversarial", "integration")
 
 
@@ -138,8 +139,34 @@ class WorkflowReducer:
             )
         elif match := _MERGE_REQUEST.fullmatch(first):
             self._merge_request(view, record, match.group(1))
+        elif match := _RECLAIM.fullmatch(first):
+            self._reclaim(view, record, match.group(1))
         else:
             view.accept(record, {"saved": True, "record_id": record["record_id"]})
+
+    @staticmethod
+    def _reclaim(view: Projection, record: dict[str, Any], worker: str) -> None:
+        if record["author"] != "launcher":
+            view.reject(record, "only the launcher may reclaim a crashed worker")
+            return
+        recovered: str | None = None
+        for task in view.tasks.values():
+            if task["state"] == "authoring" and task["worker_id"] == worker:
+                task.update(
+                    state="revision" if task["generation"] else "pending",
+                    worker_id=None,
+                    checkpoint=False,
+                    handoff=False,
+                )
+                recovered = task["task_id"]
+            elif task["state"] == "merge_claimed" and task["merge_worker_id"] == worker:
+                task.update(state="merge_ready", merge_worker_id=None)
+                recovered = f"{task['task_id']}/merge"
+            for review in task["reviews"]:
+                if review["state"] == "claimed" and review["worker_id"] == worker:
+                    review.update(state="pending", worker_id=None)
+                    recovered = f"{task['task_id']}/review-{review['ordinal']}"
+        view.accept(record, {"saved": recovered is not None, "reclaimed": recovered})
 
     def _bootstrap(self, view: Projection, record: dict[str, Any]) -> None:
         text = str(record["text"])
