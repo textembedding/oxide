@@ -108,7 +108,7 @@ def test_worker_observer_animates_only_new_log_events(monkeypatch, tmp_path: Pat
         if value == "running":
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(live) + "\n")
-        return "running" if value == "initial" else value, ("test-model", "task-a", "author")
+        return "running" if value == "initial" else value, ("test-model", "task-a")
 
     delays = []
     monkeypatch.setattr(cli, "_load_config", lambda _workload: config)
@@ -131,7 +131,7 @@ def test_worker_observer_pins_only_model_task_and_role_in_bottom_row(
     logs.mkdir()
     (logs / "worker-0.log").write_text(json.dumps("history") + "\n", encoding="utf-8")
     config = {"workers": 1, "run_dir": str(tmp_path), "run_id": "run", "model": "gpt-test"}
-    context = ("complete", ("gpt-test", "S0-STABLE-SEAMS", "review:integration"))
+    context = ("complete", ("gpt-test", "S0-STABLE-SEAMS"))
     monkeypatch.setattr(cli, "_load_config", lambda _workload: config)
     monkeypatch.setattr(cli, "_observer_context", lambda _config, _slot: context)
     monkeypatch.setattr(
@@ -144,10 +144,10 @@ def test_worker_observer_pins_only_model_task_and_role_in_bottom_row(
     assert cli.command_observe(arguments) == 0
     output = capsys.readouterr().out
     assert "\x1b[?25l\x1b[?4h" in output
-    assert "model: gpt-test" in output
-    assert "task: S0-STABLE-SE" in output
-    assert "role: review:integ" in output
-    assert "thread:" not in output and "state:" not in output and "worker:" not in output
+    footer = output.split("\x1b[2K\x1b[2;37;49m", 1)[1].split("\x1b[0m", 1)[0]
+    assert footer.startswith("model: gpt-test")
+    assert footer.endswith("task: S0-STABLE-SEAMS")
+    assert "role:" not in output
     assert output.endswith("\x1b[?4l\x1b[?25h")
 
 
@@ -260,7 +260,7 @@ def test_observer_reads_never_replace_the_live_journal(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(cli, "WorkflowClient", EmptyResponse)
     assert cli._observer_context(config, "worker-0") == (
         "starting",
-        ("gpt 5.6 sol medium", "-", "-"),
+        ("gpt 5.6 sol medium", "-"),
     )
 
 

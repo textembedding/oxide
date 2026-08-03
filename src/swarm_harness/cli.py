@@ -456,14 +456,14 @@ def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]
         thread.join(timeout=5)
 
 
-def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str, str, str]]:
-    status = (str(config.get("model") or "gpt 5.6 sol medium"), "-", "-")
+def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str, str]]:
+    status = (str(config.get("model") or "gpt 5.6 sol medium"), "-")
     try:
         client = WorkflowClient(JournalClient(config["socket"]))
         view = client._view(config["run_id"])
         matches = client.reducer.search(view, f"worker:{slot}")
         if matches:
-            status = (status[0], str(matches[0]["root_task_id"]), str(matches[0]["role"]))
+            status = (status[0], str(matches[0]["root_task_id"]))
         return view.state, status
     except (JournalError, WorkflowError, json.JSONDecodeError, OSError, IndexError, KeyError):
         return "starting", status
@@ -907,18 +907,19 @@ def _observer_color(mode: str) -> bool:
     return mode == "always" or mode == "auto" and sys.stdout.isatty()
 
 
-def _draw_footer(status: tuple[str, str, str] | None) -> None:
+def _draw_footer(status: tuple[str, str] | None) -> None:
     columns, rows = shutil.get_terminal_size(fallback=(80, 24))
     text = ""
     if status is not None:
-        cell = max(6, columns // 3)
-        fields = zip(("model", "task", "role"), status)
-        text = "".join(f"{label}: {value}"[:cell].ljust(cell) for label, value in fields)
+        left = columns // 2
+        model = f"model: {status[0]}"[:left].ljust(left)
+        task = f"task: {status[1]}"[: columns - left].rjust(columns - left)
+        text = model + task
         text = _style(text[:columns].ljust(columns), "2;37;49", True)
     print(f"\x1b[s\x1b[{rows};1H\x1b[2K{text}\x1b[u", end="", flush=True)
 
 
-def _scroll_lines(rendered: str, animate: bool, footer: tuple[str, str, str] | None = None) -> None:
+def _scroll_lines(rendered: str, animate: bool, footer: tuple[str, str] | None = None) -> None:
     rows = rendered.splitlines() or [""]
     for index, row in enumerate(rows):
         if animate and index:
