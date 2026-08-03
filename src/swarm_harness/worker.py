@@ -14,22 +14,6 @@ from pathlib import Path
 from .workflow import WorkflowClient
 
 
-class WorkerError(RuntimeError):
-    pass
-
-
-def _git(repository: Path, *arguments: str, check: bool = True) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if check and result.returncode:
-        raise WorkerError(result.stderr.strip() or "Git command failed")
-    return result.stdout.strip()
-
-
 class Worker:
     def __init__(
         self,
@@ -54,29 +38,20 @@ class Worker:
         self.model = model
         self.log = log
 
-    def _sync(self) -> None:
-        if _git(self.repository, "status", "--porcelain=v1", "--untracked-files=all"):
-            return
-        remote = "refs/remotes/origin/swarm-base"
-        _git(
-            self.repository,
-            "fetch",
-            "origin",
-            f"refs/heads/{self.target_branch}:{remote}",
-        )
-        _git(self.repository, "checkout", "-B", "swarm-worker", remote)
-
     def _prompt(self) -> str:
+        ordinal = int(self.worker_id.rsplit("-", 1)[-1])
         return f"""Perform exactly one journal-assigned role as {self.worker_id}.
 
 The journal is the entire coordination interface. You have exactly two journal
 tools: journal_search and journal_add. Never open or inspect the harness,
 journal socket, or journal database by shell command.
 
-1. Search `worker:{self.worker_id}` and resume an owned item if present.
-   Otherwise search `queue:ready`, choose one item, and journal_add the exact
-   `claim` string returned in that item. On conflict, search again. Then search
-   `task:<root_task_id>` for the complete PR and review history.
+1. Immediately search `worker:{self.worker_id}` and resume an owned item if present.
+   Otherwise immediately search `queue:ready`. Before inspecting history or the
+   repository, rotate that returned list left by {ordinal} modulo its length and
+   journal_add each exact `claim` in that order until one is accepted. A rejected
+   race is normal: try the next returned item without deliberation. Re-search only
+   after exhausting that snapshot. Then search `task:<root_task_id>`.
 2. Follow the assigned role. A fresh session may receive any role.
 
 AUTHOR or REVISION
@@ -95,6 +70,10 @@ AUTHOR or REVISION
   verified: true
 
 INTERNAL REVIEW
+- An accepted review claim is the workflow's final eligibility decision for that
+  exact generation. Only its current author is excluded. Prior-generation
+  authorship is not an eligibility failure or candidate defect. Never challenge
+  because you authored an earlier generation; review the exact assigned head.
 - Work read-only. Fetch the assigned branch, detach at exact `head_sha`, inspect
   the complete base-to-head diff against the objective, and run every returned
   check. Do not edit, commit, or push. The author cannot review its own PR.
@@ -208,8 +187,6 @@ string field: `query` for journal_search or `text` for journal_add.
         ready = self.client.search(self.run_id, "queue:ready")
         if not active and not ready:
             return "idle"
-        if not active:
-            self._sync()
         code = self._codex()
         if code:
             self.log(f"Codex exited {code}; the same slot will reconstruct from the journal")

@@ -240,6 +240,20 @@ def test_revision_claim_uses_the_same_atomic_race(workflow) -> None:
     assert len(Journal(database).search("run", claim)) == 3
 
 
+def test_prior_generation_author_may_review_the_revised_candidate(workflow) -> None:
+    client, _, _ = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    client.add("run", "worker-1", "claim: review:A:1:1")
+    client.add(
+        "run",
+        "worker-1",
+        f"challenge: review:A:1:1\nhead: {2:040x}\nverified: true\nreason: defect",
+    )
+    _open_pr(client, "run", "worker-2", "A", 3, 4)
+    claimed = client.add("run", "worker-0", "claim: review:A:2:1")
+    assert claimed["claim"] == "accepted"
+
+
 def test_merge_claim_uses_the_same_atomic_race(workflow) -> None:
     client, database, socket = workflow
     _open_pr(client, "run", "worker-0", "A", 1, 2)
