@@ -1850,8 +1850,18 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workers", type=int, default=7)
     run.add_argument("--reviews", type=int, default=3)
     run.add_argument("--model")
-    run.add_argument("--min-exact", type=int, default=DEFAULT_MIN_EXACT)
-    run.add_argument("--max-results", type=int, default=DEFAULT_MAX_RESULTS)
+    run.add_argument(
+        "--min-exact",
+        type=int,
+        default=DEFAULT_MIN_EXACT,
+        help=f"exact-match capacity floor (default: {DEFAULT_MIN_EXACT})",
+    )
+    run.add_argument(
+        "--max-results",
+        type=int,
+        default=DEFAULT_MAX_RESULTS,
+        help=f"maximum SEARCH results (default: {DEFAULT_MAX_RESULTS})",
+    )
     run.add_argument(
         "--journal-command",
         help="external kernel command implementing journal_add/journal_search; default: Python prototype",
@@ -1868,8 +1878,18 @@ def build_parser() -> argparse.ArgumentParser:
     concurrency.add_argument("--rounds", type=int, default=6)
     concurrency.add_argument("--seed", type=int)
     concurrency.add_argument("--journal-command")
-    concurrency.add_argument("--min-exact", type=int, default=DEFAULT_MIN_EXACT)
-    concurrency.add_argument("--max-results", type=int, default=DEFAULT_MAX_RESULTS)
+    concurrency.add_argument(
+        "--min-exact",
+        type=int,
+        default=DEFAULT_MIN_EXACT,
+        help=f"exact-match capacity floor (default: {DEFAULT_MIN_EXACT})",
+    )
+    concurrency.add_argument(
+        "--max-results",
+        type=int,
+        default=DEFAULT_MAX_RESULTS,
+        help=f"maximum SEARCH results (default: {DEFAULT_MAX_RESULTS})",
+    )
     concurrency.set_defaults(handler=command_validate_concurrency)
     for name, handler in (("pause", command_pause), ("reset", command_reset)):
         command = commands.add_parser(name)

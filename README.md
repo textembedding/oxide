@@ -118,9 +118,7 @@ capacity pair is part of that receipt:
 ```bash
 ./swarmctl harness validate-concurrency \
   --workers 8 \
-  --rounds 6 \
-  --min-exact 5 \
-  --max-results 10
+  --rounds 6
 ```
 
 The campaign races implementation, revision, review, verification, and merge
@@ -146,9 +144,7 @@ pass.
   --workload web-foundation \
   --target /path/to/my-product \
   --workers 8 \
-  --reviews 3 \
-  --min-exact 5 \
-  --max-results 10
+  --reviews 3
 ```
 
 Tasks use independent branches. After implementation checks, the configured
