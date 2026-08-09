@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import copy
+import hashlib
 import json
 import secrets
 import threading
@@ -9,14 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from swarm_harness.cli import load_stage
 from swarm_harness.journal import Journal, JournalClient, JournalError, serve_in_thread
-from swarm_harness.workflow import WorkflowClient, WorkflowError
+from swarm_harness.workflow import WorkflowClient, WorkflowError, WorkflowReducer
 
 
 def _stage() -> dict:
     return {
-        "stage": 0,
+        "stage": "test",
         "enabled": True,
         "goal": "test",
         "required_reviews": 3,
@@ -44,12 +43,20 @@ def _socket() -> Path:
     return Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
 
 
+def _client(socket: Path | str) -> WorkflowClient:
+    return WorkflowClient(JournalClient(socket), _stage())
+
+
+def _exact_count(database: Path, namespace: str, query: str) -> int:
+    return sum(item["match_kind"] == "exact" for item in Journal(database).search(namespace, query))
+
+
 @pytest.fixture
 def workflow(tmp_path: Path):
     socket = _socket()
     database = tmp_path / "journal.sqlite3"
     server, thread = serve_in_thread(database, socket)
-    client = WorkflowClient(JournalClient(socket))
+    client = _client(socket)
     _bootstrap(client, "run")
     yield client, database, socket
     server.shutdown()
@@ -58,8 +65,16 @@ def workflow(tmp_path: Path):
 
 
 def _bootstrap(client: WorkflowClient, run_id: str, stage: dict | None = None) -> None:
-    document = json.dumps(stage or _stage(), separators=(",", ":"))
-    client.add(run_id, "launcher", f"bootstrap: run:{run_id}\nstage-json: {document}")
+    if stage is not None:
+        client._workload = stage
+        client.workload_ref = {
+            "schema": "SwarmWorkloadRefV1",
+            "workload_blob": hashlib.sha256(
+                json.dumps(stage, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+        client.reducer = type(client.reducer)(stage, client.workload_ref)
+    client.bootstrap(run_id)
 
 
 def _open_pr(
@@ -147,7 +162,7 @@ def _race_claim(socket: str, claim_text: str, workers: tuple[str, str]) -> dict[
     barrier = threading.Barrier(len(workers))
 
     def claim(worker: str) -> tuple[str, str]:
-        contender = WorkflowClient(JournalClient(socket))
+        contender = _client(socket)
         barrier.wait()
         try:
             contender.add("run", worker, claim_text)
@@ -164,7 +179,8 @@ def test_kernel_is_only_generic_ordered_append_and_search(tmp_path: Path) -> Non
     first = journal.add("space", "alice", "anything: alpha")
     second = journal.add("space", "bob", "anything: beta")
     assert first["record_id"] < second["record_id"]
-    assert [item["text"] for item in journal.search("space", "*")] == [
+    assert journal.search("space", "*") == []
+    assert [item["text"] for item in journal.search("space", "anything")] == [
         "anything: alpha",
         "anything: beta",
     ]
@@ -173,9 +189,159 @@ def test_kernel_is_only_generic_ordered_append_and_search(tmp_path: Path) -> Non
         journal.dispatch("claim", {})
 
 
-def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
+def test_bootstrap_cites_frozen_workload_without_journalizing_specification(
+    workflow,
+) -> None:
     client, _, _ = workflow
-    outcomes = _race_claim(client.socket_path, "claim: task:A", ("worker-0", "worker-1"))
+    bootstrap = client.replay_records("run")[0]["text"]
+    assert "workload-ref:" in bootstrap
+    assert "build A" not in bootstrap
+    assert "test all" not in bootstrap
+    assert "stage-json" not in bootstrap
+
+
+def test_epoch_frontiers_never_rehabilitate_a_previously_stale_record() -> None:
+    stage = _stage()
+    reference = {"schema": "SwarmWorkloadRefV1", "workload_blob": "fixture"}
+    replay_root = "a" * 32
+
+    def record(sequence: int, epoch: int, body: str) -> dict:
+        return {
+            "record_id": sequence,
+            "stable_id": f"record:{sequence}",
+            "journal_sequence": sequence,
+            "namespace": "run",
+            "author": "launcher" if sequence == 1 else "worker-0",
+            "text": "\n".join(
+                (
+                    body,
+                    "swarm-run:run",
+                    f"swarm-epoch:{epoch}",
+                    f"swarm-stable:{sequence:032x}",
+                    f"swarm-routing:{replay_root}:{sequence:064b}",
+                )
+            ),
+            "created_at": float(sequence),
+            "match_kind": "exact",
+        }
+
+    records = [
+        record(1, 0, f"bootstrap: run:run\nworkload-ref: {json.dumps(reference)}"),
+        record(2, 1, "discovery: valid epoch-one evidence"),
+        record(3, 0, "claim: task:A"),
+    ]
+    view = WorkflowReducer(
+        stage,
+        reference,
+        epoch=2,
+        history_sequence=3,
+        epoch_frontiers=[{"epoch": 0, "through": 1}, {"epoch": 1, "through": 3}],
+    ).reduce("run", records)
+    assert view.outcomes[1][0] is True
+    assert view.outcomes[2][0] is True
+    assert view.outcomes[3] == (False, "workflow record carries a stale run epoch")
+    assert view.tasks["A"]["state"] == "pending"
+
+
+def test_workflow_replay_recovers_every_record_beyond_search_result_caps() -> None:
+    replay_root = "a" * 32
+    records = [
+        {
+            "record_id": index + 1,
+            "journal_sequence": index + 1,
+            "stable_id": f"record:{index + 1}",
+            "match_kind": "exact",
+            "namespace": "product",
+            "author": "worker-0",
+            "text": "\n".join(
+                (
+                    f"audit: {index}",
+                    "swarm-run:product",
+                    "swarm-epoch:0",
+                    f"swarm-stable:{index:032x}",
+                    f"swarm-routing:{replay_root}:{index:064b}",
+                )
+            ),
+            "created_at": float(index),
+        }
+        for index in range(1_500)
+    ]
+    semantic_noise = {
+        "record_id": 99_999,
+        "journal_sequence": 99_999,
+        "stable_id": "record:99999",
+        "match_kind": "semantic",
+        "namespace": "product",
+        "author": "memory",
+        "text": "\n".join(
+            (
+                "related replay routing concept",
+                "swarm-run:product",
+                "swarm-epoch:0",
+                f"swarm-stable:{9_999:032x}",
+                f"swarm-routing:{'b' * 32}:{9_999:064b}",
+            )
+        ),
+        "created_at": 99_999.0,
+    }
+
+    class CappedPort:
+        def add(self, _namespace: str, _author: str, _text: str) -> dict:
+            raise AssertionError("replay is read-only")
+
+        def search(self, namespace: str, query: str) -> list[dict]:
+            assert namespace == "product"
+            assert query != "*"
+            exact = [record for record in records if query in record["text"]][-1:]
+            return [*exact, semantic_noise]
+
+    assert (
+        len(
+            WorkflowClient(CappedPort(), replay_root=replay_root).replay_records("product")  # type: ignore[arg-type]
+        )
+        == 1_500
+    )
+
+
+def test_semantic_noise_does_not_make_an_empty_replay_partition_nonempty() -> None:
+    replay_root = "a" * 32
+    noise = {
+        "record_id": 1,
+        "journal_sequence": 1,
+        "stable_id": "record:1",
+        "match_kind": "semantic",
+        "namespace": "run",
+        "author": "memory",
+        "text": "\n".join(
+            (
+                "semantically related routing memory",
+                "swarm-run:run",
+                "swarm-epoch:0",
+                f"swarm-stable:{1:032x}",
+                f"swarm-routing:{'b' * 32}:{1:064b}",
+            )
+        ),
+        "created_at": 1.0,
+    }
+
+    class SemanticOnlyPort:
+        def add(self, _namespace: str, _author: str, _text: str) -> dict:
+            raise AssertionError("replay is read-only")
+
+        def search(self, namespace: str, query: str) -> list[dict]:
+            assert namespace == "run"
+            assert query.startswith(f"swarm-routing:{replay_root}:")
+            return [noise]
+
+    client = WorkflowClient(SemanticOnlyPort(), replay_root=replay_root)  # type: ignore[arg-type]
+    exact, returned = client._partition_records("run", "")
+    assert exact == [] and returned == [noise]
+    assert client.replay_records("run") == []
+
+
+def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
+    client, _, socket = workflow
+    outcomes = _race_claim(socket, "claim: task:A", ("worker-0", "worker-1"))
     assert sorted(outcomes.values()) == ["accepted", "rejected"]
     winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
     checkpoint = client.add("run", winner, "checkpoint: task:A\nimplementation saved")
@@ -226,18 +392,15 @@ def test_internal_verification_review_claim_uses_the_same_atomic_race(workflow) 
     _open_pr(client, "run", "worker-0", "A", 1, 2)
     claim = "claim: review:A:1:1"
     assert client.search("run", "queue:ready")[0]["claim"] == claim
-    assert WorkflowClient(JournalClient(socket)).search("run", "queue:ready")[0]["claim"] == claim
+    assert _client(socket).search("run", "queue:ready")[0]["claim"] == claim
 
-    outcomes = _race_claim(client.socket_path, claim, ("worker-1", "worker-2"))
+    outcomes = _race_claim(socket, claim, ("worker-1", "worker-2"))
     assert sorted(outcomes.values()) == ["accepted", "rejected"]
     winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
     loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
     review = client.search("run", "task:A")[0]["reviews"][0]
     assert (review["state"], review["worker_id"]) == ("claimed", winner)
-    assert all(
-        item["claim"] != claim
-        for item in WorkflowClient(JournalClient(socket)).search("run", "queue:ready")
-    )
+    assert all(item["claim"] != claim for item in _client(socket).search("run", "queue:ready"))
     assert loser not in {item["worker_id"] for item in client.search("run", "queue:all")}
     active_review = next(
         item
@@ -245,12 +408,74 @@ def test_internal_verification_review_claim_uses_the_same_atomic_race(workflow) 
         if item["claim"] == claim and item["state"] == "working"
     )
     assert active_review["last_journal_body"] == claim
-    assert len(Journal(database).search("run", claim)) == 2
+    assert _exact_count(database, "run", claim) == 2
+
+
+def test_idle_workers_atomically_claim_candidate_frontier_verification(workflow) -> None:
+    client, database, socket = workflow
+    client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
+    client.add("run", "launcher", "control: worker-verification")
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    candidate_claim = f"claim: verify:A:{2:040x}:1"
+    candidate = next(
+        item for item in client.search("run", "queue:ready") if item["claim"] == candidate_claim
+    )
+    assert candidate["role"] == "verification"
+    with pytest.raises(WorkflowError, match="own task"):
+        client.add("run", "worker-0", candidate_claim)
+    _approve(client, "run", "worker-1", "A", 1, 1, 2)
+    _approve(client, "run", "worker-2", "A", 1, 2, 2)
+    _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    outcomes = _race_claim(socket, candidate_claim, ("worker-5", "worker-6"))
+    assert sorted(outcomes.values()) == ["accepted", "rejected"]
+    winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
+    active = client.search("run", f"worker:{winner}")
+    assert [(item["role"], item["claim"]) for item in active] == [("verification", candidate_claim)]
+    with pytest.raises(WorkflowError, match="exact frontier"):
+        client.add(
+            "run",
+            winner,
+            f"verify-pass: verify:A:{2:040x}:1\nhead: {4:040x}\nverified: true\nevidence: pass",
+        )
+    result = client.add(
+        "run",
+        winner,
+        f"verify-pass: verify:A:{2:040x}:1\nhead: {2:040x}\nverified: true\nevidence: test A passed",
+    )
+    assert result["verification"] == "passed"
+    assert all(item["claim"] != candidate_claim for item in client.search("run", "queue:ready"))
+    assert client.search("run", "task:A")[0]["verifications"][0]["state"] == "passed"
+    assert _exact_count(database, "run", candidate_claim) == 3
+    _merge(client, "run", "worker-4", "A", 1, 2, 3)
+    assert ("B", "author") in {
+        (item["root_task_id"], item["role"]) for item in client.search("run", "queue:ready")
+    }
+
+
+def test_launcher_reclaims_crashed_frontier_verifier(workflow) -> None:
+    client, _, _ = workflow
+    client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
+    client.add("run", "launcher", "control: worker-verification")
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    claim = f"claim: verify:A:{2:040x}:1"
+    client.add("run", "worker-5", claim)
+    reclaimed = client.add("run", "launcher", "control: reclaim worker:worker-5")
+    assert reclaimed["reclaimed"] == "A/verify-1"
+    assert claim in {item["claim"] for item in client.search("run", "queue:ready")}
 
 
 def test_revision_claim_uses_the_same_atomic_race(workflow) -> None:
     client, database, socket = workflow
+    client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
+    client.add("run", "launcher", "control: worker-verification")
     _open_pr(client, "run", "worker-0", "A", 1, 2)
+    verification = f"claim: verify:A:{2:040x}:1"
+    client.add("run", "worker-4", verification)
+    client.add(
+        "run",
+        "worker-4",
+        f"verify-pass: verify:A:{2:040x}:1\nhead: {2:040x}\nverified: true\nevidence: pass",
+    )
     client.add("run", "worker-1", "claim: review:A:1:1")
     client.add(
         "run",
@@ -260,14 +485,80 @@ def test_revision_claim_uses_the_same_atomic_race(workflow) -> None:
     claim = "claim: task:A"
     assert client.search("run", "queue:ready")[0]["claim"] == claim
 
-    outcomes = _race_claim(client.socket_path, claim, ("worker-2", "worker-3"))
+    outcomes = _race_claim(socket, claim, ("worker-2", "worker-3"))
     assert sorted(outcomes.values()) == ["accepted", "rejected"]
     winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
     work = client.search("run", f"worker:{winner}")[0]
     assert (work["role"], work["claim"]) == ("revision", claim)
+    assert verification not in {item["claim"] for item in client.search("run", "queue:ready")}
     loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
-    assert WorkflowClient(JournalClient(socket)).search("run", f"worker:{loser}") == []
-    assert len(Journal(database).search("run", claim)) == 3
+    assert _client(socket).search("run", f"worker:{loser}") == []
+    assert _exact_count(database, "run", claim) == 3
+
+
+def test_terminal_blocker_activation_is_forward_only_and_parks_exact_revision(workflow) -> None:
+    client, database, _ = workflow
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    client.add("run", "worker-1", "claim: review:A:1:1")
+    client.add(
+        "run",
+        "worker-1",
+        f"challenge: review:A:1:1\nhead: {2:040x}\nverified: true\nreason: defect",
+    )
+    work = client.add("run", "worker-2", "claim: task:A")["work"]
+    blocker = "\n".join(
+        (
+            "blocked: task:A",
+            "role: revision",
+            f"branch: {work['branch']}",
+            "generation: 1",
+            f"head: {2:040x}",
+            "verified: false",
+            "reason: required external service is unavailable",
+        )
+    )
+
+    # Historical blocker prose remains inert when the activation appears later.
+    assert client.add("run", "worker-2", blocker)["saved"] is True
+    client.add("run", "launcher", "control: worker-capacity\nworkers: 8\nterminal-blockers: true")
+    assert client.search("run", "task:A")[0]["state"] == "authoring"
+    with pytest.raises(WorkflowError, match="must start with exact"):
+        client.add("run", "worker-2", blocker.replace("blocked:", "blocker:", 1))
+
+    result = client.add("run", "worker-2", blocker)
+    assert result == {
+        "saved": True,
+        "blocked": "A",
+        "state": "blocked",
+        "record_id": result["record_id"],
+    }
+    assert client.search("run", "worker:worker-2") == []
+    summary = client.search("run", "task:A")[0]
+    assert summary["state"] == "blocked"
+    assert summary["last_error"] == "required external service is unavailable"
+    assert all(item["root_task_id"] != "A" for item in client.search("run", "queue:ready"))
+    with pytest.raises(WorkflowError, match="owned exact author assignment"):
+        client.add("run", "worker-2", blocker)
+
+    client.add("run", "launcher", "control: pause")
+    retried = client.add("run", "launcher", "control: resume")
+    assert retried["state"] == "running"
+    assert client.search("run", "task:A")[0]["state"] == "blocked"
+    assert _exact_count(database, "run", "blocked: task:A") == 3
+
+
+def test_task_orientation_returns_current_summary_without_history_dump(workflow) -> None:
+    client, _, _ = workflow
+    client.add("run", "worker-0", "claim: task:A")
+    client.add("run", "worker-0", "checkpoint: task:A\nimplementation saved")
+    orientation = client.search("run", "task:A")
+    assert len(orientation) == 1
+    assert orientation[0]["kind"] == "task"
+    assert orientation[0]["root_task_id"] == "A"
+    targeted = client.search("run", "checkpoint: task:A")
+    assert [item["body"] for item in targeted if item["match_kind"] == "exact"] == [
+        "checkpoint: task:A\nimplementation saved"
+    ]
 
 
 def test_prior_generation_author_may_review_the_revised_candidate(workflow) -> None:
@@ -293,14 +584,14 @@ def test_merge_claim_uses_the_same_atomic_race(workflow) -> None:
     claim = "claim: merge:A:1"
     assert client.search("run", "queue:ready")[0]["claim"] == claim
 
-    outcomes = _race_claim(client.socket_path, claim, ("worker-4", "worker-5"))
+    outcomes = _race_claim(socket, claim, ("worker-4", "worker-5"))
     assert sorted(outcomes.values()) == ["accepted", "rejected"]
     winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
     work = client.search("run", f"worker:{winner}")[0]
     assert (work["role"], work["claim"]) == ("merge", claim)
     loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
-    assert WorkflowClient(JournalClient(socket)).search("run", f"worker:{loser}") == []
-    assert len(Journal(database).search("run", claim)) == 2
+    assert _client(socket).search("run", f"worker:{loser}") == []
+    assert _exact_count(database, "run", claim) == 2
 
 
 def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> None:
@@ -332,9 +623,44 @@ def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> N
     _merge(client, "run", "worker-4", "A", 1, 2, 3)
     assert [item["root_task_id"] for item in client.search("run", "queue:ready")] == ["B"]
 
-    restarted = WorkflowClient(JournalClient(socket))
+    restarted = _client(socket)
     assert restarted.search("run", "task:A")[0]["merged_sha"] == f"{3:040x}"
-    assert Journal(database).search("run", "*")
+    assert Journal(database).search("run", "bootstrap: run:run")
+
+
+def test_worker_verification_and_review_quorum_jointly_authorize_merge(workflow) -> None:
+    client, _, socket = workflow
+    client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
+    client.add("run", "launcher", "control: worker-verification")
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    _approve(client, "run", "worker-1", "A", 1, 1, 2)
+    _approve(client, "run", "worker-2", "A", 1, 2, 2)
+    _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    ready = client.search("run", "queue:ready")
+    assert [(item["role"], item["claim"]) for item in ready] == [
+        ("verification", f"claim: verify:A:{2:040x}:1")
+    ]
+    client.add("run", "worker-4", f"claim: verify:A:{2:040x}:1")
+    client.add(
+        "run",
+        "worker-4",
+        f"verify-pass: verify:A:{2:040x}:1\nhead: {2:040x}\nverified: true\nevidence: test A passed",
+    )
+    assert client.search("run", "queue:ready")[0]["role"] == "merge"
+    restarted = _client(socket)
+    assert restarted.search("run", "queue:ready")[0]["role"] == "merge"
+
+
+def test_worker_verification_activation_catches_an_open_generation(workflow) -> None:
+    client, _, _ = workflow
+    client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
+    _open_pr(client, "run", "worker-0", "A", 1, 2)
+    for ordinal, worker in enumerate(("worker-1", "worker-2", "worker-3"), 1):
+        _approve(client, "run", worker, "A", 1, ordinal, 2)
+    assert client.search("run", "queue:ready")[0]["role"] == "merge"
+    client.add("run", "launcher", "control: worker-verification")
+    ready = client.search("run", "queue:ready")
+    assert [(item["role"], item["verification_ordinal"]) for item in ready] == [("verification", 1)]
 
 
 def test_challenge_invalidates_generation_and_requires_all_reviews_again(workflow) -> None:
@@ -378,7 +704,7 @@ def test_review_drain_collects_every_sibling_decision_before_revision(workflow) 
         ("review:integration", 3)
     ]
     _approve(client, "run", "worker-3", "A", 1, 3, 2)
-    summary = WorkflowClient(JournalClient(socket)).search("run", "task:A")[0]
+    summary = _client(socket).search("run", "task:A")[0]
     assert summary["state"] == "revision"
     assert summary["approvals"] == 2
     assert [review["state"] for review in summary["reviews"]] == [
@@ -396,19 +722,55 @@ def test_pause_resume_is_derived_from_generic_records(workflow) -> None:
     assert client.add("run", "launcher", "control: resume")["state"] == "running"
 
 
-def test_stage0_seven_workers_traverse_author_review_and_merge_roles(tmp_path: Path) -> None:
-    stage = copy.deepcopy(load_stage(Path(__file__).parents[1] / "stages" / "stage0.yaml"))
-    stage["required_reviews"] = 3
-    assert len(stage["tasks"]) == 16
+def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_merge(
+    tmp_path: Path,
+) -> None:
+    task_ids = (
+        "API",
+        "DATABASE",
+        "AUTH",
+        "UI",
+        "EMAIL",
+        "PAYMENTS",
+        "OBSERVABILITY",
+        "API-INTEGRATION",
+        "UI-INTEGRATION",
+        "RELEASE",
+    )
+    stage = {
+        "stage": "web-foundation",
+        "enabled": True,
+        "goal": "Build and verify an independently deployable web application.",
+        "required_reviews": 3,
+        "tasks": [
+            {
+                "id": identifier,
+                "title": f"Implement {identifier}",
+                "prompt": f"Implement the {identifier} product slice.",
+                "depends_on": (
+                    []
+                    if index < 7
+                    else list(task_ids[:4])
+                    if identifier != "RELEASE"
+                    else list(task_ids[7:9])
+                ),
+                "checks": [f"test {identifier}"],
+            }
+            for index, identifier in enumerate(task_ids)
+        ],
+        "stage_gate": ["test product"],
+    }
     socket = _socket()
-    server, thread = serve_in_thread(tmp_path / "stage0.sqlite3", socket)
-    client = WorkflowClient(JournalClient(socket))
-    _bootstrap(client, "stage0", stage)
+    server, thread = serve_in_thread(tmp_path / "product.sqlite3", socket)
+    client = _client(socket)
+    _bootstrap(client, "product", stage)
     workers = [f"worker-{index}" for index in range(7)]
-    initial = client.search("stage0", "queue:ready")[:7]
+    initial = client.search("product", "queue:ready")[:7]
 
     def first_claim(item: dict, worker: str) -> str:
-        WorkflowClient(JournalClient(socket)).add("stage0", worker, item["claim"])
+        WorkflowClient(JournalClient(socket), stage, client.workload_ref).add(
+            "product", worker, item["claim"]
+        )
         return item["root_task_id"]
 
     with ThreadPoolExecutor(max_workers=7) as pool:
@@ -424,10 +786,10 @@ def test_stage0_seven_workers_traverse_author_review_and_merge_roles(tmp_path: P
         if role in {"author", "revision"}:
             base, head = counter, counter + 1
             counter += 3
-            client.add("stage0", worker, f"checkpoint: task:{task_id}\nsaved")
-            client.add("stage0", worker, f"handoff: task:{task_id}\nchecked")
+            client.add("product", worker, f"checkpoint: task:{task_id}\nsaved")
+            client.add("product", worker, f"handoff: task:{task_id}\nchecked")
             client.add(
-                "stage0",
+                "product",
                 worker,
                 "\n".join(
                     (
@@ -442,7 +804,7 @@ def test_stage0_seven_workers_traverse_author_review_and_merge_roles(tmp_path: P
         elif role.startswith("review:"):
             ordinal = int(item["review_ordinal"])
             client.add(
-                "stage0",
+                "product",
                 worker,
                 "\n".join(
                     (
@@ -455,14 +817,14 @@ def test_stage0_seven_workers_traverse_author_review_and_merge_roles(tmp_path: P
             )
         elif role == "merge":
             client.add(
-                "stage0",
+                "product",
                 worker,
                 f"merge: task:{task_id}\ngeneration: {item['generation']}\nhead: {item['head_sha']}",
             )
             merge = counter
             counter += 2
             client.add(
-                "stage0",
+                "product",
                 "launcher",
                 "\n".join(
                     (
@@ -478,27 +840,27 @@ def test_stage0_seven_workers_traverse_author_review_and_merge_roles(tmp_path: P
         else:
             raise AssertionError(role)
 
-    while client.search("stage0", "run:state")[0]["state"] == "running":
+    while client.search("product", "run:state")[0]["state"] == "running":
         progressed = False
         for worker in workers:
-            active = client.search("stage0", f"worker:{worker}")
+            active = client.search("product", f"worker:{worker}")
             if active:
                 finish(worker, active[0])
                 progressed = True
-        for item in client.search("stage0", "queue:ready"):
+        for item in client.search("product", "queue:ready"):
             for worker in workers:
                 try:
-                    claimed_item = client.add("stage0", worker, item["claim"])["work"]
+                    claimed_item = client.add("product", worker, item["claim"])["work"]
                 except WorkflowError:
                     continue
                 finish(worker, claimed_item)
                 progressed = True
                 break
         assert progressed
-    assert client.search("stage0", "run:state")[0]["state"] == "publishing"
-    assert all(item["state"] == "complete" for item in client.search("stage0", "queue:all"))
-    client.add("stage0", "launcher", f"control: published\ncommit: {999:040x}")
-    assert client.search("stage0", "run:state")[0]["state"] == "complete"
+    assert client.search("product", "run:state")[0]["state"] == "publishing"
+    assert all(item["state"] == "complete" for item in client.search("product", "queue:all"))
+    client.add("product", "launcher", f"control: published\ncommit: {999:040x}")
+    assert client.search("product", "run:state")[0]["state"] == "complete"
     server.shutdown()
     server.server_close()
     thread.join(timeout=5)

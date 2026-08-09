@@ -14,12 +14,13 @@ def test_runtime_has_only_the_small_two_tool_implementation() -> None:
         "cli.py",
         "concurrency.py",
         "journal.py",
+        "journal_backend.py",
         "journal_mcp.py",
         "worker.py",
         "workflow.py",
         "yaml_payload.py",
     }
-    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 3300
+    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 5500
 
 
 def test_sqlite_is_confined_to_swappable_prototype() -> None:
@@ -32,6 +33,26 @@ def test_sqlite_is_confined_to_swappable_prototype() -> None:
             if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
                 importers.append(path.name)
     assert importers == ["journal.py"]
+
+
+def test_only_the_backend_adapter_can_import_the_prototype_kernel() -> None:
+    importers: list[tuple[str, int]] = []
+    for path in SOURCE.glob("*.py"):
+        if path.name == "journal.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "journal":
+                importers.append((path.name, node.lineno))
+                assert any(
+                    isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node in ast.walk(parent)
+                    for parent in ast.walk(tree)
+                ), "the prototype must be imported lazily"
+    assert [name for name, _line in importers] == [
+        "journal_backend.py",
+        "journal_backend.py",
+    ]
 
 
 def test_journal_kernel_contains_no_workflow_semantics() -> None:

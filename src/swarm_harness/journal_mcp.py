@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
-from .journal import JournalClient, JournalError
+from .journal_backend import JournalError, connect_journal
 from .workflow import WorkflowClient, WorkflowError
 from .yaml_payload import YamlPayloadError, dump_yaml, load_single_string_field
 
@@ -39,8 +39,14 @@ TOOLS = (
     {
         "name": "journal_search",
         "description": (
-            "Search journal text and current queue projections. Use queue:ready to seek "
-            "work, worker:<slot> to resume, and task:<id> for durable context."
+            "Search the one journal and current workflow projections. Journal matches are a "
+            "bounded union of exact and threshold-eligible semantic records, capped by the "
+            "run's max_results with an exact-match floor when exact anchors exist. The union "
+            "is ordered only by journal sequence; semantic score affects eligibility, never "
+            "position. Results can be incomplete, so use returned task IDs, errors, hashes, "
+            "decisions, components, and concepts for iterative follow-up searches. Match and "
+            "stored routing metadata identify exact workflow records; ordinary absence is not proof that "
+            "no record exists. Use queue:ready to seek work and worker:<slot> to resume."
         ),
         "inputSchema": {
             "type": "object",
@@ -72,10 +78,26 @@ def _environment(name: str) -> str:
 
 
 class JournalMcpServer:
-    def __init__(self) -> None:
-        self.client = WorkflowClient(JournalClient(Path(_environment("SWARM_JOURNAL_SOCKET"))))
-        self.run_id = _environment("SWARM_RUN_ID")
-        self.worker_id = _environment("SWARM_WORKER_ID")
+    def __init__(
+        self,
+        client: WorkflowClient | None = None,
+        run_id: str | None = None,
+        worker_id: str | None = None,
+    ) -> None:
+        if client is None:
+            from .cli import _load_config, _workflow_client
+
+            config_path = Path(_environment("SWARM_RUN_CONFIG"))
+            config = _load_config(json.loads(config_path.read_text(encoding="utf-8"))["workload"])
+            if int(_environment("SWARM_RUN_EPOCH")) != int(config["epoch"]):
+                raise JournalError("worker run epoch is stale")
+            client = _workflow_client(
+                config,
+                connect_journal(Path(_environment("SWARM_JOURNAL_SOCKET"))),
+            )
+        self.client = client
+        self.run_id = run_id or _environment("SWARM_RUN_ID")
+        self.worker_id = worker_id or _environment("SWARM_WORKER_ID")
 
     def handle(self, request: Any) -> dict[str, Any] | None:
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":

@@ -1,160 +1,217 @@
 # Harness Contract
 
-## Architectural boundary
+## Responsibility boundary
 
-The harness runs the memory roadmap while dogfooding the exact interface that
-the production Rust journal kernel will replace. The Python kernel is temporary;
-its public abstraction is fixed:
+- **Repository:** authoritative workload, roadmap/specification, and product code.
+- **Harness:** scheduling, Git/worktree management, process control, prompts,
+  workflow replay, and destructive-rewind coordination.
+- **Journal:** durable generic records containing workflow events and swarm-created
+  discoveries, decisions, failures, reviews, and evidence.
+- **Journal backend:** replaceable implementation of one configured ADD/SEARCH
+  contract.
 
-1. `journal_add(namespace, author, text)` appends one immutable generic record;
-2. `journal_search(namespace, query)` returns generic matching records.
+Repository specification text is never copied into the journal as authority. A
+journal record may cite a repository path, commit, or blob, but agents inspect
+the checked-out repository with ordinary repository tools.
 
-`src/swarm_harness/journal.py` owns only that append-only store, its generic
-search, and transport. It contains no task, PR, review, reviewer-count,
-verification, merge, generation, dependency, ownership, or lifecycle concept.
-It is the only module that imports SQLite.
+## Fixed journal boundary
 
-`src/swarm_harness/workflow.py` is a pure ordered-log reducer above the kernel.
-It interprets generic records into the current swarm projection. The CLI,
-worker adapter, and MCP facade use that reducer; none may add workflow policy to
-the journal kernel. A future workflow feature that seems to require changing
-`journal.py` requires a workflow-layer redesign instead.
+The journal backend has exactly two immutable operations:
 
-Because the kernel never rejects application semantics, competing claims are
-all durably appended. Deterministic record order makes the first valid claim
-effective; later conflicting records have no projected effect and the workflow
-facade reports an error to their callers.
+1. `journal_add(namespace, author, text)` synchronously appends one generic
+   record.
+2. `journal_search(namespace, query)` returns one bounded union of qualifying
+   generic records.
 
-Queue search is never a reservation. Multiple workers may observe the same
-ready author, revision, internal-review, or merge item. Every role submits the
-item's existing `claim:` text through `journal_add`; the workflow reducer uses
-the same ordered replay path to accept one owner. A loser searches again. No
-role introduces a lease, cursor, preassignment, or alternate tool operation.
+`src/swarm_harness/journal.py` is the disposable Python prototype and the only
+module that imports SQLite. `src/swarm_harness/journal_backend.py` is the only
+harness module allowed to import that prototype. Every other runtime component
+depends on the `JournalPort` two-operation protocol.
 
-## Multiprocess concurrency qualification
+The backend has no task, claim, review, verification, generation, merge,
+dependency, ownership, retry, or lifecycle semantics. `workflow.py` derives all
+of them by deterministic replay. Semantic records are not an advisory subsystem:
+they occupy the same store and are returned by the same SEARCH operation.
 
-Stage 0 is gated by `harness validate-concurrency`. The model-free campaign
-uses real OS processes against one live journal service. For author, review,
-verification, revision, and merge work, every contender must first replay and
-observe the identical available claim before a shared start gate releases the
-race. Random per-process delays perturb scheduling.
+## Backend transport and frozen configuration
 
-Every contender appends that same claim. The evidence must show exactly one
-effective owner, one protected-work record authored by that owner, no protected
-work from any loser, and no owned work reconstructed by a loser. Alternating
-rounds terminate the winning process immediately after its accepted claim and
-before protected work. A replacement process must recover that exact owner
-solely from journal replay and perform the protected step once.
+An external command receives:
 
-After each race stabilizes, one fresh replay process per configured worker
-reads only the journal. All record and derived-workflow digests must be
-identical. A failure aborts the campaign and produces no passing receipt.
+- `SWARM_JOURNAL_DATABASE`: durable store path;
+- `SWARM_JOURNAL_SOCKET`: Unix socket path;
+- `SWARM_JOURNAL_MIN_EXACT`: configured exact-match floor;
+- `SWARM_JOURNAL_MAX_RESULTS`: configured response cap.
 
-The passing receipt binds the coordination source digest, worker count, round
-count, random seed, every role case, winner-crash cases, owners, append counts,
-protected-work counts, and replay digests. Stage 0 requires a current receipt
-with at least four rounds and at least its configured worker count. Queue
-filtering, prompt assignment, a timing delay, or a model assertion cannot
-substitute for this empirical gate.
+The socket accepts one JSON request per connection and returns one JSON response.
+Requests have `request_id`, `operation`, and `arguments`; the only legal
+operations are:
 
-## Exact worker interface
-
-Every Codex invocation receives one required MCP server named `journal`. Its
-tool list contains exactly `journal_search` and `journal_add`. Both accept a
-single `yaml` string argument. Workers never receive claim, review, merge, or
-completion APIs.
-
-Seek or recover work:
-
-```yaml
-query: queue:ready
+```json
+{"operation":"journal_add","arguments":{"namespace":"...","author":"...","text":"..."}}
+{"operation":"journal_search","arguments":{"namespace":"...","query":"..."}}
 ```
 
-```yaml
-query: worker:worker-0
+Responses echo `request_id` and contain either `{"ok":true,"result":...}` or
+`{"ok":false,"error":"..."}`. ADD returns `saved` and the stable journal
+sequence. SEARCH records expose the immutable text plus namespace, author,
+creation time, stable record identity, journal sequence, and whether the match
+was exact or semantic. Workflow routing, run, and epoch metadata remain generic
+stored text and are surfaced separately by the workflow-facing client.
+
+The defaults are `min_exact = 5` and `max_results = 10`. An authoritative
+harness run requires `1 <= min_exact <= max_results`. The effective pair is
+frozen in run metadata and the qualification receipt, supplied whenever the
+backend starts, and reused after restart. There is no operation for discovering
+or mutating it mid-run.
+
+## Bounded SEARCH
+
+Exact and semantic retrieval share one search space. Exact substring matches
+are always eligible. Other records are eligible only when their semantic score
+meets the backend's inclusive threshold; score controls eligibility only.
+
+For one query, let:
+
+```text
+required_exact = min(min_exact, number_of_exact_matches, max_results)
 ```
 
-Claim the exact returned work identity:
+SEARCH guarantees all of the following:
 
-```yaml
-text: claim: task:S0-STABLE-SEAMS
-```
+1. It returns at most `max_results` records.
+2. It reserves at least `required_exact` exact records, choosing the most recent
+   exact anchors when a choice is required.
+3. If fewer than `min_exact` exact records exist, it returns every exact record.
+4. It fills remaining capacity with the most recent other qualifying exact or
+   semantic records.
+5. A record qualifying both ways appears once and counts as exact.
+6. After selection, the complete union is ordered strictly oldest-to-newest by
+   stable journal sequence. Score never affects selection or position.
+7. More qualifying records than capacity is normal: SEARCH returns useful
+   partial evidence, never an overflow error.
 
-The same generic append operation carries review claims, merge claims,
-checkpoints, handoffs, PR openings, decisions, and merge requests. Searches
-return workflow projections plus the generic record history required to resume
-work.
+SEARCH does not promise exhaustiveness, an overflow flag, a cursor, or
+pagination. Ordinary clients use returned identifiers and concepts for
+iterative, multi-hop searches. Exact replay is complete without any of those
+features.
 
-## Per-task PR workflow
+## Complete deterministic replay from bounded SEARCH
 
-Each mutating task has one dedicated branch. No shared integration branch
-exists.
+Every workflow append stores a private run-specific replay root, run and epoch
+identity, a stable identity, and one unique fixed-width replay leaf. The full
+leaf spelling also makes the record an exact match for every prefix on its path.
 
-1. An author claims a ready task, edits its branch, records a checkpoint, runs
-   every task check, commits and pushes, then records a handoff.
-2. The author opens an internal PR by appending its exact branch, base, head,
-   and `verified: true`. This creates one immutable candidate generation.
-3. The workflow creates the configured number of read-only internal reviews.
-   The default three roles are specification, adversarial, and integration.
-   Reviewers must be distinct from the author and from one another for that
-   generation. Each checks the complete exact-head diff and runs every task
-   check before approving or challenging.
-4. Any challenge invalidates the remaining review work and returns the task to
-   revision. The revised head is a new generation and requires the complete
-   configured review count again.
-5. Only a fully approved generation exposes merge work. A worker claims it and
-   appends the exact generation and candidate head as merge authorization.
-6. The thin launcher proves that the task branch still equals the approved
-   head, constructs a prospective merge into the current target branch, runs
-   every task check there, and then merges that exact tree to the target branch.
-   A conflict, changed head, or failed check returns the task to revision.
-7. A dependency becomes ready only after its prerequisite PR is merged. After
-   every task has merged, the launcher runs the stage gate in the target
-   checkout; only its passing publication record completes the run.
+Recovery starts at the replay root. At each partition it ignores semantic extras
+when deciding whether the partition exists. If at least one exact anchor is
+present, it visits every deterministic child; otherwise that partition is empty.
+Traversal continues to unique leaves, then deduplicates by stable identity and
+sorts by journal sequence before projecting workflow state.
 
-The review count is configured when the run is staged:
+This remains complete when the backend is configured with `min_exact = 1`: one
+exact anchor proves a nonempty branch, and every child of that branch is still
+visited. Correctness does not depend on receiving every exact match at once, a
+large result cap, relevance order, an overflow signal, wildcard history scans,
+or pagination. Startup and crash recovery replay stable history while holding
+the run's existing serialization lock before accepting a new authoritative
+workflow append.
 
-```bash
-./swarmctl harness run --workload stage0 --target /path/to/memory \
-  --workers 7 --reviews 3
-```
+A record returned because it is semantically related cannot affect workflow
+state unless its namespace, run, epoch, schema/routing metadata, stable identity,
+and journal sequence validate during replay. Visibility is not authority.
 
-At least `reviews + 1` worker slots are required so one author and the required
-distinct reviewers can make progress. Roles are otherwise flexible: every new
-session seeks whichever author, revision, review, or merge item is ready. The
-separate external/independent-review provider path is intentionally omitted.
+## Product-owned workloads
 
-## Ownership and recovery
+The CLI resolves a workload only from
+`<target>/swarm-harness/<workload>.yaml`. At run creation it freezes:
 
-A worker owns at most one projected work item at a time. Ownership has no fixed
-duration and no lease timer. The launcher directly observes host-worker
-liveness and restarts a missing stable slot. The replacement searches
-`worker:<slot>`, reconstructs the exact claim from generic records, and resumes
-the existing clone immediately. Pause stops processes without expiring or
-transferring ownership. Reset is the explicit operation that archives an entire
-campaign.
+- target repository identity;
+- base Git commit;
+- workload path;
+- workload Git blob identity;
+- the target's complete `swarm-harness/` tree identity;
+- harness implementation identity.
+- the target repository's configured Git author/committer identity.
 
-## Thin launcher
+The bootstrap record contains only this reference, never serialized workload or
+specification text. Each reconstruction loads the exact workload blob from Git
+and verifies that the target's current `swarm-harness/` tree is unchanged. A
+candidate that changes that directory is rejected mechanically; an intentional
+specification change starts a new run.
 
-The persistent process performs only host and Git effects that models cannot
-make authoritative themselves:
+Workloads fail closed when they are missing, disabled, uncommitted, malformed,
+cyclic, path-escaping, or changed after run creation. Task identifiers are safe
+and unique, dependencies remain within one acyclic graph, and every task and
+final workload gate supplies at least one exact check command.
 
-- serve the generic journal prototype;
-- create worker clones and supervise the configured native processes;
-- consume an approved worker merge request;
-- verify the exact prospective merge tree and perform that merge to the target
-  branch;
-- run the final stage gate and record publication;
-- stop on pause or completion.
+The frozen target identity supplies both author and committer metadata for all
+worker and prospective merge commits.
 
-It does not select tasks or reviewers, decide semantic correctness, waive a
-review, change dependencies, invent candidate generations, or authorize a
-merge without the required worker approvals.
+Runtime state remains in this checkout under `.swarm/`. No databases, logs,
+sockets, worker clones, or assignments are generated into the target repository.
 
-## Observability
+## Permissionless workflow
 
-Codex emits JSONL directly into each worker log. The observer renders model
-messages, visible reasoning summaries, commands, diffs, and both journal tool
-calls with terminal-safe syntax coloring. The queue is a disposable workflow
-projection, not journal authority. It is single-column, at most 40 characters
-wide, prioritizes active work, and omits blocked tasks.
+Queue search is not a reservation. All roles race by appending ordinary claim
+records; deterministic replay makes one claim effective and losing workers
+search again. Implementation, review, verification, candidate invalidation,
+merge authorization, dependency release, and completion all remain workflow
+semantics above the journal.
+
+Each mutating task has its own branch. A candidate is reviewed and independently
+verified at its exact frontier. A challenge invalidates that candidate
+generation and requires its gates to run again. The thin launcher verifies a
+prospective merge in an isolated clone and imports only that verified commit
+object. Dependencies release only after merge, and the final workload gate runs
+in another isolated clone before completion. There is no integration branch or
+persistent semantic orchestrator, and every role starts a fresh model context.
+On a local machine, directly observed process liveness drives immediate crash
+reclamation; ownership is not kept alive by a long fixed-duration lease.
+
+## Administrative destructive rewind
+
+Rewind is explicit operator action, never scheduler or crash-recovery policy. It
+pauses the run, obtains exclusive ownership, stops launcher, workers, and
+observers, restores the checkpoint's real journal database and sequence, Git
+frontier, task refs, worker state, assignments, and artifacts, then increments a
+run epoch stored outside the rewound journal history. Assignments are rewritten
+for the new epoch before restart. Observers reopen from the beginning on epoch
+change, and stale-epoch workers cannot append claims or terminal results.
+External epoch frontiers bind every restored sequence interval to the epoch that
+was authoritative when it was written, so a rejected stale record cannot become
+valid after a later rewind.
+
+The operation refuses to overwrite any uncommitted target worktree changes.
+Archiving discarded state is optional; synthetic monotonic sequence preservation
+is forbidden.
+
+## Explicit non-goals
+
+The current harness does not provide remote workers, distributed failure
+detection, hostile-code containment, hosted pull-request objects, deployment or
+production authority, automatic conversion of prose into task graphs, or
+language/framework-specific implementation policy. It does not journalize or
+live-migrate repository specifications, split semantic and deterministic memory,
+offer per-query search modes, scan history with wildcards, or depend on early
+pagination. Archived demo campaigns have no compatibility guarantee.
+
+Review quorum, exact-check verification, candidate invalidation, merge
+authorization, dependency release, and completion are workflow semantics—not
+journal-backend features.
+
+## Qualification and honest compatibility
+
+Every workload binds a current multiprocess qualification receipt, including the
+backend implementation and effective capacity pair. The campaign races all
+workflow roles, injects winning-worker crashes, audits protected work, compares
+independent replay digests, and recovers a history much larger than one bounded
+response.
+
+`tests/test_journal_conformance.py` is the backend-neutral contract suite. It
+runs against the Python MVP by default and can run unchanged against an external
+adapter through `SWARM_CONFORMANCE_JOURNAL_COMMAND`. The port and launch boundary
+are replaceable now; no external backend is honestly drop-in compatible until
+that same suite and the concurrency campaign pass against it.
+
+The complete model-free repository suite is `./swarmctl verify`. It enforces the
+Git, journal, workflow, review, verification, merge, recovery, rewind, reset,
+responsibility-boundary, and backend-conformance contracts described here.

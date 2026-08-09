@@ -4,22 +4,20 @@ import json
 import os
 import random
 import secrets
+import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from .journal import Journal, JournalClient, serve_in_thread
+from .journal_backend import JournalPort, connect_journal, start_journal
 from .workflow import WorkflowClient, WorkflowError, WorkflowReducer
 
 ROLES = ("author", "review", "verification", "revision", "merge")
 WINNER_CRASH = 86
-SOURCE_PATHS = tuple(
-    f"src/swarm_harness/{name}.py"
-    for name in ("cli", "concurrency", "journal", "journal_mcp", "worker", "workflow")
-)
+REPLAY_PROBE_RECORDS = 1_001
 
 
 class ConcurrencyError(RuntimeError):
@@ -43,8 +41,14 @@ def _write_json(path: Path, value: object) -> None:
 
 def implementation_digest(root: Path) -> str:
     hasher = hashlib.sha256()
-    for relative in SOURCE_PATHS:
-        path = root / relative
+    package = root / "src" / "swarm_harness"
+    paths = sorted(package.glob("*.py")) + [
+        root / "swarmctl",
+        root / "pyproject.toml",
+        root / "uv.lock",
+    ]
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
         hasher.update(relative.encode())
         hasher.update(b"\0")
         hasher.update(path.read_bytes())
@@ -52,16 +56,63 @@ def implementation_digest(root: Path) -> str:
     return hasher.hexdigest()
 
 
+def kernel_digest(command: Sequence[str] | None) -> str:
+    hasher = hashlib.sha256()
+    if not command:
+        hasher.update(b"python-prototype")
+        return hasher.hexdigest()
+    argv = [str(value) for value in command]
+    hasher.update(_compact(argv).encode())
+    executable = Path(shutil.which(argv[0]) or argv[0]).expanduser()
+    files = [executable, *(Path(value).expanduser() for value in argv[1:])]
+    for path in files:
+        if path.is_file():
+            resolved = path.resolve()
+            hasher.update(resolved.as_posix().encode())
+            hasher.update(b"\0")
+            hasher.update(resolved.read_bytes())
+            hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
 def _stage(_namespace: str) -> dict[str, Any]:
-    return {"required_reviews": 3, "tasks": [{"id": "A"}]}
+    return {
+        "required_reviews": 3,
+        "stage_gate": ["true"],
+        "tasks": [
+            {"id": "A", "checks": ["true"]},
+            {"id": "B", "depends_on": ["A"], "checks": ["true"]},
+        ],
+    }
+
+
+def _workload_ref(namespace: str) -> dict[str, str]:
+    return {
+        "schema": "SwarmWorkloadRefV1",
+        "target_repository": "concurrency-fixture",
+        "base_commit": "0" * 40,
+        "workload_path": "swarm-harness/concurrency.yaml",
+        "workload_blob": hashlib.sha256(_compact(_stage(namespace)).encode()).hexdigest(),
+        "harness_tree": "0" * 40,
+        "harness_version": "concurrency-fixture",
+    }
+
+
+def _replay_root(namespace: str) -> str:
+    return hashlib.sha256(f"concurrency-replay:{namespace}".encode()).hexdigest()[:32]
+
+
+def _workflow(journal: JournalPort, namespace: str) -> WorkflowClient:
+    return WorkflowClient(
+        journal,
+        _stage(namespace),
+        _workload_ref(namespace),
+        replay_root=_replay_root(namespace),
+    )
 
 
 def _bootstrap(client: WorkflowClient, namespace: str) -> None:
-    client.add(
-        namespace,
-        "launcher",
-        f"bootstrap: run:{namespace}\nstage-json: {_compact(_stage(namespace))}",
-    )
+    client.bootstrap(namespace)
 
 
 def _open_pr(client: WorkflowClient, namespace: str) -> None:
@@ -104,13 +155,14 @@ def _prepare_case(client: WorkflowClient, namespace: str, role: str) -> tuple[st
     _bootstrap(client, namespace)
     if role == "author":
         return "claim: task:A", "author"
+    if role == "verification":
+        client.add(namespace, "launcher", "control: worker-capacity\nworkers: 64")
+        client.add(namespace, "launcher", "control: worker-verification")
+        _open_pr(client, namespace)
+        return f"claim: verify:A:{2:040x}:1", "verification"
     _open_pr(client, namespace)
     if role == "review":
         return "claim: review:A:1:1", "review:specification"
-    if role == "verification":
-        _approve(client, namespace, 1)
-        _approve(client, namespace, 2)
-        return "claim: review:A:1:3", "review:integration"
     if role == "revision":
         client.add(namespace, "setup-review-1", "claim: review:A:1:1")
         client.add(
@@ -127,7 +179,7 @@ def _prepare_case(client: WorkflowClient, namespace: str, role: str) -> tuple[st
 
 
 def _projection(namespace: str, records: list[dict[str, Any]]) -> dict[str, Any]:
-    view = WorkflowReducer().reduce(namespace, records)
+    view = WorkflowReducer(_stage(namespace), _workload_ref(namespace)).reduce(namespace, records)
     return {
         "state": view.state,
         "required_reviews": view.required_reviews,
@@ -136,7 +188,7 @@ def _projection(namespace: str, records: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def _replay(socket: str, namespace: str) -> dict[str, str | int]:
-    records = JournalClient(socket).search(namespace, "*")
+    records = _workflow(connect_journal(socket), namespace).replay_records(namespace)
     journal = [
         {
             "record_id": item["record_id"],
@@ -163,7 +215,7 @@ def _wait_for(path: Path, timeout: float = 30.0) -> None:
 
 
 def _child_contend(arguments: argparse.Namespace) -> int:
-    client = WorkflowClient(JournalClient(arguments.socket))
+    client = _workflow(connect_journal(arguments.socket), arguments.namespace)
     ready = client.search(arguments.namespace, "queue:ready")
     item = next((value for value in ready if value.get("claim") == arguments.claim), None)
     if item is None or item.get("role") != arguments.expected_role:
@@ -205,7 +257,7 @@ def _child_contend(arguments: argparse.Namespace) -> int:
 
 
 def _child_recover(arguments: argparse.Namespace) -> int:
-    client = WorkflowClient(JournalClient(arguments.socket))
+    client = _workflow(connect_journal(arguments.socket), arguments.namespace)
     owned = client.search(arguments.namespace, f"worker:{arguments.actor}")
     if len(owned) != 1 or owned[0].get("claim") != arguments.claim:
         raise ConcurrencyError("replacement did not reconstruct the winning claim")
@@ -262,9 +314,47 @@ def _record_matches(record: dict[str, Any], first_line: str) -> bool:
     return str(record["text"]).splitlines()[0] == first_line
 
 
+def _validate_complete_replay(
+    client: JournalPort, seed: int, *, max_results: int
+) -> dict[str, Any]:
+    namespace = f"replay-capacity-{seed:x}"
+    replay_root = _replay_root(namespace)
+    expected: list[int] = []
+    for index in range(REPLAY_PROBE_RECORDS):
+        replay_id = f"{index:064b}"
+        stable_id = hashlib.sha256(f"stable:{seed}:{index}".encode()).hexdigest()[:32]
+        result = client.add(
+            namespace,
+            "qualification",
+            "\n".join(
+                (
+                    f"replay-probe:{index}",
+                    f"swarm-run:{namespace}",
+                    "swarm-epoch:0",
+                    f"swarm-stable:{stable_id}",
+                    f"swarm-routing:{replay_root}:{replay_id}",
+                )
+            ),
+        )
+        if result.get("saved") is not True:
+            raise ConcurrencyError("journal did not synchronously accept a replay probe")
+        expected.append(int(result["record_id"]))
+    capped = client.search(namespace, f"swarm-routing:{replay_root}:")
+    if not 1 <= len(capped) <= max_results:
+        raise ConcurrencyError("journal search did not return a useful bounded replay anchor")
+    replayed = WorkflowClient(client, replay_root=replay_root).replay_records(namespace)
+    observed = [int(record["record_id"]) for record in replayed]
+    if observed != expected:
+        raise ConcurrencyError("journal prefix search did not recover complete ordered replay")
+    return {
+        "namespace": namespace,
+        "record_count": len(observed),
+        "journal_digest": _digest(replayed),
+    }
+
+
 def _run_case(
     root: Path,
-    database: Path,
     socket: str,
     campaign: Path,
     role: str,
@@ -279,10 +369,9 @@ def _run_case(
     ready_dir = case_dir / "ready"
     ready_dir.mkdir(parents=True)
     start = case_dir / "start"
-    client = WorkflowClient(JournalClient(socket))
+    client = _workflow(connect_journal(socket), namespace)
     claim, expected_role = _prepare_case(client, namespace, role)
-    raw = Journal(database)
-    baseline = sum(_record_matches(item, claim) for item in raw.search(namespace, "*"))
+    baseline = sum(_record_matches(item, claim) for item in client.replay_records(namespace))
     marker = f"protected-work: {case_id}\nclaim: {claim}"
     rng = random.Random(seed)
     actors = [f"worker-{index}" for index in range(workers)]
@@ -327,7 +416,7 @@ def _run_case(
             crashed.append(actor)
         elif output:
             results[actor] = json.loads(output.splitlines()[-1])
-    records = raw.search(namespace, "*")
+    records = client.replay_records(namespace)
     if sum(_record_matches(item, claim) for item in records) != baseline + workers:
         raise ConcurrencyError("not every contender appended the observed claim")
     work = [
@@ -364,11 +453,8 @@ def _run_case(
         raise ConcurrencyError("one or more losing workers did not finish the claim path")
     if any(results[actor]["owned_claims"] for actor in losers):
         raise ConcurrencyError("a losing worker reconstructed protected ownership")
-    protected = [
-        item
-        for item in raw.search(namespace, marker.splitlines()[0])
-        if _record_matches(item, marker.splitlines()[0])
-    ]
+    records = client.replay_records(namespace)
+    protected = [item for item in records if _record_matches(item, marker.splitlines()[0])]
     if len(protected) != 1 or protected[0]["author"] != owner:
         raise ConcurrencyError("protected work was not performed exactly once by the owner")
     observer_processes = {
@@ -439,6 +525,9 @@ def run_campaign(
     workers: int,
     rounds: int,
     seed: int,
+    journal_command: Sequence[str] | None = None,
+    min_exact: int = 5,
+    max_results: int = 10,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     if workers < 2 or rounds < 1:
@@ -448,11 +537,23 @@ def run_campaign(
     campaign.mkdir()
     database = campaign / "journal.sqlite3"
     socket_path = Path("/tmp") / f"swarm-concurrency-{os.getpid()}-{secrets.token_hex(4)}.sock"
-    server, thread = serve_in_thread(database, socket_path)
+    runtime = start_journal(
+        database,
+        socket_path,
+        journal_command,
+        min_exact=min_exact,
+        max_results=max_results,
+    )
     cases: list[dict[str, Any]] = []
+    replay_probe: dict[str, Any] | None = None
     rng = random.Random(seed)
     started = time.time()
     try:
+        replay_probe = _validate_complete_replay(
+            runtime.client,
+            seed,
+            max_results=max_results,
+        )
         for round_index in range(rounds):
             role_order = list(ROLES)
             rng.shuffle(role_order)
@@ -466,7 +567,6 @@ def run_campaign(
                 cases.append(
                     _run_case(
                         root,
-                        database,
                         str(socket_path),
                         campaign,
                         role,
@@ -486,24 +586,28 @@ def run_campaign(
                 "workers": workers,
                 "rounds": rounds,
                 "seed": seed,
+                "min_exact": min_exact,
+                "max_results": max_results,
                 "cases": cases,
             },
         )
         raise
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        runtime.close()
     report = {
         "schema": "swarm-concurrency-validation-v1",
         "status": "passed",
         "source_digest": implementation_digest(root),
+        "kernel_digest": kernel_digest(journal_command),
         "workers": workers,
         "rounds": rounds,
         "seed": seed,
+        "min_exact": min_exact,
+        "max_results": max_results,
         "roles": list(ROLES),
         "case_count": len(cases),
         "winner_crash_cases": sum(item["crash_after_win"] for item in cases),
+        "replay_probe": replay_probe,
         "started_at": started,
         "completed_at": time.time(),
         "invariants": {
@@ -512,6 +616,7 @@ def run_campaign(
             "losers_did_no_protected_work": True,
             "winner_crash_recovered_by_replay": True,
             "all_worker_replays_identical": True,
+            "complete_replay_beyond_query_limit": True,
         },
         "cases": cases,
         "report_path": str((campaign / "report.json").resolve()),
@@ -522,6 +627,32 @@ def run_campaign(
     return report
 
 
+def _relocated_validation_path(root: Path, path: Path) -> Path | None:
+    parts = path.parts
+    for index in range(len(parts) - 1):
+        if parts[index : index + 2] == (".swarm", "validation"):
+            return root / Path(*parts[index:])
+    return None
+
+
+def _read_validation_json(root: Path, path: Path) -> dict[str, Any]:
+    candidates = [path]
+    relocated = _relocated_validation_path(root, path)
+    if relocated is not None and relocated != path:
+        candidates.append(relocated)
+    error: OSError | json.JSONDecodeError | None = None
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise json.JSONDecodeError("receipt must be an object", "", 0)
+            return value
+        except (OSError, json.JSONDecodeError) as caught:
+            error = caught
+    assert error is not None
+    raise error
+
+
 def validate_receipt(
     root: Path,
     receipt_path: Path,
@@ -529,17 +660,20 @@ def validate_receipt(
     required_workers: int,
     minimum_rounds: int = 4,
     require_current_source: bool = True,
+    journal_command: Sequence[str] | None = None,
+    min_exact: int = 5,
+    max_results: int = 10,
 ) -> dict[str, Any]:
     try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt = _read_validation_json(root, receipt_path)
     except (OSError, json.JSONDecodeError) as error:
         raise ConcurrencyError(
-            "Stage 0 requires a passing concurrency campaign; run "
-            "./swarmctl harness validate-concurrency --workers 7"
+            "A passing concurrency campaign is required; run "
+            f"./swarmctl harness validate-concurrency --workers {required_workers}"
         ) from error
     report_path = Path(str(receipt.get("report_path", "")))
     try:
-        archived = json.loads(report_path.read_text(encoding="utf-8"))
+        archived = _read_validation_json(root, report_path)
     except (OSError, json.JSONDecodeError):
         archived = None
     unsealed = dict(receipt)
@@ -550,12 +684,16 @@ def validate_receipt(
         "losers_did_no_protected_work",
         "winner_crash_recovered_by_replay",
         "all_worker_replays_identical",
+        "complete_replay_beyond_query_limit",
     }
     if (
         receipt.get("schema") != "swarm-concurrency-validation-v1"
         or receipt.get("status") != "passed"
         or require_current_source
         and receipt.get("source_digest") != implementation_digest(root)
+        or receipt.get("kernel_digest") != kernel_digest(journal_command)
+        or receipt.get("min_exact") != min_exact
+        or receipt.get("max_results") != max_results
         or int(receipt.get("workers", 0)) < required_workers
         or int(receipt.get("rounds", 0)) < minimum_rounds
         or set(receipt.get("roles", [])) != set(ROLES)
@@ -564,7 +702,7 @@ def validate_receipt(
         or archived != receipt
     ):
         raise ConcurrencyError(
-            "Stage 0 concurrency receipt is absent, stale, or insufficient; run "
+            "Concurrency receipt is absent, stale, or insufficient; run "
             f"./swarmctl harness validate-concurrency --workers {required_workers}"
         )
     return receipt

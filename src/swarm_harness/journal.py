@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import socket
 import socketserver
@@ -15,6 +16,12 @@ from typing import Any
 
 class JournalError(RuntimeError):
     pass
+
+
+DEFAULT_MIN_EXACT = 5
+DEFAULT_MAX_RESULTS = 10
+DEFAULT_SEMANTIC_THRESHOLD = 0.6
+_TOKEN = re.compile(r"[\w-]+", re.UNICODE)
 
 
 SCHEMA = """
@@ -37,9 +44,30 @@ def _compact(value: object) -> str:
 class Journal:
     """Generic immutable records with exactly two operations."""
 
-    def __init__(self, database: str | Path, clock=time.time) -> None:
+    def __init__(
+        self,
+        database: str | Path,
+        clock=time.time,
+        *,
+        min_exact: int = DEFAULT_MIN_EXACT,
+        max_results: int = DEFAULT_MAX_RESULTS,
+        semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
+    ) -> None:
+        if (
+            isinstance(min_exact, bool)
+            or isinstance(max_results, bool)
+            or not isinstance(min_exact, int)
+            or not isinstance(max_results, int)
+            or not 1 <= min_exact <= max_results
+        ):
+            raise JournalError("journal capacity requires 1 <= min_exact <= max_results")
+        if not isinstance(semantic_threshold, (int, float)) or not 0 <= semantic_threshold <= 1:
+            raise JournalError("semantic threshold must be between 0 and 1")
         self.database = Path(database)
         self.clock = clock
+        self.min_exact = min_exact
+        self.max_results = max_results
+        self.semantic_threshold = float(semantic_threshold)
         self.database.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             existing = {
@@ -90,29 +118,56 @@ class Journal:
             )
         return {"saved": True, "record_id": int(cursor.lastrowid)}
 
+    @staticmethod
+    def _semantic_score(query: str, text: str) -> float:
+        query_terms = {item.casefold() for item in _TOKEN.findall(query)}
+        if not query_terms:
+            return 0.0
+        text_terms = {item.casefold() for item in _TOKEN.findall(text)}
+        return len(query_terms & text_terms) / len(query_terms)
+
+    @staticmethod
+    def _public_record(row: sqlite3.Row, *, exact: bool) -> dict[str, Any]:
+        value = dict(row)
+        sequence = int(value["record_id"])
+        value.update(
+            stable_id=f"record:{sequence}",
+            journal_sequence=sequence,
+            match_kind="exact" if exact else "semantic",
+        )
+        return value
+
     def search(self, namespace: str, query: str) -> list[dict[str, Any]]:
         if len(namespace.encode("utf-8")) > 1024:
             raise JournalError("namespace must not exceed 1024 UTF-8 bytes")
         if not query or len(query.encode("utf-8")) > 4096:
             raise JournalError("query must be 1..4096 UTF-8 bytes")
         with self._connect() as connection:
-            if query == "*":
-                rows = connection.execute(
-                    """
-                    SELECT record_id,namespace,author,text,created_at FROM records
-                    WHERE namespace=? ORDER BY record_id LIMIT 10000
-                    """,
-                    (namespace,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT record_id,namespace,author,text,created_at FROM records
-                    WHERE namespace=? AND INSTR(text,?)>0 ORDER BY record_id LIMIT 1000
-                    """,
-                    (namespace, query),
-                ).fetchall()
-        return [dict(row) for row in rows]
+            rows = connection.execute(
+                """
+                SELECT record_id,namespace,author,text,created_at FROM records
+                WHERE namespace=? ORDER BY record_id
+                """,
+                (namespace,),
+            ).fetchall()
+
+        qualifying: list[tuple[sqlite3.Row, bool]] = []
+        for row in rows:
+            text = str(row["text"])
+            exact = query in text
+            if exact or self._semantic_score(query, text) >= self.semantic_threshold:
+                qualifying.append((row, exact))
+
+        exact = [item for item in qualifying if item[1]]
+        required_exact = min(self.min_exact, len(exact), self.max_results)
+        reserved_ids = {int(row["record_id"]) for row, _ in exact[-required_exact:]}
+        selected = [item for item in qualifying if int(item[0]["record_id"]) in reserved_ids]
+        remaining = [item for item in qualifying if int(item[0]["record_id"]) not in reserved_ids]
+        open_slots = self.max_results - len(selected)
+        if open_slots:
+            selected.extend(remaining[-open_slots:])
+        selected.sort(key=lambda item: int(item[0]["record_id"]))
+        return [self._public_record(row, exact=is_exact) for row, is_exact in selected]
 
 
 def _encode(value: object) -> bytes:
@@ -155,9 +210,22 @@ class JournalServer(socketserver.ThreadingUnixStreamServer):
 
 
 def serve_in_thread(
-    database: str | Path, socket_path: str | Path
+    database: str | Path,
+    socket_path: str | Path,
+    *,
+    min_exact: int = DEFAULT_MIN_EXACT,
+    max_results: int = DEFAULT_MAX_RESULTS,
+    semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
 ) -> tuple[JournalServer, threading.Thread]:
-    server = JournalServer(socket_path, Journal(database))
+    server = JournalServer(
+        socket_path,
+        Journal(
+            database,
+            min_exact=min_exact,
+            max_results=max_results,
+            semantic_threshold=semantic_threshold,
+        ),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread

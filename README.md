@@ -1,102 +1,203 @@
 # Swarm Harness
 
-This is a disposable native macOS launcher for Codex workers implementing the
-memory roadmap. It dogfoods the future Rust journal kernel's complete worker
-interface:
+Swarm Harness is a local, specification-driven coding swarm for arbitrary Git
+repositories. The target repository owns product intent and verification gates;
+the harness supplies scheduling, Git/worktree management, review, verification,
+merge, recovery, and observability.
+
+Workers coordinate through exactly two journal tools:
 
 - `journal_search`
 - `journal_add`
 
-The current kernel prototype is the generic append-only SQLite store in
-`src/swarm_harness/journal.py`. It knows only namespaces, authors, immutable
-text records, and generic text search. All task, PR, review, generation,
-dependency, and merge behavior is implemented above it by the replayable
-reducer in `src/swarm_harness/workflow.py`. Replacing the prototype kernel does
-not require porting any workflow policy.
+The disposable Python backend in `src/swarm_harness/journal.py` is a generic
+append-only store. Workflow concepts are interpreted in
+`src/swarm_harness/workflow.py` above the fixed two-operation port in
+`src/swarm_harness/journal_backend.py`.
 
-## Run Stage 0
+## Setup
 
-First qualify the current coordination implementation with real competing
-processes:
+```bash
+uv sync --extra dev
+./swarmctl verify
+```
+
+`swarmctl` is the repository-local entry point. It automatically re-executes
+under `.venv` when that environment exists, so installing a separate global CLI
+is unnecessary.
+
+## Target layout
+
+Every workload belongs to the implementation repository:
+
+```text
+my-product/
+├── src/
+├── tests/
+└── swarm-harness/
+    ├── web-foundation.yaml
+    └── release-hardening.yaml
+```
+
+The harness only loads `<target>/swarm-harness/<workload>.yaml`, and the file
+must be committed. At run creation it freezes the repository identity, base
+commit, workload path and blob, complete `swarm-harness/` tree, and harness
+version. The bootstrap journal record stores that reference—not copied
+specification text. Candidate edits to the frozen directory fail closed and an
+intentional specification change requires a new run.
+
+Runtime databases, logs, sockets, assignments, and worker clones stay in this
+checkout under `.swarm/`.
+
+The target repository must have its GitHub-linked `user.name` and `user.email`
+configured before a run starts. The harness freezes that identity in run
+metadata and applies it to every worker and merge commit.
+
+## Workload contract
+
+A workload is a committed verification-gated graph. Required top-level fields
+are `stage`, `enabled`, `goal`, `tasks`, and `stage_gate`. Every task requires a
+safe unique `id`, `title`, `prompt`, `depends_on`, and one or more exact
+`checks`; dependencies must form an acyclic graph.
+
+```yaml
+stage: foundation
+enabled: true
+goal: Deliver an authenticated web application slice.
+tasks:
+  - id: API
+    title: Implement the API
+    prompt: Implement the API described in docs/product.md.
+    depends_on: []
+    checks:
+      - npm test -- api
+  - id: UI
+    title: Implement the interface
+    prompt: Implement the interface described in docs/product.md.
+    depends_on: [API]
+    checks:
+      - npm test -- ui
+stage_gate:
+  - npm test
+  - npm run build
+```
+
+Checks execute from the target repository root. The contract supplies product
+intent; the harness does not infer a language, framework, package manager, file
+layout, or deployment model. The only bundled workload is the model-free test
+fixture at `tests/fixtures/workloads/smoke.yaml`.
+
+## One bounded ADD/SEARCH journal
+
+Exact and threshold-eligible semantic records share one SEARCH response. The
+defaults reserve five exact anchors when available and cap the union at ten
+records:
+
+```text
+min_exact = 5
+max_results = 10
+```
+
+When capacity is exceeded, SEARCH selects recent qualifying records while
+preserving the exact floor, then returns the selected union oldest-to-newest by
+journal sequence. Semantic score controls eligibility only. Overflow returns
+useful partial evidence rather than an error, and callers follow returned task
+IDs, errors, hashes, components, decisions, or concepts with another search.
+
+Workflow recovery remains complete even with `min_exact = 1`: private fixed-width
+replay identities form a deterministic partition tree, and one exact anchor is
+enough to prove that every child of a nonempty branch must be traversed. Semantic
+extras remain visible but cannot affect authoritative state unless their run,
+epoch, routing, identity, and sequence metadata validate.
+
+## Qualify a backend
+
+Every workload requires a current real-multiprocess concurrency receipt. The
+capacity pair is part of that receipt:
 
 ```bash
 ./swarmctl harness validate-concurrency \
-  --workers 7 \
-  --rounds 6
+  --workers 8 \
+  --rounds 6 \
+  --min-exact 5 \
+  --max-results 10
 ```
 
-This model-free campaign races every worker against the same author, review,
-verification, revision, and merge claims. It randomizes dispatch, crashes the
-effective winner in alternating rounds, recovers that owner through journal
-replay, and launches an independent replay process for every worker. Its
-content-bound receipt is written under `.swarm/validation/`.
+The campaign races implementation, revision, review, verification, and merge
+claims; injects winning-worker crashes; proves losers perform no protected work;
+compares independent replay; and recovers complete history through bounded
+SEARCH.
 
-Stage 0 refuses to start unless the latest receipt passes every invariant,
-matches the current coordination source, contains at least four rounds, and
-used at least as many workers as the requested Stage 0 run.
+The backend-neutral suite runs against the Python MVP by default:
+
+```bash
+.venv/bin/pytest -q tests/test_journal_conformance.py
+```
+
+Set `SWARM_CONFORMANCE_JOURNAL_COMMAND` to run that identical suite against an
+external adapter. Exposing similarly named operations is not enough; an adapter
+is drop-in compatible only after the contract suite and concurrency campaign
+pass.
+
+## Run any workload
 
 ```bash
 ./swarmctl harness run \
-  --workload stage0 \
-  --target /Users/cat/Documents/code/memory \
-  --workers 7 \
-  --reviews 3
+  --workload web-foundation \
+  --target /path/to/my-product \
+  --workers 8 \
+  --reviews 3 \
+  --min-exact 5 \
+  --max-results 10
 ```
 
-`stage0` is the workload name; `pilot` is no longer used. Three internal
-approvals per task PR is the default, so `--reviews 3` may be omitted. A run
-opens one thin launcher terminal and seven worker terminals. Each Codex session
-may author, revise, review, or authorize a merge according to the ready work it
-claims from the journal.
+Tasks use independent branches. After implementation checks, the configured
+internal reviews and exact-frontier verification must pass. A worker then
+requests merge; the launcher verifies a prospective merge in isolation and
+fast-forwards the target to that exact object. Dependencies release after merge,
+and the workload gate runs in another isolated clone before completion.
 
-Every task uses its own branch under the run's `codex/swarm-*` prefix. There is
-no shared integration branch. After author self-verification, three distinct
-workers review the exact candidate head. A worker then authorizes its merge;
-the launcher re-runs the task checks on the prospective merge tree and merges
-that exact tree directly into the target branch. Dependencies are released
-only after that merge. `COMPLETE` therefore means all reviewed task changes are
-present in the target checkout and the 76-command Stage 0 gate passed there.
-
-## Observe
+To select a compatible external backend, pass the same command during
+qualification and run creation:
 
 ```bash
-# Worker Codex JSONL, including visible journal_search/journal_add calls.
-./swarmctl harness observe --workload stage0 --slot worker-0
+./swarmctl harness validate-concurrency \
+  --workers 8 \
+  --journal-command '/path/to/journal-adapter serve'
 
-# Thin launcher activity.
-./swarmctl harness observe --workload stage0 --slot orchestrator
-
-# Active claims only, with replayed journal progress. Ready and blocked work is omitted.
-./swarmctl harness observe-queue --workload stage0
-
-# One JSON snapshot.
-./swarmctl harness status --workload stage0
+./swarmctl harness run \
+  --workload web-foundation \
+  --target /path/to/my-product \
+  --workers 8 \
+  --journal-command '/path/to/journal-adapter serve'
 ```
 
-The stream observer preserves the original terminal syntax coloring for model
-messages, reasoning summaries, commands, diffs, and journal YAML. Control
-characters are escaped. Display timestamps are removed, and multiline output
-uses only its format-specific indentation rather than a timestamp offset.
+The command receives `SWARM_JOURNAL_DATABASE`, `SWARM_JOURNAL_SOCKET`,
+`SWARM_JOURNAL_MIN_EXACT`, and `SWARM_JOURNAL_MAX_RESULTS`. The complete wire and
+semantic contract is in [HARNESS_CONTRACT.md](HARNESS_CONTRACT.md).
 
-## Pause, resume, and reset
+## Observe and control
 
 ```bash
-./swarmctl harness pause --workload stage0
-./swarmctl harness resume --workload stage0
+./swarmctl harness observe --workload web-foundation --slot worker-0
+./swarmctl harness observe --workload web-foundation --slot orchestrator
+./swarmctl harness observe-queue --workload web-foundation
+./swarmctl harness status --workload web-foundation
 
-# Stop, archive the run directory, and delete its task PR branches.
-./swarmctl harness reset --workload stage0
+./swarmctl harness pause --workload web-foundation
+./swarmctl harness resume --workload web-foundation
+./swarmctl harness checkpoint --workload web-foundation --name productive
+./swarmctl harness rewind --workload web-foundation --to productive
+./swarmctl harness reset --workload web-foundation
 ```
 
-Pause records `control: pause` and terminates launcher, worker, and Codex
-processes. Claims, records, and worker clones remain. Resume records
-`control: resume`, relaunches the stable slots, and each replacement reconstructs
-its work from `journal_search`.
+Pause and resume preserve history. Reset archives a run and removes only its task
+branches. Destructive rewind restores the checkpoint's real journal sequence,
+Git frontier, task refs, assignments, and artifacts, then advances an external
+run epoch so discarded workers and observers cannot write into restored history.
+Persisted epoch frontiers keep older sequence intervals bound to their original
+authoritative epochs across repeated rewinds.
+It refuses to overwrite uncommitted target worktree changes; `--archive`
+optionally preserves the discarded run state.
 
-Reset archives the run under `.swarm/archive/` and deletes only branches under
-that run's task-branch prefix. It does not delete the target repository or
-revert changes already merged into its current branch. Run the Stage 0 command
-again after reset to start from the branch's current commit.
-
-See `HARNESS_CONTRACT.md` for the disposable workflow and `ACCEPTANCE.md` for
-the model-free proof suite.
+Run the complete model-free harness suite with `./swarmctl verify`.

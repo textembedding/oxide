@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import secrets
 from pathlib import Path
 
@@ -10,6 +9,7 @@ from swarm_harness.workflow import WorkflowClient
 
 STAGE = {
     "required_reviews": 3,
+    "stage_gate": ["test all"],
     "tasks": [
         {
             "id": "A",
@@ -31,16 +31,9 @@ def _request(server: JournalMcpServer, number: int, method: str, params: dict) -
 def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
     socket = Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
     service, thread = serve_in_thread(tmp_path / "journal.sqlite3", socket)
-    client = WorkflowClient(JournalClient(socket))
-    client.add(
-        "run",
-        "launcher",
-        "bootstrap: run:run\nstage-json: " + json.dumps(STAGE, separators=(",", ":")),
-    )
-    monkeypatch.setenv("SWARM_JOURNAL_SOCKET", str(socket))
-    monkeypatch.setenv("SWARM_RUN_ID", "run")
-    monkeypatch.setenv("SWARM_WORKER_ID", "worker-0")
-    server = JournalMcpServer()
+    client = WorkflowClient(JournalClient(socket), STAGE)
+    client.bootstrap("run")
+    server = JournalMcpServer(client, "run", "worker-0")
 
     initialized = _request(
         server,
@@ -63,6 +56,12 @@ def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
     }
     assert search["annotations"]["readOnlyHint"] is True
     assert search["annotations"]["openWorldHint"] is False
+    description = search["description"]
+    assert "bounded union" in description
+    assert "threshold-eligible semantic" in description
+    assert "exact-match floor" in description
+    assert "ordered only by journal sequence" in description
+    assert "iterative follow-up searches" in description
 
     searched = _request(
         server,
@@ -88,3 +87,39 @@ def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
     service.shutdown()
     service.server_close()
     thread.join(timeout=5)
+
+
+def test_mcp_keeps_semantic_extras_visible_for_multi_hop_search(tmp_path: Path) -> None:
+    socket = Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
+    service, thread = serve_in_thread(tmp_path / "journal.sqlite3", socket)
+    try:
+        client = WorkflowClient(JournalClient(socket), STAGE)
+        client.bootstrap("run")
+        client.add("run", "worker-1", "discovery: component-A implicated failure-Z")
+        client.add("run", "worker-2", "decision: failure-Z repair is retry-safe")
+        server = JournalMcpServer(client, "run", "worker-0")
+
+        first = _request(
+            server,
+            1,
+            "tools/call",
+            {
+                "name": "journal_search",
+                "arguments": {"yaml": "query: component-A failure-Z"},
+            },
+        )["result"]["content"][0]["text"]
+        assert 'match_kind: "semantic"' in first
+        assert "component-A implicated failure-Z" in first
+
+        second = _request(
+            server,
+            2,
+            "tools/call",
+            {"name": "journal_search", "arguments": {"yaml": "query: failure-Z"}},
+        )["result"]["content"][0]["text"]
+        assert second.count('match_kind: "exact"') == 2
+        assert "failure-Z repair is retry-safe" in second
+    finally:
+        service.shutdown()
+        service.server_close()
+        thread.join(timeout=5)

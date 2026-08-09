@@ -12,8 +12,9 @@ from pathlib import Path
 
 class Mcp:
     def __init__(self) -> None:
+        harness_python = Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "swarm_harness.journal_mcp"],
+            [str(harness_python), "-m", "swarm_harness.journal_mcp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -176,6 +177,26 @@ def merge(mcp: Mcp, item: str, task: str) -> None:
     )
 
 
+def verification(mcp: Mcp, item: str) -> None:
+    claim = str(field(item, "claim"))
+    identity = claim.removeprefix("claim: ")
+    head = str(field(item, "head_sha"))
+    mcp.tool(
+        "journal_add",
+        block(
+            "text",
+            "\n".join(
+                (
+                    f"verify-pass: {identity}",
+                    f"head: {head}",
+                    "verified: true",
+                    "evidence: fixture regression command passed",
+                )
+            ),
+        ),
+    )
+
+
 def main() -> int:
     prompt = sys.argv[-1]
     worker = re.search(r"as ([^.]+)\.", prompt).group(1)
@@ -196,13 +217,18 @@ def main() -> int:
             item = mcp.tool("journal_search", f"query: worker:{worker}")
         task = str(field(item, "root_task_id"))
         role = str(field(item, "role"))
-        mcp.tool("journal_search", f"query: task:{task}")
+        if role == "revision" or role == "merge":
+            mcp.tool("journal_search", f"query: review:{task}:{field(item, 'generation')}")
+        elif role.startswith("review:"):
+            mcp.tool("journal_search", f"query: {field(item, 'head_sha')}")
         if role in {"author", "revision"}:
             author(mcp, item, task, target_branch)
         elif role.startswith("review:"):
             review(mcp, item, task)
         elif role == "merge":
             merge(mcp, item, task)
+        elif role == "verification":
+            verification(mcp, item)
         else:
             raise RuntimeError(f"unexpected fixture role: {role}")
         print(
