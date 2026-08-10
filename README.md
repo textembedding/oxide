@@ -11,8 +11,16 @@
 Oxide is a meta-harness that coordinates parallel Codex agents across
 implementation, review, and proof work.
 
+People or agents translate the natural-language specification into a structured
+contract of tasks, dependencies, proofs, and acceptance checks. Independent
+review confirms the contract reflects the specification, then Oxide freezes it
+for execution.
+
 ```text
  human-written specifications
+              |
+              v
+     contract drafting + review
               |
               v
  reviewed verification contract
@@ -56,6 +64,11 @@ unlocks dependent work.
 
 ## Verification philosophy
 
+Oxide uses [Verus](https://verus-lang.github.io/verus/guide/) to prove that Rust
+code satisfies its formal contracts. The
+[verification primer](https://github.com/textembedding/oxide/blob/main/docs/VERIFICATION_PRIMER.md)
+explains the reasoning behind this model.
+
 Every production logical component belongs to one refinement chain:
 
 ```text
@@ -92,11 +105,6 @@ Every production logical component belongs to one refinement chain:
   source/proof divergence, and attempts to redefine the judge.
 - Agent review supplements proof; it cannot replace Verus or deterministic policy.
 - Formal correctness and empirical capacity are separate gates.
-
-Oxide currently executes an already reviewed verification contract. Automatically
-deriving and approving a faithful contract from prose is a later phase: a proof
-can establish that code implements a contract, but not that a generated contract
-captured the human author’s intent.
 
 ## Target project
 
