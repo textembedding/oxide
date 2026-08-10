@@ -1,13 +1,13 @@
-# Oxide
+<p align="center">
+  <img src="docs/assets/oxide-logo.png" alt="Oxide logo" width="240">
+</p>
 
-**Build formally verified Rust software with many Codex workers operating in
-parallel.**
+<h1 align="center">Oxide</h1>
 
-Oxide turns a reviewed implementation contract into a live queue of independent
-coding, review, and proof work. Each assignment gets a fresh Codex context, so
-unrelated components can be implemented at the same time instead of waiting for
-one agent to finish the whole program. Merging one candidate immediately unlocks
-the next tasks whose prerequisites are now complete.
+<p align="center"><strong>Build formally verified Rust programs with highly concurrent agent swarms.</strong></p>
+
+Oxide turns a reviewed implementation contract into parallel coding, review, and
+proof work, assigning every task to a fresh Codex agent.
 
 The shared journal backend is what makes that parallelism safe. It keeps claims,
 candidates, check evidence, reviews, merges, and recovery in one durable,
@@ -15,11 +15,6 @@ chronological history. Workers coordinate through the journal rather than a
 privileged orchestrator or a chain of prompts: atomic claims choose one owner for
 each assignment, and deterministic replay gives every worker the same state after
 a restart.
-
-Oxide is opinionated about assurance, not product design. The target Rust project
-contains the requirements, formal model, implementation, proofs, and task graph.
-Oxide supplies parallel execution, evidence reuse, independent review, Git
-integration, and recovery.
 
 ## How it works
 
