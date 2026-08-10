@@ -10,4 +10,4 @@ build/
 *.sqlite3
 *.db
 .DS_Store
-.swarm/
+.oxide/

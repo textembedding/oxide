@@ -3,9 +3,9 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
-from swarm_harness.journal import JournalClient, serve_in_thread
-from swarm_harness.journal_mcp import PROTOCOL_VERSION, JournalMcpServer
-from swarm_harness.workflow import WorkflowClient
+from oxide.journal import JournalClient, serve_in_thread
+from oxide.journal_mcp import PROTOCOL_VERSION, JournalMcpServer
+from oxide.workflow import WorkflowClient
 
 STAGE = {
     "required_reviews": 3,
@@ -29,7 +29,7 @@ def _request(server: JournalMcpServer, number: int, method: str, params: dict) -
 
 
 def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
-    socket = Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-test-{secrets.token_hex(8)}.sock"
     service, thread = serve_in_thread(tmp_path / "journal.sqlite3", socket)
     client = WorkflowClient(JournalClient(socket), STAGE)
     client.bootstrap("run")
@@ -41,7 +41,7 @@ def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
         "initialize",
         {"protocolVersion": PROTOCOL_VERSION},
     )
-    assert initialized["result"]["serverInfo"]["name"] == "swarm-journal"
+    assert initialized["result"]["serverInfo"]["name"] == "oxide-journal"
     listed = _request(server, 2, "tools/list", {})
     assert [tool["name"] for tool in listed["result"]["tools"]] == [
         "journal_add",
@@ -90,7 +90,7 @@ def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_mcp_keeps_semantic_extras_visible_for_multi_hop_search(tmp_path: Path) -> None:
-    socket = Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-test-{secrets.token_hex(8)}.sock"
     service, thread = serve_in_thread(tmp_path / "journal.sqlite3", socket)
     try:
         client = WorkflowClient(JournalClient(socket), STAGE)

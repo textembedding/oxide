@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-SOURCE = ROOT / "src" / "swarm_harness"
+SOURCE = ROOT / "src" / "oxide"
 
 
 def test_sqlite_is_confined_to_swappable_prototype() -> None:

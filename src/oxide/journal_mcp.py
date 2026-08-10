@@ -87,17 +87,17 @@ class JournalMcpServer:
         if client is None:
             from .cli import _load_config, _workflow_client
 
-            config_path = Path(_environment("SWARM_RUN_CONFIG"))
+            config_path = Path(_environment("OXIDE_RUN_CONFIG"))
             config = _load_config(json.loads(config_path.read_text(encoding="utf-8"))["workload"])
-            if int(_environment("SWARM_RUN_EPOCH")) != int(config["epoch"]):
+            if int(_environment("OXIDE_RUN_EPOCH")) != int(config["epoch"]):
                 raise JournalError("worker run epoch is stale")
             client = _workflow_client(
                 config,
-                connect_journal(Path(_environment("SWARM_JOURNAL_SOCKET"))),
+                connect_journal(Path(_environment("OXIDE_JOURNAL_SOCKET"))),
             )
         self.client = client
-        self.run_id = run_id or _environment("SWARM_RUN_ID")
-        self.worker_id = worker_id or _environment("SWARM_WORKER_ID")
+        self.run_id = run_id or _environment("OXIDE_RUN_ID")
+        self.worker_id = worker_id or _environment("OXIDE_WORKER_ID")
 
     def handle(self, request: Any) -> dict[str, Any] | None:
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
@@ -119,7 +119,7 @@ class JournalMcpServer:
                     {
                         "protocolVersion": PROTOCOL_VERSION,
                         "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "swarm-journal", "version": "1"},
+                        "serverInfo": {"name": "oxide-journal", "version": "1"},
                     },
                 )
             if method == "ping":
@@ -187,7 +187,7 @@ def main() -> int:
     try:
         serve(JournalMcpServer())
     except (JournalError, OSError) as error:
-        print(f"swarm-journal: {error}", file=sys.stderr)
+        print(f"oxide-journal: {error}", file=sys.stderr)
         return 2
     return 0
 

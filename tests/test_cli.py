@@ -11,15 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from swarm_harness import cli
-from swarm_harness.concurrency import (
+from oxide import cli
+from oxide.concurrency import (
     ROLES,
     ConcurrencyError,
     implementation_digest,
     kernel_digest,
 )
-from swarm_harness.journal_backend import start_journal
-from swarm_harness.workflow import WorkflowClient, WorkflowError
+from oxide.journal_backend import start_journal
+from oxide.workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).parents[1]
 
@@ -51,7 +51,7 @@ def _write_receipt(path: Path, *, workers: int) -> Path:
     archived = path / "campaign" / "report.json"
     archived.parent.mkdir(parents=True)
     report = {
-        "schema": "swarm-concurrency-validation-v1",
+        "schema": "oxide-concurrency-validation-v1",
         "status": "passed",
         "source_digest": implementation_digest(ROOT),
         "kernel_digest": kernel_digest(None),
@@ -147,7 +147,7 @@ def test_target_harness_directory_cannot_escape_through_a_symlink(tmp_path: Path
     outside = tmp_path / "outside"
     target.mkdir()
     outside.mkdir()
-    (target / "swarm-harness").symlink_to(outside, target_is_directory=True)
+    (target / "oxide-harness").symlink_to(outside, target_is_directory=True)
     with pytest.raises(cli.HarnessError, match="symlink"):
         cli._stage_path(target, "web-app")
 
@@ -453,7 +453,7 @@ def test_queue_renders_append_only_records_in_chronological_order() -> None:
     }
     rendered = cli._render_queue(snapshot, color=False, width=40)
     colored = cli._render_queue(snapshot, color=True, width=40)
-    assert "SWARM JOURNAL" in rendered
+    assert "OXIDE JOURNAL" in rendered
     assert "ACTIVE-LONG-TASK-NAME" in rendered
     assert rendered.index("JOURNAL #140") < rendered.index("JOURNAL #141")
     assert "author: worker-0\nstatus: accepted" in rendered
@@ -461,7 +461,7 @@ def test_queue_renders_append_only_records_in_chronological_order() -> None:
     assert "[" not in rendered
     assert "-" * 40 in rendered
     assert "|" not in rendered
-    assert "\x1b[1;36mSWARM JOURNAL\x1b[0m" in colored
+    assert "\x1b[1;36mOXIDE JOURNAL\x1b[0m" in colored
     assert "\x1b[31mstatus: rejected\x1b[0m" in colored
 
 
@@ -514,7 +514,7 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
     arguments = cli.argparse.Namespace(workload="web-app", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
     output = capsys.readouterr().out
-    assert output.count("SWARM JOURNAL") == 1
+    assert output.count("OXIDE JOURNAL") == 1
     assert output.index("JOURNAL #1") < output.index("JOURNAL #2")
     assert "\x1b[2J\x1b[H" not in output
     assert delays[0] == 1
@@ -549,7 +549,7 @@ def test_queue_observer_reconnects_and_resets_cursor_after_epoch_change(
     arguments = cli.argparse.Namespace(workload="rewind", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
     output = capsys.readouterr().out
-    assert output.count("SWARM JOURNAL") == 2
+    assert output.count("OXIDE JOURNAL") == 2
     assert output.index("JOURNAL #10") < output.rindex("JOURNAL #1")
 
 
@@ -645,7 +645,7 @@ def test_macos_commands_and_controls_remain_available() -> None:
 
 def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "new-checkout"
-    runs = root / ".swarm" / "runs"
+    runs = root / ".oxide" / "runs"
     run_dir = runs / "web-app"
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text(
@@ -654,12 +654,12 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
                 "schema_version": 8,
                 "run_id": "web-app-20260808-120000",
                 "workload": "web-app",
-                "run_dir": "/old/checkout/.swarm/runs/web-app",
-                "database": "/old/checkout/.swarm/runs/web-app/journal.sqlite3",
-                "socket": "/old/checkout/.swarm/runs/web-app/journal.sock",
-                "evidence_root": "/old/checkout/.swarm/runs/web-app/evidence/checks",
-                "checker_root": "/old/checkout/.swarm/runs/web-app/frozen-checker",
-                "stage_path": "/old/target/swarm-harness/web-app.yaml",
+                "run_dir": "/old/checkout/.oxide/runs/web-app",
+                "database": "/old/checkout/.oxide/runs/web-app/journal.sqlite3",
+                "socket": "/old/checkout/.oxide/runs/web-app/journal.sock",
+                "evidence_root": "/old/checkout/.oxide/runs/web-app/evidence/checks",
+                "checker_root": "/old/checkout/.oxide/runs/web-app/frozen-checker",
+                "stage_path": "/old/target/oxide-harness/web-app.yaml",
                 "target_repo": "/target/remains/unchanged",
                 "target_branch": "main",
                 "base_commit": "1" * 40,
@@ -668,14 +668,14 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
                 "required_reviews": 3,
                 "journal_command": [],
                 "concurrency_validation": {},
-                "workload_ref": {"schema": "SwarmWorkloadRefV1"},
+                "workload_ref": {"schema": "OxideWorkloadRefV1"},
                 "replay_root": "2" * 32,
                 "epoch": 0,
                 "history_sequence": 0,
                 "epoch_frontiers": [],
                 "min_exact": 5,
                 "max_results": 10,
-                "branch_prefix": "codex/swarm-web-app-20260808-120000",
+                "branch_prefix": "codex/oxide-web-app-20260808-120000",
             }
         ),
         encoding="utf-8",
@@ -691,7 +691,7 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
     assert config["evidence_root"] == str(run_dir.resolve() / "evidence" / "checks")
     assert config["checker_root"] == str(run_dir.resolve() / "frozen-checker")
     assert config["stage_path"] == str(
-        Path("/target/remains/unchanged/swarm-harness/web-app.yaml").resolve()
+        Path("/target/remains/unchanged/oxide-harness/web-app.yaml").resolve()
     )
     assert config["target_repo"] == "/target/remains/unchanged"
 
@@ -711,7 +711,7 @@ def test_frozen_repository_workload_rejects_later_specification_commit(tmp_path:
         ["git", "-C", str(target), "config", "user.email", "test@example.com"],
         check=True,
     )
-    contract = target / "swarm-harness" / "web-app.yaml"
+    contract = target / "oxide-harness" / "web-app.yaml"
     contract.parent.mkdir()
     contract.write_text(_workload_text(), encoding="utf-8")
     subprocess.run(["git", "-C", str(target), "add", "."], check=True)
@@ -740,8 +740,8 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
 ) -> None:
     harness_root = Path(tempfile.mkdtemp(prefix="swr-", dir="/tmp"))
     request.addfinalizer(lambda: shutil.rmtree(harness_root, ignore_errors=True))
-    runs = harness_root / ".swarm" / "runs"
-    checkpoints = harness_root / ".swarm" / "checkpoints"
+    runs = harness_root / ".oxide" / "runs"
+    checkpoints = harness_root / ".oxide" / "checkpoints"
     run_dir = runs / "rewind"
     run_dir.mkdir(parents=True)
     target = tmp_path / "target"
@@ -753,7 +753,7 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         check=True,
     )
     (target / "README.md").write_text("base\n", encoding="utf-8")
-    contract = target / "swarm-harness" / "rewind.yaml"
+    contract = target / "oxide-harness" / "rewind.yaml"
     contract.parent.mkdir()
     contract.write_text(_workload_text(), encoding="utf-8")
     subprocess.run(["git", "-C", str(target), "add", "."], check=True)
@@ -771,13 +771,13 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         check=True,
     ).stdout.strip()
     blob = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", f"{base}:swarm-harness/rewind.yaml"],
+        ["git", "-C", str(target), "rev-parse", f"{base}:oxide-harness/rewind.yaml"],
         text=True,
         capture_output=True,
         check=True,
     ).stdout.strip()
     tree = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", f"{base}:swarm-harness"],
+        ["git", "-C", str(target), "rev-parse", f"{base}:oxide-harness"],
         text=True,
         capture_output=True,
         check=True,
@@ -806,16 +806,16 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         "epoch_frontiers": [],
         "replay_root": "a" * 32,
         "workload_ref": {
-            "schema": "SwarmWorkloadRefV1",
+            "schema": "OxideWorkloadRefV1",
             "target_repository": str(target.resolve()),
             "base_commit": base,
-            "workload_path": "swarm-harness/rewind.yaml",
+            "workload_path": "oxide-harness/rewind.yaml",
             "workload_blob": blob,
             "harness_tree": tree,
             "harness_version": "test-harness",
         },
         "harness_version": "test-harness",
-        "branch_prefix": f"codex/swarm-{run_id}",
+        "branch_prefix": f"codex/oxide-{run_id}",
         "concurrency_validation": {},
     }
     cli._atomic_json(run_dir / "run.json", config)
@@ -916,7 +916,7 @@ def test_every_workload_is_blocked_before_staging_without_a_qualified_receipt(
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=target, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=target, check=True)
-    contract = target / "swarm-harness" / "web-app.yaml"
+    contract = target / "oxide-harness" / "web-app.yaml"
     contract.parent.mkdir()
     contract.write_text(_workload_text(), encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=target, check=True)
@@ -964,24 +964,24 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
         ["git", "-C", str(target), "config", "user.email", "test@example.com"], check=True
     )
     (target / "README.md").write_text("fixture\n", encoding="utf-8")
-    contract = target / "swarm-harness" / "smoke.yaml"
+    contract = target / "oxide-harness" / "smoke.yaml"
     contract.parent.mkdir()
     contract.write_text(
         (ROOT / "tests" / "fixtures" / "workloads" / "smoke.yaml").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    subprocess.run(["git", "-C", str(target), "add", "README.md", "swarm-harness"], check=True)
+    subprocess.run(["git", "-C", str(target), "add", "README.md", "oxide-harness"], check=True)
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "seed"], check=True)
     receipt = _write_receipt(tmp_path / "validation", workers=4)
 
-    run_dir = ROOT / ".swarm" / "runs" / "smoke"
+    run_dir = ROOT / ".oxide" / "runs" / "smoke"
     assert not run_dir.exists()
     environment = os.environ.copy()
     environment["PATH"] = str(ROOT / "tests" / "fake-bin") + os.pathsep + environment["PATH"]
-    environment["SWARM_NO_TERMINAL"] = "1"
+    environment["OXIDE_NO_TERMINAL"] = "1"
     result = subprocess.run(
         [
-            str(ROOT / "swarmctl"),
+            str(ROOT / "oxide"),
             "harness",
             "run",
             "--workload",
@@ -1009,7 +1009,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     workload_ref = config["workload_ref"]
     assert workload_ref["target_repository"] == str(target.resolve())
     assert workload_ref["base_commit"] == config["base_commit"]
-    assert workload_ref["workload_path"] == "swarm-harness/smoke.yaml"
+    assert workload_ref["workload_path"] == "oxide-harness/smoke.yaml"
     assert (
         workload_ref["workload_blob"]
         == subprocess.run(
@@ -1018,7 +1018,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
                 "-C",
                 str(target),
                 "rev-parse",
-                f"{config['base_commit']}:swarm-harness/smoke.yaml",
+                f"{config['base_commit']}:oxide-harness/smoke.yaml",
             ],
             text=True,
             capture_output=True,
@@ -1028,7 +1028,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     assert (
         workload_ref["harness_tree"]
         == subprocess.run(
-            ["git", "-C", str(target), "rev-parse", f"{config['base_commit']}:swarm-harness"],
+            ["git", "-C", str(target), "rev-parse", f"{config['base_commit']}:oxide-harness"],
             text=True,
             capture_output=True,
             check=True,
@@ -1037,7 +1037,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     assert workload_ref["harness_version"] == config["harness_version"]
     assert config["required_reviews"] == 3
     assert "integration_branch" not in config
-    assert config["branch_prefix"].startswith("codex/swarm-smoke-")
+    assert config["branch_prefix"].startswith("codex/oxide-smoke-")
     assert (
         subprocess.run(
             [
@@ -1088,7 +1088,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
             config["base_commit"],
             target_tip,
             "--",
-            "swarm-harness",
+            "oxide-harness",
         ],
         text=True,
         capture_output=True,
@@ -1124,7 +1124,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     assert "Finished verification" not in worker_logs
 
     reset = subprocess.run(
-        [str(ROOT / "swarmctl"), "harness", "reset", "--workload", "smoke"],
+        [str(ROOT / "oxide"), "harness", "reset", "--workload", "smoke"],
         cwd=ROOT,
         env=environment,
         text=True,

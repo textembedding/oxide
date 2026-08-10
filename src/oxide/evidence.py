@@ -140,7 +140,7 @@ def begin_attempt(root: Path, requirement: dict[str, Any], attempt: str) -> None
     _atomic_json(
         root / "attempts" / f"{attempt}.json",
         {
-            "schema": "SwarmCheckAttemptV1",
+            "schema": "OxideCheckAttemptV1",
             "state": "running",
             "evidence_key": key,
             "requirement": requirement,
@@ -198,7 +198,7 @@ def finish_attempt(
     if any(not artifact["stored"] for artifact in artifacts):
         result = "infrastructure_failure"
     receipt = {
-        "schema": "SwarmCheckEvidenceV1",
+        "schema": "OxideCheckEvidenceV1",
         "evidence_key": key,
         "requirement": requirement,
         "execution_attempt": attempt,
@@ -220,7 +220,7 @@ def finish_attempt(
     _atomic_json(
         root / "attempts" / f"{attempt}.json",
         {
-            "schema": "SwarmCheckAttemptV1",
+            "schema": "OxideCheckAttemptV1",
             "state": "completed",
             "evidence_key": key,
             "execution_attempt": attempt,
@@ -232,7 +232,7 @@ def finish_attempt(
         _atomic_json(
             root / "by-key" / f"{key.removeprefix('sha256:')}.json",
             {
-                "schema": "SwarmCheckEvidencePointerV1",
+                "schema": "OxideCheckEvidencePointerV1",
                 "evidence_key": key,
                 "receipt_sha256": receipt_digest,
             },
@@ -259,11 +259,11 @@ def load_terminal_receipt(
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise EvidenceError("terminal check receipt is unreadable") from error
     if (
-        pointer.get("schema") != "SwarmCheckEvidencePointerV1"
+        pointer.get("schema") != "OxideCheckEvidencePointerV1"
         or pointer.get("evidence_key") != key
         or not digest.startswith("sha256:")
         or sha256_bytes(encoded) != digest
-        or receipt.get("schema") != "SwarmCheckEvidenceV1"
+        or receipt.get("schema") != "OxideCheckEvidenceV1"
         or receipt.get("evidence_key") != key
         or receipt.get("requirement") != requirement
         or receipt.get("result") not in {"passed", "product_failure"}

@@ -1,6 +1,6 @@
 """Backend-neutral ADD/SEARCH contract tests.
 
-Set SWARM_CONFORMANCE_JOURNAL_COMMAND to run this identical suite against an
+Set OXIDE_CONFORMANCE_JOURNAL_COMMAND to run this identical suite against an
 external adapter.  With no command it exercises the disposable Python MVP.
 """
 
@@ -14,17 +14,17 @@ from pathlib import Path
 
 import pytest
 
-from swarm_harness.journal_backend import (
+from oxide.journal_backend import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_MIN_EXACT,
     JournalError,
     start_journal,
 )
-from swarm_harness.workflow import WorkflowClient
+from oxide.workflow import WorkflowClient
 
 
 def _command() -> list[str] | None:
-    value = os.environ.get("SWARM_CONFORMANCE_JOURNAL_COMMAND", "")
+    value = os.environ.get("OXIDE_CONFORMANCE_JOURNAL_COMMAND", "")
     return shlex.split(value) or None
 
 
@@ -35,7 +35,7 @@ def _backend(
     min_exact: int = DEFAULT_MIN_EXACT,
     max_results: int = DEFAULT_MAX_RESULTS,
 ):
-    socket = Path("/tmp") / f"swarm-contract-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-contract-{secrets.token_hex(8)}.sock"
     runtime = start_journal(
         root / "journal.store",
         socket,
@@ -60,7 +60,7 @@ def test_acknowledged_add_survives_restart_with_stable_identity_and_sequence(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "journal.store"
-    socket = Path("/tmp") / f"swarm-contract-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-contract-{secrets.token_hex(8)}.sock"
     first = start_journal(database, socket, _command())
     added = first.client.add("restart", "worker", "durable exact anchor")
     before = first.client.search("restart", "durable exact anchor")
@@ -79,7 +79,7 @@ def test_acknowledged_add_survives_restart_with_stable_identity_and_sequence(
 
 def test_custom_capacity_is_preserved_when_backend_restarts(tmp_path: Path) -> None:
     database = tmp_path / "journal.store"
-    socket = Path("/tmp") / f"swarm-contract-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-contract-{secrets.token_hex(8)}.sock"
     first = start_journal(
         database,
         socket,
@@ -138,7 +138,7 @@ def test_custom_capacity_and_fewer_than_floor_exact_matches(tmp_path: Path) -> N
 def test_invalid_authoritative_capacity_fails_closed(
     tmp_path: Path, min_exact: int, max_results: int
 ) -> None:
-    socket = Path("/tmp") / f"swarm-contract-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-contract-{secrets.token_hex(8)}.sock"
     with pytest.raises(JournalError, match="1 <= min_exact <= max_results"):
         start_journal(
             tmp_path / "invalid.store",
@@ -211,12 +211,12 @@ def test_semantic_only_result_does_not_make_exact_replay_partition_nonempty(
     tmp_path: Path,
 ) -> None:
     replay_root = "a" * 32
-    query = f"swarm-routing:{replay_root}:"
+    query = f"oxide-routing:{replay_root}:"
     with _backend(tmp_path) as runtime:
         runtime.client.add(
             "empty-partition",
             "worker",
-            f"swarm-routing related {replay_root} concept",
+            f"oxide-routing related {replay_root} concept",
         )
         client = WorkflowClient(runtime.client, replay_root=replay_root)
         exact, returned = client._partition_records("empty-partition", "")
@@ -240,10 +240,10 @@ def test_large_replay_uses_one_exact_anchor_per_partition_without_wildcard_or_pa
             "text": "\n".join(
                 (
                     f"evidence: {ordinal}",
-                    f"swarm-run:{namespace}",
-                    "swarm-epoch:0",
-                    f"swarm-stable:{ordinal:032x}",
-                    f"swarm-routing:{replay_root}:{ordinal:064b}",
+                    f"oxide-run:{namespace}",
+                    "oxide-epoch:0",
+                    f"oxide-stable:{ordinal:032x}",
+                    f"oxide-routing:{replay_root}:{ordinal:064b}",
                 )
             ),
             "created_at": float(ordinal),
@@ -259,11 +259,11 @@ def test_large_replay_uses_one_exact_anchor_per_partition_without_wildcard_or_pa
         "author": "memory",
         "text": "\n".join(
             (
-                f"swarm-routing related {replay_root} concept",
-                f"swarm-run:{namespace}",
-                "swarm-epoch:0",
-                f"swarm-stable:{'f' * 32}",
-                f"swarm-routing:{'c' * 32}:{1:064b}",
+                f"oxide-routing related {replay_root} concept",
+                f"oxide-run:{namespace}",
+                "oxide-epoch:0",
+                f"oxide-stable:{'f' * 32}",
+                f"oxide-routing:{'c' * 32}:{1:064b}",
             )
         ),
         "created_at": 2_000_000.0,
@@ -288,13 +288,13 @@ def test_large_replay_uses_one_exact_anchor_per_partition_without_wildcard_or_pa
     assert [item["journal_sequence"] for item in recovered] == list(range(1, 1_026))
     assert len({item["stable_id"] for item in recovered}) == 1_025
     assert backend.queries
-    assert all(query.startswith(f"swarm-routing:{replay_root}:") for query in backend.queries)
+    assert all(query.startswith(f"oxide-routing:{replay_root}:") for query in backend.queries)
     assert all("*" not in query for query in backend.queries)
 
 
 def test_minimum_exact_floor_replays_identical_workflow_after_restart(tmp_path: Path) -> None:
     database = tmp_path / "journal.store"
-    socket = Path("/tmp") / f"swarm-contract-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-contract-{secrets.token_hex(8)}.sock"
     workload = {
         "stage": "contract",
         "enabled": True,
@@ -311,7 +311,7 @@ def test_minimum_exact_floor_replays_identical_workflow_after_restart(tmp_path: 
         ],
         "stage_gate": ["test all"],
     }
-    reference = {"schema": "SwarmWorkloadRefV1", "workload_blob": "fixture"}
+    reference = {"schema": "OxideWorkloadRefV1", "workload_blob": "fixture"}
     replay_root = "a" * 32
     first = start_journal(
         database,

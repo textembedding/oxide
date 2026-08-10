@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "swarm-harness"
+name = "oxide"
 version = "0.0.1"
 description = "Local spec-driven multi-agent implementation harness"
 requires-python = ">=3.11"
@@ -13,10 +13,10 @@ dependencies = ["Pygments>=2.19", "PyYAML>=6.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
-swarmctl = "swarm_harness.cli:main"
+oxide = "oxide.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/swarm_harness"]
+packages = ["src/oxide"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

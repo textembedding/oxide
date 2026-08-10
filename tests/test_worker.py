@@ -5,14 +5,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from swarm_harness.evidence import (
+from oxide.evidence import (
     begin_attempt,
     evidence_key,
     finish_attempt,
     load_terminal_receipt,
 )
-from swarm_harness.journal_backend import JournalError
-from swarm_harness.worker import Worker
+from oxide.journal_backend import JournalError
+from oxide.worker import Worker
 
 
 class SearchOnlyClient:
@@ -79,7 +79,7 @@ def test_worker_host_uses_only_search_and_codex_gets_exact_two_tools(
     fake.write_text(
         """import json, os, sys
 from pathlib import Path
-Path(os.environ['CAPTURE']).write_text(json.dumps({'argv': sys.argv[1:], 'env': {key: value for key, value in os.environ.items() if key.startswith('SWARM_')}}))
+Path(os.environ['CAPTURE']).write_text(json.dumps({'argv': sys.argv[1:], 'env': {key: value for key, value in os.environ.items() if key.startswith('OXIDE_')}}))
 print(json.dumps({'type':'turn.completed'}))
 """,
         encoding="utf-8",
@@ -107,11 +107,11 @@ print(json.dumps({'type':'turn.completed'}))
     assert str((tmp_path / ".git").resolve()) in joined
     assert str((Path.home() / ".docker" / "run").resolve()) in joined
     assert set(record["env"]) == {
-        "SWARM_JOURNAL_SOCKET",
-        "SWARM_RUN_CONFIG",
-        "SWARM_RUN_EPOCH",
-        "SWARM_RUN_ID",
-        "SWARM_WORKER_ID",
+        "OXIDE_JOURNAL_SOCKET",
+        "OXIDE_RUN_CONFIG",
+        "OXIDE_RUN_EPOCH",
+        "OXIDE_RUN_ID",
+        "OXIDE_WORKER_ID",
     }
     prompt = record["argv"][-1]
     assert "queue:ready" in prompt
@@ -218,7 +218,7 @@ def test_acceptance_check_runs_once_and_retries_only_terminal_publication(tmp_pa
         "artifacts": [],
     }
     requirement = {
-        "schema": "SwarmCheckRequirementV1",
+        "schema": "OxideCheckRequirementV1",
         "candidate": {"base": head, "commit": head, "tree": tree},
         "check": check,
         "qualification": {
@@ -289,7 +289,7 @@ def test_required_machine_receipt_fails_closed_and_valid_receipt_is_preserved(
             "receipt_required": True,
         }
         requirement = {
-            "schema": "SwarmCheckRequirementV1",
+            "schema": "OxideCheckRequirementV1",
             "candidate": {"base": head, "commit": head, "tree": tree},
             "check": check,
             "qualification": {
@@ -332,7 +332,7 @@ def test_required_machine_receipt_fails_closed_and_valid_receipt_is_preserved(
     assert missing.records[0].startswith(f"verify-infrastructure: verify:A:{head}:1\n")
 
     valid, evidence_root = run(
-        'printf \'{"schema":"ProductProofReceiptV1"}\\n\' > "$SWARM_EVIDENCE_RECEIPT"',
+        'printf \'{"schema":"ProductProofReceiptV1"}\\n\' > "$OXIDE_EVIDENCE_RECEIPT"',
         "valid",
     )
     assert valid.records[0].startswith(f"verify-pass: verify:A:{head}:1\n")
@@ -346,7 +346,7 @@ def test_required_machine_receipt_fails_closed_and_valid_receipt_is_preserved(
 def test_persisted_receipt_is_reusable_only_by_its_exact_execution_attempt(
     tmp_path: Path,
 ) -> None:
-    requirement = {"schema": "SwarmCheckRequirementV1", "candidate": "exact"}
+    requirement = {"schema": "OxideCheckRequirementV1", "candidate": "exact"}
     root = tmp_path / "evidence"
     stdout = tmp_path / "stdout"
     stderr = tmp_path / "stderr"

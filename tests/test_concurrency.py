@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from swarm_harness.concurrency import (
+from oxide.concurrency import (
     ROLES,
     ConcurrencyError,
     kernel_digest,
@@ -84,13 +84,13 @@ def test_real_multiprocess_claim_crash_and_replay_campaign(tmp_path: Path) -> No
 
 
 def test_bound_receipt_survives_workspace_relocation(tmp_path: Path) -> None:
-    original = tmp_path / "old" / ".swarm" / "validation"
+    original = tmp_path / "old" / ".oxide" / "validation"
     report = run_campaign(ROOT, original, workers=2, rounds=1, seed=442, log=lambda _: None)
     original_report = Path(report["report_path"])
     relocated_root = tmp_path / "new"
     relocated = (
         relocated_root
-        / ".swarm"
+        / ".oxide"
         / "validation"
         / original_report.parent.name
         / original_report.name

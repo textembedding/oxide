@@ -122,7 +122,7 @@ def _wait_until_ready(socket_path: Path, process: subprocess.Popen[bytes], timeo
         if socket_path.exists():
             try:
                 connect_journal(socket_path, timeout=0.5).search(
-                    "swarm-health", "swarm-health-probe"
+                    "oxide-health", "oxide-health-probe"
                 )
                 return
             except (JournalError, OSError):
@@ -177,10 +177,10 @@ def start_journal(
     environment = os.environ.copy()
     environment.update(
         {
-            "SWARM_JOURNAL_DATABASE": str(Path(database).resolve()),
-            "SWARM_JOURNAL_SOCKET": str(socket.resolve()),
-            "SWARM_JOURNAL_MIN_EXACT": str(min_exact),
-            "SWARM_JOURNAL_MAX_RESULTS": str(max_results),
+            "OXIDE_JOURNAL_DATABASE": str(Path(database).resolve()),
+            "OXIDE_JOURNAL_SOCKET": str(socket.resolve()),
+            "OXIDE_JOURNAL_MIN_EXACT": str(min_exact),
+            "OXIDE_JOURNAL_MAX_RESULTS": str(max_results),
         }
     )
     socket.unlink(missing_ok=True)

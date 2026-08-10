@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from swarm_harness.journal import Journal, JournalClient, JournalError, serve_in_thread
-from swarm_harness.workflow import WorkflowClient, WorkflowError, WorkflowReducer
+from oxide.journal import Journal, JournalClient, JournalError, serve_in_thread
+from oxide.workflow import WorkflowClient, WorkflowError, WorkflowReducer
 
 
 def _stage() -> dict:
@@ -40,7 +40,7 @@ def _stage() -> dict:
 
 
 def _socket() -> Path:
-    return Path("/tmp") / f"swarm-test-{secrets.token_hex(8)}.sock"
+    return Path("/tmp") / f"oxide-test-{secrets.token_hex(8)}.sock"
 
 
 def _client(socket: Path | str) -> WorkflowClient:
@@ -68,7 +68,7 @@ def _bootstrap(client: WorkflowClient, run_id: str, stage: dict | None = None) -
     if stage is not None:
         client._workload = stage
         client.workload_ref = {
-            "schema": "SwarmWorkloadRefV1",
+            "schema": "OxideWorkloadRefV1",
             "workload_blob": hashlib.sha256(
                 json.dumps(stage, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
@@ -255,7 +255,7 @@ def test_bootstrap_cites_frozen_workload_without_journalizing_specification(
 
 def test_epoch_frontiers_never_rehabilitate_a_previously_stale_record() -> None:
     stage = _stage()
-    reference = {"schema": "SwarmWorkloadRefV1", "workload_blob": "fixture"}
+    reference = {"schema": "OxideWorkloadRefV1", "workload_blob": "fixture"}
     replay_root = "a" * 32
 
     def record(sequence: int, epoch: int, body: str) -> dict:
@@ -268,10 +268,10 @@ def test_epoch_frontiers_never_rehabilitate_a_previously_stale_record() -> None:
             "text": "\n".join(
                 (
                     body,
-                    "swarm-run:run",
-                    f"swarm-epoch:{epoch}",
-                    f"swarm-stable:{sequence:032x}",
-                    f"swarm-routing:{replay_root}:{sequence:064b}",
+                    "oxide-run:run",
+                    f"oxide-epoch:{epoch}",
+                    f"oxide-stable:{sequence:032x}",
+                    f"oxide-routing:{replay_root}:{sequence:064b}",
                 )
             ),
             "created_at": float(sequence),
@@ -309,10 +309,10 @@ def test_workflow_replay_recovers_every_record_beyond_search_result_caps() -> No
             "text": "\n".join(
                 (
                     f"audit: {index}",
-                    "swarm-run:product",
-                    "swarm-epoch:0",
-                    f"swarm-stable:{index:032x}",
-                    f"swarm-routing:{replay_root}:{index:064b}",
+                    "oxide-run:product",
+                    "oxide-epoch:0",
+                    f"oxide-stable:{index:032x}",
+                    f"oxide-routing:{replay_root}:{index:064b}",
                 )
             ),
             "created_at": float(index),
@@ -329,10 +329,10 @@ def test_workflow_replay_recovers_every_record_beyond_search_result_caps() -> No
         "text": "\n".join(
             (
                 "related replay routing concept",
-                "swarm-run:product",
-                "swarm-epoch:0",
-                f"swarm-stable:{9_999:032x}",
-                f"swarm-routing:{'b' * 32}:{9_999:064b}",
+                "oxide-run:product",
+                "oxide-epoch:0",
+                f"oxide-stable:{9_999:032x}",
+                f"oxide-routing:{'b' * 32}:{9_999:064b}",
             )
         ),
         "created_at": 99_999.0,
@@ -368,10 +368,10 @@ def test_semantic_noise_does_not_make_an_empty_replay_partition_nonempty() -> No
         "text": "\n".join(
             (
                 "semantically related routing memory",
-                "swarm-run:run",
-                "swarm-epoch:0",
-                f"swarm-stable:{1:032x}",
-                f"swarm-routing:{'b' * 32}:{1:064b}",
+                "oxide-run:run",
+                "oxide-epoch:0",
+                f"oxide-stable:{1:032x}",
+                f"oxide-routing:{'b' * 32}:{1:064b}",
             )
         ),
         "created_at": 1.0,
@@ -383,7 +383,7 @@ def test_semantic_noise_does_not_make_an_empty_replay_partition_nonempty() -> No
 
         def search(self, namespace: str, query: str) -> list[dict]:
             assert namespace == "run"
-            assert query.startswith(f"swarm-routing:{replay_root}:")
+            assert query.startswith(f"oxide-routing:{replay_root}:")
             return [noise]
 
     client = WorkflowClient(SemanticOnlyPort(), replay_root=replay_root)  # type: ignore[arg-type]

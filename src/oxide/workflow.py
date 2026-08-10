@@ -36,10 +36,10 @@ _RECLAIM = re.compile(r"^control: reclaim worker:([^\s:]+)$")
 _REVIEW_ROLES = ("specification", "adversarial", "integration")
 _REPLAY_FANOUT = "01"
 _REPLAY_WIDTH = 64
-_ROUTING = re.compile(r"^swarm-routing:([0-9a-f]{32}):([01]{64})$")
-_RUN = re.compile(r"^swarm-run:(.+)$")
-_EPOCH = re.compile(r"^swarm-epoch:(\d+)$")
-_STABLE = re.compile(r"^swarm-stable:([0-9a-f]{32})$")
+_ROUTING = re.compile(r"^oxide-routing:([0-9a-f]{32}):([01]{64})$")
+_RUN = re.compile(r"^oxide-run:(.+)$")
+_EPOCH = re.compile(r"^oxide-epoch:(\d+)$")
+_STABLE = re.compile(r"^oxide-stable:([0-9a-f]{32})$")
 
 
 def _compact(value: object) -> str:
@@ -409,7 +409,7 @@ class WorkflowReducer:
             raw_checks = source.get("checks", [])
             branch = str(
                 source.get("branch")
-                or f"codex/swarm-{_slug(view.namespace)}/{_slug(str(source['id']))}"
+                or f"codex/oxide-{_slug(view.namespace)}/{_slug(str(source['id']))}"
             )
             if (
                 not isinstance(dependencies, list)
@@ -635,7 +635,7 @@ class WorkflowReducer:
         workload = view.workload_ref or {}
         checker = workload.get("checker") if isinstance(workload.get("checker"), dict) else {}
         return {
-            "schema": "SwarmCheckRequirementV1",
+            "schema": "OxideCheckRequirementV1",
             "run_id": view.namespace,
             "epoch": view.epoch,
             "workload": {
@@ -1396,7 +1396,7 @@ class WorkflowClient:
         self._workload = workload
         self.workload_ref = workload_ref or (
             {
-                "schema": "SwarmWorkloadRefV1",
+                "schema": "OxideWorkloadRefV1",
                 "workload_blob": hashlib.sha256(_compact(workload).encode()).hexdigest(),
             }
             if workload is not None
@@ -1450,7 +1450,7 @@ class WorkflowClient:
         self, namespace: str, prefix: str
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         root = self._root(namespace)
-        query = f"swarm-routing:{root}:{prefix}"
+        query = f"oxide-routing:{root}:{prefix}"
         returned = self.journal.search(namespace, query)
         exact: list[dict[str, Any]] = []
         for record in returned:
@@ -1683,17 +1683,17 @@ class WorkflowClient:
             routed = "\n".join(
                 (
                     text.rstrip(),
-                    f"swarm-run:{namespace}",
-                    f"swarm-epoch:{self.epoch}",
-                    f"swarm-stable:{stable_id}",
-                    f"swarm-routing:{root}:{replay_id}",
+                    f"oxide-run:{namespace}",
+                    f"oxide-epoch:{self.epoch}",
+                    f"oxide-stable:{stable_id}",
+                    f"oxide-routing:{root}:{replay_id}",
                 )
             )
             stored = self.journal.add(namespace, author, routed)
             record_id = int(stored["record_id"])
             exact = [
                 record
-                for record in self.journal.search(namespace, f"swarm-stable:{stable_id}")
+                for record in self.journal.search(namespace, f"oxide-stable:{stable_id}")
                 if (_record_route(record) or {}).get("stable_id") == stable_id
             ]
             if len(exact) != 1:

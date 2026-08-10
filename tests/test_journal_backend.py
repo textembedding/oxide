@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from swarm_harness.journal_backend import start_journal
+from oxide.journal_backend import start_journal
 
 
 def test_importing_backend_does_not_load_python_prototype() -> None:
@@ -14,8 +14,8 @@ def test_importing_backend_does_not_load_python_prototype() -> None:
             sys.executable,
             "-c",
             (
-                "import sys; import swarm_harness.journal_backend; "
-                "assert 'swarm_harness.journal' not in sys.modules"
+                "import sys; import oxide.journal_backend; "
+                "assert 'oxide.journal' not in sys.modules"
             ),
         ],
         check=False,
@@ -32,7 +32,7 @@ def test_external_backend_is_selected_through_fixed_port(tmp_path: Path) -> None
 import json, os, socketserver, threading, time
 records = []
 lock = threading.Lock()
-max_results = int(os.environ['SWARM_JOURNAL_MAX_RESULTS'])
+max_results = int(os.environ['OXIDE_JOURNAL_MAX_RESULTS'])
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         request = json.loads(self.rfile.readline())
@@ -52,12 +52,12 @@ class Handler(socketserver.StreamRequestHandler):
         self.wfile.write((json.dumps(response) + '\\n').encode())
 class Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
-server = Server(os.environ['SWARM_JOURNAL_SOCKET'], Handler)
+server = Server(os.environ['OXIDE_JOURNAL_SOCKET'], Handler)
 server.serve_forever()
 """,
         encoding="utf-8",
     )
-    socket = Path("/tmp") / f"swarm-external-{secrets.token_hex(8)}.sock"
+    socket = Path("/tmp") / f"oxide-external-{secrets.token_hex(8)}.sock"
     runtime = start_journal(
         tmp_path / "external.sqlite3",
         socket,

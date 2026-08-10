@@ -14,7 +14,7 @@ class Mcp:
     def __init__(self) -> None:
         harness_python = Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"
         self.process = subprocess.Popen(
-            [str(harness_python), "-m", "swarm_harness.journal_mcp"],
+            [str(harness_python), "-m", "oxide.journal_mcp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -88,15 +88,15 @@ def author(mcp: Mcp, item: str, task: str, target_branch: str) -> None:
     git("fetch", "origin")
     main_ref = f"refs/remotes/origin/{target_branch}"
     base = git("rev-parse", main_ref)
-    remote_pr = "refs/remotes/origin/swarm-pr"
+    remote_pr = "refs/remotes/origin/oxide-pr"
     git("update-ref", "-d", remote_pr, check=False)
     git("fetch", "origin", f"refs/heads/{branch}:{remote_pr}", check=False)
     if git("rev-parse", "--verify", remote_pr, check=False):
-        git("checkout", "-B", "swarm-work", remote_pr)
+        git("checkout", "-B", "oxide-work", remote_pr)
         if role == "revision":
             git("merge", "--no-edit", main_ref)
     else:
-        git("checkout", "-B", "swarm-work", main_ref)
+        git("checkout", "-B", "oxide-work", main_ref)
 
     mcp.tool("journal_add", block("text", f"checkpoint: task:{task}\nfixture edit written"))
     output = Path("toy-output")
@@ -140,7 +140,7 @@ def review(mcp: Mcp, item: str, task: str) -> None:
     head = str(field(item, "head_sha"))
     generation = int(field(item, "generation"))
     ordinal = int(field(item, "review_ordinal"))
-    remote_pr = "refs/remotes/origin/swarm-pr"
+    remote_pr = "refs/remotes/origin/oxide-pr"
     git("fetch", "origin", f"refs/heads/{branch}:{remote_pr}")
     if git("rev-parse", remote_pr) != head:
         raise RuntimeError("review fixture observed a different PR head")

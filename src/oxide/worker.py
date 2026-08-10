@@ -160,7 +160,7 @@ class Worker:
     def _prompt(self) -> str:
         ordinal = int(self.worker_id.rsplit("-", 1)[-1])
         return (
-            f"Perform exactly one journal-assigned role as {self.worker_id}.\nThe journal is the entire coordination interface between workers. journal_search and journal_add are the only journal operations. Use repository, Git, shell, and test tools normally for the assigned role; never inspect the harness, journal socket, or journal database by shell. Treat the repository's swarm-harness directory as immutable workload input, never as product implementation.\n"
+            f"Perform exactly one journal-assigned role as {self.worker_id}.\nThe journal is the entire coordination interface between workers. journal_search and journal_add are the only journal operations. Use repository, Git, shell, and test tools normally for the assigned role; never inspect the harness, journal socket, or journal database by shell. Treat the repository's oxide-harness directory as immutable workload input, never as product implementation.\n"
             "SEARCH returns one bounded union of exact and threshold-eligible semantic records. The configured exact floor preserves exact anchors when available, but one response is not necessarily exhaustive. Results are ordered only by journal sequence; semantic score never controls position. Use match_kind and stored routing metadata to distinguish exact records, and use returned task IDs, errors, hashes, decisions, components, or concepts for iterative follow-up searches. Absence from an ordinary natural-language search is not proof that no record exists.\n"
             f"1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, rotate the complete ready list left by {ordinal} modulo its length, and journal_add exact claims until accepted.\n2. Orient only with records bound to the assignment: REVISION searches `review:<root_task_id>:<generation>` and `verify:<root_task_id>:<head_sha>`; INTERNAL REVIEW searches the exact assigned `head_sha` and any returned acceptance-result identities; MERGE searches `review:<root_task_id>:<generation>`. Never assume one bounded response exhausts assignment history; follow useful returned identifiers with more specific searches.\n"
             "3. Keep the shared truth current with substantive work records. Immediately after orientation or a new finding, before and after a material command or diagnostic, and after each durable edit, add `work-log: <claim identity after claim: >`, `phase: <oriented|diagnosed|editing|checking|check-result|ready>`, and one concise concrete `evidence:` fact. Never add timer, heartbeat, elapsed-time, or empty progress records. Re-search the exact claim after each work-log.\n4. Follow the assigned role. A fresh session may receive any role. Acceptance-check assignments are executed directly by the qualified harness process against the immutable candidate; they never require a model session.\n"
@@ -175,11 +175,11 @@ class Worker:
         python = str(Path(sys.executable).absolute())
         forwarded = [
             "PYTHONPATH",
-            "SWARM_JOURNAL_SOCKET",
-            "SWARM_RUN_ID",
-            "SWARM_WORKER_ID",
-            "SWARM_RUN_CONFIG",
-            "SWARM_RUN_EPOCH",
+            "OXIDE_JOURNAL_SOCKET",
+            "OXIDE_RUN_ID",
+            "OXIDE_WORKER_ID",
+            "OXIDE_RUN_CONFIG",
+            "OXIDE_RUN_EPOCH",
         ]
         writable = [
             str((self.repository / ".git").resolve()),
@@ -190,10 +190,10 @@ class Worker:
             'approval_policy="never"',
             'web_search="disabled"',
             "sandbox_workspace_write.network_access=true",
-            'shell_environment_policy.exclude=["SWARM_*"]',
+            'shell_environment_policy.exclude=["OXIDE_*"]',
             f"sandbox_workspace_write.writable_roots={json.dumps(writable)}",
             f"mcp_servers.journal.command={json.dumps(python)}",
-            'mcp_servers.journal.args=["-m","swarm_harness.journal_mcp"]',
+            'mcp_servers.journal.args=["-m","oxide.journal_mcp"]',
             f"mcp_servers.journal.env_vars={json.dumps(forwarded)}",
             "mcp_servers.journal.required=true",
             'mcp_servers.journal.enabled_tools=["journal_add","journal_search"]',
@@ -371,13 +371,13 @@ class Worker:
                 )
                 environment.update(
                     {
-                        "SWARM_FROZEN_CHECKER_ROOT": str(self.checker_root or ""),
-                        "SWARM_CANDIDATE_COMMIT": head,
-                        "SWARM_CANDIDATE_TREE": tree,
-                        "SWARM_PROSPECTIVE_COMMIT": head,
-                        "SWARM_PROSPECTIVE_TREE": tree,
-                        "SWARM_EVIDENCE_RECEIPT": str(declared / "receipt.json"),
-                        "SWARM_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
+                        "OXIDE_FROZEN_CHECKER_ROOT": str(self.checker_root or ""),
+                        "OXIDE_CANDIDATE_COMMIT": head,
+                        "OXIDE_CANDIDATE_TREE": tree,
+                        "OXIDE_PROSPECTIVE_COMMIT": head,
+                        "OXIDE_PROSPECTIVE_TREE": tree,
+                        "OXIDE_EVIDENCE_RECEIPT": str(declared / "receipt.json"),
+                        "OXIDE_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
                     }
                 )
                 self.log(f"ACCEPTANCE CHECK STARTED {claim.removeprefix('claim: ')}\n{command}")
@@ -520,11 +520,11 @@ class Worker:
         environment.update(
             {
                 "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
-                "SWARM_JOURNAL_SOCKET": self.journal_socket,
-                "SWARM_RUN_ID": self.run_id,
-                "SWARM_WORKER_ID": self.worker_id,
-                "SWARM_RUN_CONFIG": str(self.run_config) if self.run_config else "",
-                "SWARM_RUN_EPOCH": str(self.epoch),
+                "OXIDE_JOURNAL_SOCKET": self.journal_socket,
+                "OXIDE_RUN_ID": self.run_id,
+                "OXIDE_WORKER_ID": self.worker_id,
+                "OXIDE_RUN_CONFIG": str(self.run_config) if self.run_config else "",
+                "OXIDE_RUN_EPOCH": str(self.epoch),
             }
         )
         process = subprocess.Popen(

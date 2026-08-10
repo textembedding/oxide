@@ -50,9 +50,9 @@ from .worker import Worker, worktree_diff
 from .workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNS = ROOT / ".swarm" / "runs"
-CHECKPOINTS = ROOT / ".swarm" / "checkpoints"
-TARGET_HARNESS_DIRECTORY = "swarm-harness"
+RUNS = ROOT / ".oxide" / "runs"
+CHECKPOINTS = ROOT / ".oxide" / "checkpoints"
+TARGET_HARNESS_DIRECTORY = "oxide-harness"
 _WORKLOAD_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -273,7 +273,7 @@ def _frozen_workload_ref(
     blob = _git(target, "rev-parse", f"{base_commit}:{relative}")
     tree = _git(target, "rev-parse", f"{base_commit}:{TARGET_HARNESS_DIRECTORY}")
     result: dict[str, Any] = {
-        "schema": "SwarmWorkloadRefV1",
+        "schema": "OxideWorkloadRefV1",
         "target_repository": _repository_identity(target),
         "base_commit": base_commit,
         "workload_path": relative,
@@ -285,7 +285,7 @@ def _frozen_workload_ref(
     if isinstance(checker, dict):
         entries = _checker_entries(target, base_commit, list(checker["paths"]))
         result["checker"] = {
-            "schema": "SwarmFrozenCheckerV1",
+            "schema": "OxideFrozenCheckerV1",
             "paths": list(checker["paths"]),
             "entries": entries,
             "closure_sha256": sha256_bytes(canonical_bytes(entries)),
@@ -434,7 +434,7 @@ def _load_config(workload: str) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise HarnessError("run configuration must be an object")
     run_id = config.get("run_id")
-    expected_prefix = f"codex/swarm-{_slug(str(run_id))}"
+    expected_prefix = f"codex/oxide-{_slug(str(run_id))}"
     if (
         config.get("schema_version") != 8
         or config.get("workload") != workload
@@ -496,7 +496,7 @@ def _atomic_json(path: Path, value: object) -> None:
 
 @contextmanager
 def _exclusive_run(workload: str):
-    path = ROOT / ".swarm" / "locks" / f"{workload}.lock"
+    path = ROOT / ".oxide" / "locks" / f"{workload}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -603,7 +603,7 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
                 raise HarnessError(result.stderr.strip() or "could not clone worker repository")
         _git(clone, "config", "user.name", identity["name"])
         _git(clone, "config", "user.email", identity["email"])
-        remote = "refs/remotes/origin/swarm-base"
+        remote = "refs/remotes/origin/oxide-base"
         _git(
             clone,
             "fetch",
@@ -611,7 +611,7 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
             f"refs/heads/{config['target_branch']}:{remote}",
         )
         if not _git(clone, "status", "--porcelain=v1", "--untracked-files=all"):
-            _git(clone, "checkout", "-B", "swarm-worker", remote)
+            _git(clone, "checkout", "-B", "oxide-worker", remote)
 
 
 def _run_checks(
@@ -665,13 +665,13 @@ def _run_qualified_commands(
         environment = os.environ.copy()
         environment.update(
             {
-                "SWARM_FROZEN_CHECKER_ROOT": str(config["checker_root"]),
-                "SWARM_CANDIDATE_COMMIT": candidate_commit,
-                "SWARM_CANDIDATE_TREE": candidate_tree,
-                "SWARM_PROSPECTIVE_COMMIT": prospective_commit,
-                "SWARM_PROSPECTIVE_TREE": prospective_tree,
-                "SWARM_EVIDENCE_RECEIPT": str(declared / "receipt.json"),
-                "SWARM_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
+                "OXIDE_FROZEN_CHECKER_ROOT": str(config["checker_root"]),
+                "OXIDE_CANDIDATE_COMMIT": candidate_commit,
+                "OXIDE_CANDIDATE_TREE": candidate_tree,
+                "OXIDE_PROSPECTIVE_COMMIT": prospective_commit,
+                "OXIDE_PROSPECTIVE_TREE": prospective_tree,
+                "OXIDE_EVIDENCE_RECEIPT": str(declared / "receipt.json"),
+                "OXIDE_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
             }
         )
         script = "set -e\n" + "\n".join(commands)
@@ -751,7 +751,7 @@ def _qualify_checker(config: dict[str, Any], stage: dict[str, Any]) -> None:
         _git(repository, "checkout", "--detach", str(config["base_commit"]))
         tree = _git(repository, "rev-parse", "HEAD^{tree}")
         requirement = {
-            "schema": "SwarmCheckerQualificationV1",
+            "schema": "OxideCheckerQualificationV1",
             "run_id": config["run_id"],
             "base_commit": config["base_commit"],
             "base_tree": tree,
@@ -888,7 +888,7 @@ def _merge_task(
         if isinstance(checker_contract, dict):
             commands = [str(value) for value in checker_contract["prospective_gate"]]
             requirement = {
-                "schema": "SwarmProspectiveGateRequirementV1",
+                "schema": "OxideProspectiveGateRequirementV1",
                 "run_id": config["run_id"],
                 "epoch": int(config["epoch"]),
                 "workload": {
@@ -1149,14 +1149,14 @@ def _process_table() -> list[tuple[int, str]]:
 
 def _run_processes(config: dict[str, Any]) -> list[tuple[int, str]]:
     workload = str(config["workload"])
-    swarmctl = str(ROOT / "swarmctl")
+    oxide = str(ROOT / "oxide")
     worker_root = str((Path(config["run_dir"]) / "workers").resolve())
     workload_argument = re.compile(
         r"(?:^|\s)--workload(?:=|\s+)" + re.escape(workload) + r"(?:\s|$)"
     )
     rows: list[tuple[int, str]] = []
     for pid, command in _process_table():
-        belongs_to_run = swarmctl in command and workload_argument.search(command) is not None
+        belongs_to_run = oxide in command and workload_argument.search(command) is not None
         if belongs_to_run and "harness worker " in command:
             rows.append((pid, "worker"))
         elif belongs_to_run and "harness launch " in command:
@@ -1172,7 +1172,7 @@ def _run_processes(config: dict[str, Any]) -> list[tuple[int, str]]:
 
 def _live_slots(config: dict[str, Any]) -> set[str]:
     pattern = re.compile(
-        re.escape(str(ROOT / "swarmctl"))
+        re.escape(str(ROOT / "oxide"))
         + r" harness worker --workload "
         + re.escape(str(config["workload"]))
         + r" --slot ([^ ]+)"
@@ -1185,7 +1185,7 @@ def _live_slots(config: dict[str, Any]) -> set[str]:
 
 
 def _worker_argv(workload: str, slot: str) -> list[str]:
-    return [str(ROOT / "swarmctl"), "harness", "worker", "--workload", workload, "--slot", slot]
+    return [str(ROOT / "oxide"), "harness", "worker", "--workload", workload, "--slot", slot]
 
 
 class _Supervisor:
@@ -1250,11 +1250,11 @@ def _start(config: dict[str, Any], foreground: bool) -> int:
     if foreground:
         return command_launch(argparse.Namespace(workload=config["workload"]))
     _launch_terminal(
-        [str(ROOT / "swarmctl"), "harness", "launch", "--workload", config["workload"]]
+        [str(ROOT / "oxide"), "harness", "launch", "--workload", config["workload"]]
     )
     print(f"Started {config['workload']} in the background.")
-    print(f"Observe: ./swarmctl harness observe --workload {config['workload']} --slot worker-0")
-    print(f"Queue:   ./swarmctl harness observe-queue --workload {config['workload']}")
+    print(f"Observe: ./oxide harness observe --workload {config['workload']} --slot worker-0")
+    print(f"Queue:   ./oxide harness observe-queue --workload {config['workload']}")
     return 0
 
 
@@ -1320,7 +1320,7 @@ def command_run(arguments: argparse.Namespace) -> int:
     journal_command = shlex.split(getattr(arguments, "journal_command", "") or "")
     receipt_path = Path(
         getattr(arguments, "concurrency_receipt", None)
-        or ROOT / ".swarm" / "validation" / "latest.json"
+        or ROOT / ".oxide" / "validation" / "latest.json"
     ).expanduser()
     concurrency_receipt = validate_receipt(
         ROOT,
@@ -1365,7 +1365,7 @@ def command_run(arguments: argparse.Namespace) -> int:
         "replay_root": secrets.token_hex(16),
         "workload_ref": workload_ref,
         "harness_version": workload_ref["harness_version"],
-        "branch_prefix": f"codex/swarm-{_slug(run_id)}",
+        "branch_prefix": f"codex/oxide-{_slug(run_id)}",
         "stage": stage["stage"],
     }
     config["concurrency_validation"] = {
@@ -1538,7 +1538,7 @@ def _validate_checkpoint_manifest(config: dict[str, Any], manifest: object) -> d
     ref_prefix = f"refs/heads/{config['branch_prefix']}/"
     commit = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
     if (
-        manifest.get("schema") != "SwarmDestructiveCheckpointV1"
+        manifest.get("schema") != "OxideDestructiveCheckpointV1"
         or manifest.get("run_id") != config["run_id"]
         or manifest.get("workload") != config["workload"]
         or manifest.get("target_repository") != config["workload_ref"]["target_repository"]
@@ -1606,7 +1606,7 @@ def _snapshot_checkpoint(config: dict[str, Any], name: str) -> Path:
         ref, commit = line.split(maxsplit=1)
         refs[ref] = commit
     manifest = {
-        "schema": "SwarmDestructiveCheckpointV1",
+        "schema": "OxideDestructiveCheckpointV1",
         "run_id": config["run_id"],
         "workload": config["workload"],
         "source_epoch": int(config["epoch"]),
@@ -1669,7 +1669,7 @@ def command_rewind(arguments: argparse.Namespace) -> int:
         if arguments.archive:
             archive = (
                 ROOT
-                / ".swarm"
+                / ".oxide"
                 / "rewind-archive"
                 / f"{config['run_id']}-epoch-{config['epoch']}-{time.time_ns()}"
             )
@@ -2068,7 +2068,7 @@ def command_observe(arguments: argparse.Namespace) -> int:
 def _visible_journal_body(value: object) -> str:
     lines = str(value).splitlines()
     while lines and re.fullmatch(
-        r"swarm-(?:run:.+|epoch:\d+|stable:[0-9a-f]{32}|routing:[0-9a-f]{32}:[01]{64})",
+        r"oxide-(?:run:.+|epoch:\d+|stable:[0-9a-f]{32}|routing:[0-9a-f]{32}:[01]{64})",
         lines[-1],
     ):
         lines.pop()
@@ -2118,7 +2118,7 @@ def _render_queue(
         lines.extend((line, code) for line in wrapped or [""])
 
     if header:
-        add("SWARM JOURNAL", code="1;36")
+        add("OXIDE JOURNAL", code="1;36")
     if snapshot is None:
         add("WAITING FOR JOURNAL", code="1;33")
         return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
@@ -2219,7 +2219,7 @@ def command_validate_concurrency(arguments: argparse.Namespace) -> int:
         raise HarnessError(str(error)) from error
     report = run_campaign(
         ROOT,
-        ROOT / ".swarm" / "validation",
+        ROOT / ".oxide" / "validation",
         workers=arguments.workers,
         rounds=arguments.rounds,
         seed=seed,
@@ -2236,7 +2236,7 @@ def command_validate_concurrency(arguments: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="swarmctl")
+    parser = argparse.ArgumentParser(prog="oxide")
     root = parser.add_subparsers(dest="group", required=True)
     verify = root.add_parser("verify")
     verify.set_defaults(handler=command_verify)
@@ -2266,7 +2266,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--concurrency-receipt",
-        help="passing campaign receipt to bind to this run; default: .swarm/validation/latest.json",
+        help="passing campaign receipt to bind to this run; default: .oxide/validation/latest.json",
     )
     run.add_argument("--foreground", action="store_true")
     run.add_argument("--resume", action="store_true")
@@ -2344,7 +2344,7 @@ def main(argv: list[str] | None = None) -> int:
         OSError,
         ValueError,
     ) as error:
-        print(f"swarmctl: {error}", file=sys.stderr)
+        print(f"oxide: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130

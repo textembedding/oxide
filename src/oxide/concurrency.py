@@ -41,9 +41,9 @@ def _write_json(path: Path, value: object) -> None:
 
 def implementation_digest(root: Path) -> str:
     hasher = hashlib.sha256()
-    package = root / "src" / "swarm_harness"
+    package = root / "src" / "oxide"
     paths = sorted(package.glob("*.py")) + [
-        root / "swarmctl",
+        root / "oxide",
         root / "pyproject.toml",
         root / "uv.lock",
     ]
@@ -88,10 +88,10 @@ def _stage(_namespace: str) -> dict[str, Any]:
 
 def _workload_ref(namespace: str) -> dict[str, str]:
     return {
-        "schema": "SwarmWorkloadRefV1",
+        "schema": "OxideWorkloadRefV1",
         "target_repository": "concurrency-fixture",
         "base_commit": "0" * 40,
-        "workload_path": "swarm-harness/concurrency.yaml",
+        "workload_path": "oxide-harness/concurrency.yaml",
         "workload_blob": hashlib.sha256(_compact(_stage(namespace)).encode()).hexdigest(),
         "harness_tree": "0" * 40,
         "harness_version": "concurrency-fixture",
@@ -290,7 +290,7 @@ def _child_replay(arguments: argparse.Namespace) -> int:
 
 
 def _child_argv(mode: str, **values: object) -> list[str]:
-    argv = [sys.executable, "-m", "swarm_harness.concurrency", mode]
+    argv = [sys.executable, "-m", "oxide.concurrency", mode]
     for name, value in values.items():
         flag = "--" + name.replace("_", "-")
         if isinstance(value, bool):
@@ -346,17 +346,17 @@ def _validate_complete_replay(
             "\n".join(
                 (
                     f"replay-probe:{index}",
-                    f"swarm-run:{namespace}",
-                    "swarm-epoch:0",
-                    f"swarm-stable:{stable_id}",
-                    f"swarm-routing:{replay_root}:{replay_id}",
+                    f"oxide-run:{namespace}",
+                    "oxide-epoch:0",
+                    f"oxide-stable:{stable_id}",
+                    f"oxide-routing:{replay_root}:{replay_id}",
                 )
             ),
         )
         if result.get("saved") is not True:
             raise ConcurrencyError("journal did not synchronously accept a replay probe")
         expected.append(int(result["record_id"]))
-    capped = client.search(namespace, f"swarm-routing:{replay_root}:")
+    capped = client.search(namespace, f"oxide-routing:{replay_root}:")
     if not 1 <= len(capped) <= max_results:
         raise ConcurrencyError("journal search did not return a useful bounded replay anchor")
     replayed = WorkflowClient(client, replay_root=replay_root).replay_records(namespace)
@@ -553,7 +553,7 @@ def run_campaign(
     campaign = output_root / f"campaign-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}"
     campaign.mkdir()
     database = campaign / "journal.sqlite3"
-    socket_path = Path("/tmp") / f"swarm-concurrency-{os.getpid()}-{secrets.token_hex(4)}.sock"
+    socket_path = Path("/tmp") / f"oxide-concurrency-{os.getpid()}-{secrets.token_hex(4)}.sock"
     runtime = start_journal(
         database,
         socket_path,
@@ -597,7 +597,7 @@ def run_campaign(
         _write_json(
             campaign / "report.json",
             {
-                "schema": "swarm-concurrency-validation-v1",
+                "schema": "oxide-concurrency-validation-v1",
                 "status": "failed",
                 "error": str(error),
                 "workers": workers,
@@ -612,7 +612,7 @@ def run_campaign(
     finally:
         runtime.close()
     report = {
-        "schema": "swarm-concurrency-validation-v1",
+        "schema": "oxide-concurrency-validation-v1",
         "status": "passed",
         "source_digest": implementation_digest(root),
         "kernel_digest": kernel_digest(journal_command),
@@ -647,7 +647,7 @@ def run_campaign(
 def _relocated_validation_path(root: Path, path: Path) -> Path | None:
     parts = path.parts
     for index in range(len(parts) - 1):
-        if parts[index : index + 2] == (".swarm", "validation"):
+        if parts[index : index + 2] == (".oxide", "validation"):
             return root / Path(*parts[index:])
     return None
 
@@ -686,7 +686,7 @@ def validate_receipt(
     except (OSError, json.JSONDecodeError) as error:
         raise ConcurrencyError(
             "A passing concurrency campaign is required; run "
-            f"./swarmctl harness validate-concurrency --workers {required_workers}"
+            f"./oxide harness validate-concurrency --workers {required_workers}"
         ) from error
     report_path = Path(str(receipt.get("report_path", "")))
     try:
@@ -704,7 +704,7 @@ def validate_receipt(
         "complete_replay_beyond_query_limit",
     }
     if (
-        receipt.get("schema") != "swarm-concurrency-validation-v1"
+        receipt.get("schema") != "oxide-concurrency-validation-v1"
         or receipt.get("status") != "passed"
         or require_current_source
         and receipt.get("source_digest") != implementation_digest(root)
@@ -720,7 +720,7 @@ def validate_receipt(
     ):
         raise ConcurrencyError(
             "Concurrency receipt is absent, stale, or insufficient; run "
-            f"./swarmctl harness validate-concurrency --workers {required_workers}"
+            f"./oxide harness validate-concurrency --workers {required_workers}"
         )
     return receipt
 
@@ -760,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
         arguments = _child_parser().parse_args(argv)
         return int(arguments.handler(arguments))
     except (ConcurrencyError, OSError, ValueError) as error:
-        print(f"swarm-concurrency: {error}", file=sys.stderr)
+        print(f"oxide-concurrency: {error}", file=sys.stderr)
         return 2
 
 

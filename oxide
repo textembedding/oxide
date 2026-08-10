@@ -11,6 +11,6 @@ if VENV_PYTHON.is_file() and Path(sys.prefix).resolve() != (ROOT / ".venv").reso
     os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 sys.path.insert(0, str(ROOT / "src"))
 
-from swarm_harness.cli import main
+from oxide.cli import main
 
 raise SystemExit(main())
