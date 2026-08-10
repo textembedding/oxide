@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -18,32 +21,209 @@ from oxide.concurrency import (
     implementation_digest,
     kernel_digest,
 )
+from oxide.contract import ContractError, load_contract
 from oxide.journal_backend import start_journal
 from oxide.workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).parents[1]
 
 
-def _workload_text() -> str:
+def _contract_text() -> str:
     return """\
-stage: foundation
-enabled: true
-goal: Build and verify a small web application.
-tasks:
-  - id: API
-    title: Build the API
-    prompt: Implement the HTTP API.
-    depends_on: []
-    checks:
-      - npm test -- api
-  - id: UI
-    title: Build the UI
-    prompt: Implement the browser UI.
-    depends_on: [API]
-    checks:
-      - npm test -- ui
-stage_gate:
-  - npm test
+schema = 1
+id = "web-app"
+stage = "foundation"
+enabled = true
+minimum_reviews = 3
+goal = "Build and verify a small Rust web application."
+immutable_paths = ["verification/contract.toml", "verification/toolchain.lock.toml", "docs"]
+
+[execution]
+evidence_policy = "exact-verus-context-v1"
+timeout_seconds = 1800
+infrastructure_exit_codes = [2, 124]
+max_artifact_bytes = 16777216
+
+[[tasks]]
+id = "API"
+title = "Build the API"
+prompt = "Implement the HTTP API."
+depends_on = []
+
+[[tasks.checks]]
+id = "api-test"
+driver = "command"
+command = "cargo test -- api"
+
+[[tasks]]
+id = "UI"
+title = "Build the UI"
+prompt = "Implement the browser UI."
+depends_on = ["API"]
+
+[[tasks.checks]]
+id = "ui-test"
+driver = "command"
+command = "cargo test -- ui"
+"""
+
+
+def _write_contract_files(target: Path, contract_text: str | None = None) -> Path:
+    verification = target / "verification"
+    docs = target / "docs"
+    verification.mkdir(parents=True, exist_ok=True)
+    docs.mkdir(parents=True, exist_ok=True)
+    contract = verification / "contract.toml"
+    contract.write_text(contract_text or _contract_text(), encoding="utf-8")
+    (verification / "toolchain.lock.toml").write_text("schema = 1\n", encoding="utf-8")
+    (verification / "manifest.toml").write_text(
+        'schema = 1\nstatus = "unimplemented"\n', encoding="utf-8"
+    )
+    (docs / "PRODUCT.md").write_text("# Product\n", encoding="utf-8")
+    (docs / "VERIFICATION.md").write_text("# Verification\n", encoding="utf-8")
+    return contract
+
+
+def _host_target() -> str:
+    return {
+        ("Darwin", "arm64"): "aarch64-apple-darwin",
+        ("Darwin", "x86_64"): "x86_64-apple-darwin",
+        ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+        ("Windows", "AMD64"): "x86_64-pc-windows-msvc",
+    }[(platform.system(), platform.machine())]
+
+
+def _fake_verus_archive(path: Path) -> tuple[Path, str]:
+    archive = path / "fake-verus.zip"
+    revision = "a" * 40
+    metadata = {
+        "verus": {
+            "version": "test-release",
+            "commit": revision,
+            "toolchain": "test-toolchain",
+        }
+    }
+    with zipfile.ZipFile(archive, "w") as bundle:
+        version = zipfile.ZipInfo("verus-test/version.json")
+        version.external_attr = (stat.S_IFREG | 0o644) << 16
+        bundle.writestr(version, json.dumps(metadata))
+        executable = zipfile.ZipInfo("verus-test/verus")
+        executable.external_attr = (stat.S_IFREG | 0o755) << 16
+        bundle.writestr(
+            executable,
+            f'#!/bin/sh\nprintf \'%s\\n\' \'{{"verus":{{"commit":"{revision}"}}}}\'\n',
+        )
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    lock = f"""\
+schema = 1
+
+[verus]
+release = "test-release"
+tag = "test-release"
+revision = "{revision}"
+source = "fixture"
+rust_toolchain = "test-toolchain"
+solver = "fixture"
+
+[assets.{_host_target()}]
+name = "{archive.name}"
+sha256 = "{digest}"
+
+[verification]
+timeout_seconds = 30
+random_seed = 0
+resource_policy = "fail-closed"
+"""
+    return archive, lock
+
+
+def _smoke_contract_text() -> str:
+    return f"""\
+schema = 1
+id = "smoke"
+stage = "smoke"
+enabled = true
+minimum_reviews = 3
+goal = "Prove the generic contract, native two-tool worker, journal, and Git path."
+hash_algorithm = "sha256"
+manifest = "verification/manifest.toml"
+toolchain_lock = "verification/toolchain.lock.toml"
+verification_spec = "docs/VERIFICATION.md"
+product_spec = "docs/PRODUCT.md"
+immutable_paths = ["verification/contract.toml", "verification/toolchain.lock.toml", "docs"]
+production_roots = ["src"]
+contract_roots = ["verification/contracts"]
+abstract_spec_roots = ["verification/spec"]
+proof_roots = ["verification/proofs"]
+trusted_adapter_roots = ["src/effects"]
+non_authoritative_roots = ["verification/fixtures"]
+production_features = ["production", "verified"]
+target = "{_host_target()}"
+production_entry = "src/lib.rs"
+composition_root = "verification/proofs/composition.rs"
+composition_module = "composition"
+composition_theorem = "composition"
+solver_rlimit = 10
+additional_forbidden_patterns = []
+
+[execution]
+evidence_policy = "exact-verus-context-v1"
+timeout_seconds = 30
+infrastructure_exit_codes = [2, 124]
+max_artifact_bytes = 1048576
+
+[evidence]
+max_log_bytes = 65536
+max_artifacts = 16
+max_artifact_bytes = 1048576
+
+[[tasks]]
+id = "TOY-01"
+title = "Create the first fixture file"
+prompt = "Create toy-output/one.txt containing exactly one followed by a newline."
+depends_on = []
+
+[[tasks.checks]]
+id = "one"
+driver = "command"
+command = 'test "$(cat toy-output/one.txt)" = "one"'
+
+[[tasks]]
+id = "TOY-02"
+title = "Create the second fixture file"
+prompt = "Create toy-output/two.txt containing exactly two followed by a newline."
+depends_on = ["TOY-01"]
+
+[[tasks.checks]]
+id = "two"
+driver = "command"
+command = 'test "$(cat toy-output/two.txt)" = "two"'
+
+[[tasks]]
+id = "TOY-03"
+title = "Combine the fixture files"
+prompt = "Create toy-output/combined.txt with both prior values on separate lines."
+depends_on = ["TOY-01", "TOY-02"]
+
+[[tasks.checks]]
+id = "combined"
+driver = "command"
+command = "test \\\"$(cat toy-output/combined.txt)\\\" = \\\"$(printf 'one\\\\ntwo')\\\""
+"""
+
+
+_UNIMPLEMENTED_MANIFEST = """\
+schema = 1
+status = "unimplemented"
+assurance_claim = "none"
+composition_theorem = ""
+composition_members = []
+shared_proof_closure = []
+trusted_computing_base = ["pinned-verification-toolchain"]
+assumptions = []
+components = []
+trusted_adapters = []
+tooling = []
 """
 
 
@@ -106,50 +286,47 @@ def test_supervisor_reclaims_missing_worker_before_relaunch(monkeypatch) -> None
 
 
 def test_arbitrary_product_contract_parses_without_rewriting_checks(tmp_path: Path) -> None:
-    path = tmp_path / "web-app.yaml"
-    path.write_text(_workload_text(), encoding="utf-8")
-    workload = cli.load_stage(path)
+    path = tmp_path / "contract.toml"
+    path.write_text(_contract_text(), encoding="utf-8")
+    workload = load_contract(path)
     assert workload["stage"] == "foundation"
     assert [task["id"] for task in workload["tasks"]] == ["API", "UI"]
     assert workload["tasks"][1]["depends_on"] == ["API"]
-    assert workload["tasks"][0]["checks"] == ["npm test -- api"]
-    assert workload["stage_gate"] == ["npm test"]
-    path.write_text(_workload_text().replace("stage_gate:\n  - npm test", "stage_gate: []"))
-    assert cli.load_stage(path)["stage_gate"] == []
+    assert workload["tasks"][0]["checks"][0]["command"] == "cargo test -- api"
+    assert workload["tasks"][0]["checks"][0]["driver"] == "command"
 
 
 def test_workload_rejects_nonboolean_required_receipt_policy(tmp_path: Path) -> None:
-    path = tmp_path / "web-app.yaml"
+    path = tmp_path / "contract.toml"
     path.write_text(
-        _workload_text().replace(
-            "      - npm test -- api",
-            "      - id: api-check\n"
-            "        command: npm test -- api\n"
-            "        receipt_required: yes-please",
+        _contract_text().replace(
+            'command = "cargo test -- api"',
+            'command = "cargo test -- api"\nreceipt_required = "yes-please"',
         ),
         encoding="utf-8",
     )
-    with pytest.raises(cli.HarnessError, match="identity is malformed"):
-        cli.load_stage(path)
+    with pytest.raises(ContractError, match="receipt_required must be boolean"):
+        load_contract(path)
 
 
 def test_workload_contract_rejects_dependency_cycles(tmp_path: Path) -> None:
-    path = tmp_path / "cycle.yaml"
+    path = tmp_path / "cycle.toml"
     path.write_text(
-        _workload_text().replace("depends_on: []", "depends_on: [UI]"), encoding="utf-8"
+        _contract_text().replace("depends_on = []", 'depends_on = ["UI"]', 1),
+        encoding="utf-8",
     )
-    with pytest.raises(cli.HarnessError, match="cycle"):
-        cli.load_stage(path)
+    with pytest.raises(ContractError, match="cycle"):
+        load_contract(path)
 
 
-def test_target_harness_directory_cannot_escape_through_a_symlink(tmp_path: Path) -> None:
+def test_target_verification_directory_cannot_escape_through_a_symlink(tmp_path: Path) -> None:
     target = tmp_path / "target"
     outside = tmp_path / "outside"
     target.mkdir()
     outside.mkdir()
-    (target / "oxide-harness").symlink_to(outside, target_is_directory=True)
+    (target / "verification").symlink_to(outside, target_is_directory=True)
     with pytest.raises(cli.HarnessError, match="symlink"):
-        cli._stage_path(target, "web-app")
+        cli._contract_path(target, "verification/contract.toml")
 
 
 def test_observer_ports_jsonl_highlighting_and_safe_indentation() -> None:
@@ -453,7 +630,7 @@ def test_queue_renders_append_only_records_in_chronological_order() -> None:
     }
     rendered = cli._render_queue(snapshot, color=False, width=40)
     colored = cli._render_queue(snapshot, color=True, width=40)
-    assert "OXIDE JOURNAL" in rendered
+    assert "Oxide JOURNAL" in rendered
     assert "ACTIVE-LONG-TASK-NAME" in rendered
     assert rendered.index("JOURNAL #140") < rendered.index("JOURNAL #141")
     assert "author: worker-0\nstatus: accepted" in rendered
@@ -461,7 +638,7 @@ def test_queue_renders_append_only_records_in_chronological_order() -> None:
     assert "[" not in rendered
     assert "-" * 40 in rendered
     assert "|" not in rendered
-    assert "\x1b[1;36mOXIDE JOURNAL\x1b[0m" in colored
+    assert "\x1b[1;36mOxide JOURNAL\x1b[0m" in colored
     assert "\x1b[31mstatus: rejected\x1b[0m" in colored
 
 
@@ -514,7 +691,7 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
     arguments = cli.argparse.Namespace(workload="web-app", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
     output = capsys.readouterr().out
-    assert output.count("OXIDE JOURNAL") == 1
+    assert output.count("Oxide JOURNAL") == 1
     assert output.index("JOURNAL #1") < output.index("JOURNAL #2")
     assert "\x1b[2J\x1b[H" not in output
     assert delays[0] == 1
@@ -549,7 +726,7 @@ def test_queue_observer_reconnects_and_resets_cursor_after_epoch_change(
     arguments = cli.argparse.Namespace(workload="rewind", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
     output = capsys.readouterr().out
-    assert output.count("OXIDE JOURNAL") == 2
+    assert output.count("Oxide JOURNAL") == 2
     assert output.index("JOURNAL #10") < output.rindex("JOURNAL #1")
 
 
@@ -607,28 +784,43 @@ def test_controls_recover_a_stale_journal_socket(monkeypatch) -> None:
 def test_macos_commands_and_controls_remain_available() -> None:
     parser = cli.build_parser()
     assert parser.parse_args(["verify"]).handler is cli.command_verify
-    run = parser.parse_args(["harness", "run", "--workload", "web-app", "--target", "/tmp/product"])
+    run = parser.parse_args(["harness", "run", "--target", "/tmp/product"])
     assert run.workers == 7
-    assert run.reviews == 3
+    assert run.reviews is None
+    assert run.contract == "verification/contract.toml"
     assert (run.min_exact, run.max_results) == (5, 10)
     configured = parser.parse_args(
         [
             "harness",
             "run",
-            "--workload",
-            "web-app",
             "--target",
             "/tmp/product",
+            "--contract",
+            "verification/release.toml",
             "--reviews",
-            "2",
+            "4",
         ]
     )
-    assert configured.reviews == 2
+    assert configured.reviews == 4
+    assert configured.contract == "verification/release.toml"
     concurrency = parser.parse_args(["harness", "validate-concurrency"])
     assert concurrency.handler is cli.command_validate_concurrency
     assert concurrency.workers == 7
     assert concurrency.rounds == 6
     assert (concurrency.min_exact, concurrency.max_results) == (5, 10)
+    local = parser.parse_args(
+        [
+            "harness",
+            "verify-contract",
+            "--target",
+            "/tmp/product",
+            "proof",
+            "--root",
+            "verification/proofs/component.rs",
+        ]
+    )
+    assert local.handler is cli.command_verify_contract
+    assert local.operation == "proof"
     for command in ("pause", "resume", "reset", "observe", "observe-queue", "status"):
         arguments = ["harness", command, "--workload", "web-app"]
         if command == "observe":
@@ -651,15 +843,15 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
     (run_dir / "run.json").write_text(
         json.dumps(
             {
-                "schema_version": 8,
+                "schema_version": 9,
                 "run_id": "web-app-20260808-120000",
                 "workload": "web-app",
                 "run_dir": "/old/checkout/.oxide/runs/web-app",
                 "database": "/old/checkout/.oxide/runs/web-app/journal.sqlite3",
                 "socket": "/old/checkout/.oxide/runs/web-app/journal.sock",
                 "evidence_root": "/old/checkout/.oxide/runs/web-app/evidence/checks",
-                "checker_root": "/old/checkout/.oxide/runs/web-app/frozen-checker",
-                "stage_path": "/old/target/oxide-harness/web-app.yaml",
+                "contract_root": "/old/checkout/.oxide/runs/web-app/frozen-contract",
+                "contract_path": "/old/target/verification/contract.toml",
                 "target_repo": "/target/remains/unchanged",
                 "target_branch": "main",
                 "base_commit": "1" * 40,
@@ -668,7 +860,10 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
                 "required_reviews": 3,
                 "journal_command": [],
                 "concurrency_validation": {},
-                "workload_ref": {"schema": "OxideWorkloadRefV1"},
+                "workload_ref": {
+                    "schema": "OxideVerificationContractRefV1",
+                    "contract_path": "verification/contract.toml",
+                },
                 "replay_root": "2" * 32,
                 "epoch": 0,
                 "history_sequence": 0,
@@ -689,9 +884,9 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
     assert config["database"] == str(run_dir.resolve() / "journal.sqlite3")
     assert config["socket"] == str(run_dir.resolve() / "journal.sock")
     assert config["evidence_root"] == str(run_dir.resolve() / "evidence" / "checks")
-    assert config["checker_root"] == str(run_dir.resolve() / "frozen-checker")
-    assert config["stage_path"] == str(
-        Path("/target/remains/unchanged/oxide-harness/web-app.yaml").resolve()
+    assert config["contract_root"] == str(run_dir.resolve() / "frozen-contract")
+    assert config["contract_path"] == str(
+        Path("/target/remains/unchanged/verification/contract.toml").resolve()
     )
     assert config["target_repo"] == "/target/remains/unchanged"
 
@@ -711,9 +906,7 @@ def test_frozen_repository_workload_rejects_later_specification_commit(tmp_path:
         ["git", "-C", str(target), "config", "user.email", "test@example.com"],
         check=True,
     )
-    contract = target / "oxide-harness" / "web-app.yaml"
-    contract.parent.mkdir()
-    contract.write_text(_workload_text(), encoding="utf-8")
+    contract = _write_contract_files(target)
     subprocess.run(["git", "-C", str(target), "add", "."], check=True)
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "freeze workload"], check=True)
     base = subprocess.run(
@@ -722,11 +915,21 @@ def test_frozen_repository_workload_rejects_later_specification_commit(tmp_path:
         capture_output=True,
         check=True,
     ).stdout.strip()
-    reference = cli._frozen_workload_ref(target, base, "web-app")
-    config = {"target_repo": str(target), "workload_ref": reference}
+    stage = load_contract(contract)
+    reference = cli._frozen_workload_ref(target, base, contract, stage)
+    contract_root = tmp_path / "frozen-contract"
+    config = {
+        "target_repo": str(target),
+        "base_commit": base,
+        "contract_root": str(contract_root),
+        "workload_ref": reference,
+    }
+    cli._materialize_contract(config)
     assert cli._load_frozen_stage(config)["goal"].startswith("Build and verify")
 
-    contract.write_text(_workload_text().replace("small web", "changed web"), encoding="utf-8")
+    contract.write_text(
+        _contract_text().replace("small Rust web", "changed Rust web"), encoding="utf-8"
+    )
     with pytest.raises(cli.HarnessError, match="start a new run"):
         cli._load_frozen_stage(config)
     subprocess.run(["git", "-C", str(target), "add", "."], check=True)
@@ -753,9 +956,10 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         check=True,
     )
     (target / "README.md").write_text("base\n", encoding="utf-8")
-    contract = target / "oxide-harness" / "rewind.yaml"
-    contract.parent.mkdir()
-    contract.write_text(_workload_text(), encoding="utf-8")
+    contract = _write_contract_files(
+        target,
+        _contract_text().replace('id = "web-app"', 'id = "rewind"'),
+    )
     subprocess.run(["git", "-C", str(target), "add", "."], check=True)
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "base"], check=True)
     base = subprocess.run(
@@ -770,21 +974,11 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         capture_output=True,
         check=True,
     ).stdout.strip()
-    blob = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", f"{base}:oxide-harness/rewind.yaml"],
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
-    tree = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", f"{base}:oxide-harness"],
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
+    stage = load_contract(contract)
+    reference = cli._frozen_workload_ref(target, base, contract, stage)
     run_id = "rewind-20260809-120000"
     config = {
-        "schema_version": 8,
+        "schema_version": 9,
         "run_id": run_id,
         "workload": "rewind",
         "target_repo": str(target),
@@ -795,7 +989,8 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         "database": str(run_dir / "journal.sqlite3"),
         "socket": str(run_dir / "journal.sock"),
         "evidence_root": str(run_dir / "evidence" / "checks"),
-        "checker_root": str(run_dir / "frozen-checker"),
+        "contract_root": str(run_dir / "frozen-contract"),
+        "contract_path": str(contract),
         "workers": 4,
         "required_reviews": 3,
         "journal_command": [],
@@ -805,19 +1000,12 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         "history_sequence": 0,
         "epoch_frontiers": [],
         "replay_root": "a" * 32,
-        "workload_ref": {
-            "schema": "OxideWorkloadRefV1",
-            "target_repository": str(target.resolve()),
-            "base_commit": base,
-            "workload_path": "oxide-harness/rewind.yaml",
-            "workload_blob": blob,
-            "harness_tree": tree,
-            "harness_version": "test-harness",
-        },
-        "harness_version": "test-harness",
+        "workload_ref": reference,
+        "harness_version": reference["harness_version"],
         "branch_prefix": f"codex/oxide-{run_id}",
         "concurrency_validation": {},
     }
+    cli._materialize_contract(config)
     cli._atomic_json(run_dir / "run.json", config)
     assignments = run_dir / "assignments"
     assignments.mkdir()
@@ -916,17 +1104,13 @@ def test_every_workload_is_blocked_before_staging_without_a_qualified_receipt(
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=target, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=target, check=True)
-    contract = target / "oxide-harness" / "web-app.yaml"
-    contract.parent.mkdir()
-    contract.write_text(_workload_text(), encoding="utf-8")
+    _write_contract_files(target)
     subprocess.run(["git", "add", "."], cwd=target, check=True)
     subprocess.run(["git", "commit", "-qm", "contract"], cwd=target, check=True)
     arguments = cli.build_parser().parse_args(
         [
             "harness",
             "run",
-            "--workload",
-            "web-app",
             "--target",
             str(target),
             "--workers",
@@ -964,13 +1148,15 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
         ["git", "-C", str(target), "config", "user.email", "test@example.com"], check=True
     )
     (target / "README.md").write_text("fixture\n", encoding="utf-8")
-    contract = target / "oxide-harness" / "smoke.yaml"
-    contract.parent.mkdir()
-    contract.write_text(
-        (ROOT / "tests" / "fixtures" / "workloads" / "smoke.yaml").read_text(encoding="utf-8"),
-        encoding="utf-8",
+    _write_contract_files(target, _smoke_contract_text())
+    archive, lock = _fake_verus_archive(tmp_path)
+    (target / "verification" / "toolchain.lock.toml").write_text(lock, encoding="utf-8")
+    (target / "verification" / "manifest.toml").write_text(
+        _UNIMPLEMENTED_MANIFEST, encoding="utf-8"
     )
-    subprocess.run(["git", "-C", str(target), "add", "README.md", "oxide-harness"], check=True)
+    subprocess.run(
+        ["git", "-C", str(target), "add", "README.md", "verification", "docs"], check=True
+    )
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "seed"], check=True)
     receipt = _write_receipt(tmp_path / "validation", workers=4)
 
@@ -979,13 +1165,12 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     environment = os.environ.copy()
     environment["PATH"] = str(ROOT / "tests" / "fake-bin") + os.pathsep + environment["PATH"]
     environment["OXIDE_NO_TERMINAL"] = "1"
+    environment["OXIDE_VERUS_ARCHIVE"] = str(archive)
     result = subprocess.run(
         [
             str(ROOT / "oxide"),
             "harness",
             "run",
-            "--workload",
-            "smoke",
             "--target",
             str(target),
             "--workers",
@@ -1003,37 +1188,36 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    assert config["schema_version"] == 8
+    assert config["schema_version"] == 9
     assert (config["min_exact"], config["max_results"]) == (5, 10)
     assert config["epoch"] == 0
     workload_ref = config["workload_ref"]
     assert workload_ref["target_repository"] == str(target.resolve())
     assert workload_ref["base_commit"] == config["base_commit"]
-    assert workload_ref["workload_path"] == "oxide-harness/smoke.yaml"
+    assert workload_ref["schema"] == "OxideVerificationContractRefV1"
+    assert workload_ref["contract_path"] == "verification/contract.toml"
     assert (
-        workload_ref["workload_blob"]
+        workload_ref["contract_blob"]
         == subprocess.run(
             [
                 "git",
                 "-C",
                 str(target),
                 "rev-parse",
-                f"{config['base_commit']}:oxide-harness/smoke.yaml",
+                f"{config['base_commit']}:verification/contract.toml",
             ],
             text=True,
             capture_output=True,
             check=True,
         ).stdout.strip()
     )
-    assert (
-        workload_ref["harness_tree"]
-        == subprocess.run(
-            ["git", "-C", str(target), "rev-parse", f"{config['base_commit']}:oxide-harness"],
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout.strip()
-    )
+    assert workload_ref["immutable_paths"] == [
+        "verification/contract.toml",
+        "verification/toolchain.lock.toml",
+        "docs",
+    ]
+    assert workload_ref["contract_closure_sha256"].startswith("sha256:")
+    assert workload_ref["verification_engine_sha256"].startswith("sha256:")
     assert workload_ref["harness_version"] == config["harness_version"]
     assert config["required_reviews"] == 3
     assert "integration_branch" not in config
@@ -1088,7 +1272,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
             config["base_commit"],
             target_tip,
             "--",
-            "oxide-harness",
+            *workload_ref["immutable_paths"],
         ],
         text=True,
         capture_output=True,

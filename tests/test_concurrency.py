@@ -10,12 +10,25 @@ import pytest
 from oxide.concurrency import (
     ROLES,
     ConcurrencyError,
+    implementation_digest,
     kernel_digest,
     run_campaign,
     validate_receipt,
 )
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_implementation_digest_covers_nested_engine_and_schema_files(tmp_path: Path) -> None:
+    package = tmp_path / "src" / "oxide" / "verification"
+    package.mkdir(parents=True)
+    (package / "engine.py").write_text("VERSION = 1\n", encoding="utf-8")
+    (package / "evidence.schema.json").write_text("{}\n", encoding="utf-8")
+    for name in ("oxide", "pyproject.toml", "uv.lock"):
+        (tmp_path / name).write_text(name + "\n", encoding="utf-8")
+    original = implementation_digest(tmp_path)
+    (package / "evidence.schema.json").write_text('{"schema": 1}\n', encoding="utf-8")
+    assert implementation_digest(tmp_path) != original
 
 
 def test_kernel_digest_binds_interpreter_script_bytes(tmp_path: Path) -> None:

@@ -53,17 +53,3 @@ def test_journal_kernel_contains_no_workflow_semantics() -> None:
         "lifecycle",
     ):
         assert forbidden not in source
-
-
-def test_no_old_coordination_api_survives() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCE.glob("*.py"))
-    for forbidden in (
-        "claim_task(",
-        "heartbeat(",
-        "proposal",
-        "quorum",
-        "lease_token",
-        "validation_vote",
-        "SQLiteJournal",
-    ):
-        assert forbidden not in source

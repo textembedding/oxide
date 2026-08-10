@@ -35,7 +35,6 @@ def _stage() -> dict:
                 "checks": ["test B"],
             },
         ],
-        "stage_gate": ["test all"],
     }
 
 
@@ -68,8 +67,8 @@ def _bootstrap(client: WorkflowClient, run_id: str, stage: dict | None = None) -
     if stage is not None:
         client._workload = stage
         client.workload_ref = {
-            "schema": "OxideWorkloadRefV1",
-            "workload_blob": hashlib.sha256(
+            "schema": "OxideVerificationContractRefV1",
+            "contract_blob": hashlib.sha256(
                 json.dumps(stage, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
         }
@@ -255,7 +254,7 @@ def test_bootstrap_cites_frozen_workload_without_journalizing_specification(
 
 def test_epoch_frontiers_never_rehabilitate_a_previously_stale_record() -> None:
     stage = _stage()
-    reference = {"schema": "OxideWorkloadRefV1", "workload_blob": "fixture"}
+    reference = {"schema": "OxideVerificationContractRefV1", "contract_blob": "fixture"}
     replay_root = "a" * 32
 
     def record(sequence: int, epoch: int, body: str) -> dict:
@@ -716,7 +715,6 @@ def test_published_candidate_exposes_shared_checks_and_reviews_concurrently(
     stage = _stage()
     stage["tasks"][0]["checks"] = ["test A one", "test A two"]
     stage["tasks"][1]["depends_on"] = []
-    stage["stage_gate"] = []
     socket = _socket()
     server, thread = serve_in_thread(tmp_path / "shared-checks.sqlite3", socket)
     client = WorkflowClient(JournalClient(socket), stage)
@@ -894,7 +892,6 @@ def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_
             }
             for index, identifier in enumerate(task_ids)
         ],
-        "stage_gate": ["test product"],
     }
     socket = _socket()
     server, thread = serve_in_thread(tmp_path / "product.sqlite3", socket)

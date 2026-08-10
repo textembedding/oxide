@@ -20,6 +20,7 @@ from .evidence import (
     validate_declared_json_receipt,
 )
 from .journal_backend import JournalError
+from .verification.driver import engine_digest, invocation
 from .workflow import WorkflowClient, WorkflowError
 
 
@@ -110,7 +111,8 @@ class Worker:
         assignment_path: str | Path | None = None,
         run_config: str | Path | None = None,
         evidence_root: str | Path | None = None,
-        checker_root: str | Path | None = None,
+        contract_root: str | Path | None = None,
+        contract_path: str = "verification/contract.toml",
         epoch: int = 0,
         log: Callable[[str], None] = print,
     ) -> None:
@@ -130,11 +132,12 @@ class Worker:
             if evidence_root
             else ((self.run_config.parent / "evidence" / "checks") if self.run_config else None)
         )
-        self.checker_root = (
-            Path(checker_root)
-            if checker_root
-            else ((self.run_config.parent / "frozen-checker") if self.run_config else None)
+        self.contract_root = (
+            Path(contract_root)
+            if contract_root
+            else ((self.run_config.parent / "frozen-contract") if self.run_config else None)
         )
+        self.contract_path = contract_path
         self.epoch = epoch
         self.process: subprocess.Popen[str] | None = None
         self.log = log
@@ -160,11 +163,11 @@ class Worker:
     def _prompt(self) -> str:
         ordinal = int(self.worker_id.rsplit("-", 1)[-1])
         return (
-            f"Perform exactly one journal-assigned role as {self.worker_id}.\nThe journal is the entire coordination interface between workers. journal_search and journal_add are the only journal operations. Use repository, Git, shell, and test tools normally for the assigned role; never inspect the harness, journal socket, or journal database by shell. Treat the repository's oxide-harness directory as immutable workload input, never as product implementation.\n"
+            f"Perform exactly one journal-assigned role as {self.worker_id}.\nThe journal is the entire coordination interface between workers. journal_search and journal_add are the only journal operations. Use repository, Git, shell, and test tools normally for the assigned role; never inspect the harness, journal socket, or journal database by shell. Treat the target's frozen verification contract and immutable specification inputs as authority; the target contains no harness runtime implementation.\n"
             "SEARCH returns one bounded union of exact and threshold-eligible semantic records. The configured exact floor preserves exact anchors when available, but one response is not necessarily exhaustive. Results are ordered only by journal sequence; semantic score never controls position. Use match_kind and stored routing metadata to distinguish exact records, and use returned task IDs, errors, hashes, decisions, components, or concepts for iterative follow-up searches. Absence from an ordinary natural-language search is not proof that no record exists.\n"
             f"1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, rotate the complete ready list left by {ordinal} modulo its length, and journal_add exact claims until accepted.\n2. Orient only with records bound to the assignment: REVISION searches `review:<root_task_id>:<generation>` and `verify:<root_task_id>:<head_sha>`; INTERNAL REVIEW searches the exact assigned `head_sha` and any returned acceptance-result identities; MERGE searches `review:<root_task_id>:<generation>`. Never assume one bounded response exhausts assignment history; follow useful returned identifiers with more specific searches.\n"
             "3. Keep the shared truth current with substantive work records. Immediately after orientation or a new finding, before and after a material command or diagnostic, and after each durable edit, add `work-log: <claim identity after claim: >`, `phase: <oriented|diagnosed|editing|checking|check-result|ready>`, and one concise concrete `evidence:` fact. Never add timer, heartbeat, elapsed-time, or empty progress records. Re-search the exact claim after each work-log.\n4. Follow the assigned role. A fresh session may receive any role. Acceptance-check assignments are executed directly by the qualified harness process against the immutable candidate; they never require a model session.\n"
-            f"AUTHOR or REVISION\n- Inspect the repository specification directly with rg, file reads, and Git. Journal citations, discoveries, decisions, and evidence, never copied specification content.\n- Fetch origin. For a new candidate, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.\n- Diagnose, implement only the objective, and use targeted development diagnostics when useful, but do not run the returned acceptance list: publication creates shared candidate-bound check assignments. After each coherent durable edit, add `checkpoint: task:<root_task_id>` and a work-log. Commit and push the exact branch.\n- Re-search the claim, add `handoff: task:<root_task_id>` with candidate evidence, then add `open-pr: task:<root_task_id>` with exact `branch:`, `base:`, `head:`, `tree:` (from `git rev-parse HEAD^{{tree}}`), and `verified: true`. That flag attests immutable candidate publication, not acceptance-check success.\n- The target-owned judge is frozen outside the candidate. A change to its protected paths requires a newly qualified run and cannot judge itself.\n- If an external capability is unavailable, journal `blocked: task:<root_task_id>` with the returned role, branch, generation, head, `verified: false`, and reason.\n"
+            f"AUTHOR or REVISION\n- Inspect the repository specification directly with rg, file reads, and Git. Journal citations, discoveries, decisions, and evidence, never copied specification content.\n- Fetch origin. For a new candidate, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.\n- Diagnose, implement only the objective, and use targeted development diagnostics when useful, but do not run the returned acceptance list: publication creates shared candidate-bound check assignments. After each coherent durable edit, add `checkpoint: task:<root_task_id>` and a work-log. Commit and push the exact branch.\n- Re-search the claim, add `handoff: task:<root_task_id>` with candidate evidence, then add `open-pr: task:<root_task_id>` with exact `branch:`, `base:`, `head:`, `tree:` (from `git rev-parse HEAD^{{tree}}`), and `verified: true`. That flag attests immutable candidate publication, not acceptance-check success.\n- The deterministic judge and receipt schema are harness-owned. The target owns the frozen semantic contract, toolchain lock, formal artifacts, and coverage manifest. A candidate cannot change an immutable contract input or redefine the engine that judges it.\n- If an external capability is unavailable, journal `blocked: task:<root_task_id>` with the returned role, branch, generation, head, `verified: false`, and reason.\n"
             "INTERNAL REVIEW\n- An accepted claim is final eligibility for that generation. Worker slots are reusable and every role starts a fresh context, so current or prior authorship does not exclude a slot. Work read-only at exact `head_sha`; inspect the diff and repository specification for correctness, completeness, maintainability, tests, architectural fit, omissions, weak assertions, unsafe shortcuts, and integration hazards.\n- Apply the returned `review_role` as your primary independent question: `specification` asks whether the product model covers intended success, failure, boundary, and reachable-state behavior; `adversarial` asks whether the production implementation is actually connected to meaningful, non-vacuous proof obligations; `integration` asks whether concurrency, persistence, recovery, unsafe code, source closure, assumptions, scalability, and the trusted boundary are sound. Do not substitute one question for another.\n- Consume terminal acceptance results listed or found through exact `verify:<root_task_id>:<head_sha>:<ordinal>` searches. Review is independent of check execution: do not mechanically rerun the declared command list. Targeted diagnostics may investigate a concern; claim an unsatisfied acceptance check only as a separate fresh assignment after review. Passing review cannot replace a required check result, and passing checks cannot replace review.\n- Re-search the review identity. On pass add `approve: review:<root_task_id>:<generation>:<review_ordinal>` with exact head, `verified: true`, and criterion-level evidence for the assigned review question. On defect use `challenge:` with the same identity, exact head, `verified: true`, and reason. Do not edit, commit, or push.\n"
             f"MERGE\n- Confirm the exact head, configured approval count, and shared acceptance results. Re-search the merge identity, then add `merge: task:<root_task_id>` with exact generation and head. The launcher verifies repository and prospective-tree invariants before merging to `{self.target_branch}`.\nDo not claim a second item. Both tools take one `yaml` argument containing exactly one string field: `query` for journal_search or `text` for journal_add.\n"
         )
@@ -317,6 +320,7 @@ class Worker:
         maximum_artifact_bytes = int(qualification.get("max_artifact_bytes", 16777216))
         infrastructure_codes = qualification.get("infrastructure_exit_codes", [2, 124])
         expected_environment = qualification.get("environment")
+        expected_engine = qualification.get("verification_engine")
         result_kind = "infrastructure_failure"
         exit_code: int | None = None
         started_at = time.time()
@@ -336,7 +340,9 @@ class Worker:
                     expected_environment is not None
                     and expected_environment != observed_environment()
                 ):
-                    raise EvidenceError("execution environment differs from checker qualification")
+                    raise EvidenceError("execution environment differs from contract qualification")
+                if check.get("driver") == "verus" and expected_engine != engine_digest():
+                    raise EvidenceError("verification engine changed after contract qualification")
                 subprocess.run(
                     ["git", "clone", "--no-hardlinks", str(self.target_repo), str(repository)],
                     text=True,
@@ -371,7 +377,7 @@ class Worker:
                 )
                 environment.update(
                     {
-                        "OXIDE_FROZEN_CHECKER_ROOT": str(self.checker_root or ""),
+                        "OXIDE_FROZEN_CONTRACT_ROOT": str(self.contract_root or ""),
                         "OXIDE_CANDIDATE_COMMIT": head,
                         "OXIDE_CANDIDATE_TREE": tree,
                         "OXIDE_PROSPECTIVE_COMMIT": head,
@@ -380,11 +386,31 @@ class Worker:
                         "OXIDE_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
                     }
                 )
+                if check.get("driver") == "verus":
+                    if self.contract_root is None:
+                        raise EvidenceError("frozen verification contract is unavailable")
+                    process_command = invocation(
+                        repository,
+                        self.contract_root,
+                        str(check.get("operation")),
+                        contract_path=self.contract_path,
+                        root=check.get("root"),
+                        candidate_tree=tree,
+                        prospective_tree=tree,
+                        receipt=declared / "receipt.json",
+                        artifact_dir=declared / "artifacts",
+                    )
+                    process_directory = repository
+                elif check.get("driver") == "command":
+                    process_command = ["/bin/zsh", "-lc", command]
+                    process_directory = working_directory
+                else:
+                    raise EvidenceError("acceptance check has an unsupported driver")
                 self.log(f"ACCEPTANCE CHECK STARTED {claim.removeprefix('claim: ')}\n{command}")
                 with stdout.open("wb") as out, stderr.open("wb") as err:
                     process = subprocess.Popen(
-                        ["/bin/zsh", "-lc", command],
-                        cwd=working_directory,
+                        process_command,
+                        cwd=process_directory,
                         env=environment,
                         stdout=out,
                         stderr=err,

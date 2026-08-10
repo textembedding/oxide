@@ -19,13 +19,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pygments import highlight as pygments_highlight
 from pygments.formatters import TerminalFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from .concurrency import ConcurrencyError, implementation_digest, run_campaign, validate_receipt
+from .contract import ContractError, load_contract
 from .evidence import (
     EvidenceError,
     begin_attempt,
@@ -46,159 +46,20 @@ from .journal_backend import (
     start_journal,
     validate_search_capacity,
 )
+from .verification.driver import engine_digest, invocation
 from .worker import Worker, worktree_diff
 from .workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / ".oxide" / "runs"
 CHECKPOINTS = ROOT / ".oxide" / "checkpoints"
-TARGET_HARNESS_DIRECTORY = "oxide-harness"
+TARGET_VERIFICATION_DIRECTORY = "verification"
 _WORKLOAD_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class HarnessError(RuntimeError):
     pass
-
-
-def _validate_stage(loaded: object, source: object) -> dict[str, Any]:
-    if not isinstance(loaded, dict):
-        raise HarnessError("workload contract must be a YAML mapping")
-    result = dict(loaded)
-    required = {"stage", "enabled", "goal", "tasks", "stage_gate"}
-    if not required <= set(result) or result["enabled"] is not True:
-        raise HarnessError("workload is disabled or incomplete")
-    if not isinstance(result["goal"], str) or not result["goal"].strip():
-        raise HarnessError("workload goal must be a nonempty string")
-    if not isinstance(result["tasks"], list) or not result["tasks"]:
-        raise HarnessError("workload must contain tasks")
-    if not isinstance(result["stage_gate"], list) or not all(
-        isinstance(command, str) and command.strip() for command in result["stage_gate"]
-    ):
-        raise HarnessError("workload stage_gate must be a list of commands")
-    identifiers: set[str] = set()
-    for task in result["tasks"]:
-        if not isinstance(task, dict):
-            raise HarnessError("each workload task must be a mapping")
-        if not {"id", "title", "prompt", "depends_on", "checks"} <= set(task):
-            raise HarnessError(f"incomplete task: {task.get('id', '<unknown>')}")
-        identifier = str(task["id"])
-        if not _WORKLOAD_NAME.fullmatch(identifier) or identifier in identifiers:
-            raise HarnessError(f"task identifiers must be unique safe names: {identifier!r}")
-        identifiers.add(identifier)
-        if (
-            not isinstance(task["title"], str)
-            or not task["title"].strip()
-            or not isinstance(task["prompt"], str)
-            or not task["prompt"].strip()
-        ):
-            raise HarnessError(f"task {identifier} title and prompt must be nonempty strings")
-        if not isinstance(task["depends_on"], list) or not all(
-            isinstance(item, str) for item in task["depends_on"]
-        ):
-            raise HarnessError(f"task {identifier} dependencies must be a list of task IDs")
-        if not isinstance(task["checks"], list) or not task["checks"]:
-            raise HarnessError(f"task {identifier} checks must contain commands")
-        check_ids: set[str] = set()
-        for ordinal, check in enumerate(task["checks"], 1):
-            if isinstance(check, str):
-                if not check.strip():
-                    raise HarnessError(f"task {identifier} check {ordinal} is empty")
-                continue
-            if not isinstance(check, dict):
-                raise HarnessError(f"task {identifier} check {ordinal} is malformed")
-            command = check.get("command")
-            check_id = check.get("id", f"check-{ordinal}")
-            working_directory = check.get("working_directory", ".")
-            environment = check.get("environment", {})
-            artifacts = check.get("artifacts", [])
-            receipt_required = check.get("receipt_required", False)
-            if (
-                not isinstance(command, str)
-                or not command.strip()
-                or not isinstance(check_id, str)
-                or not check_id
-                or check_id in check_ids
-                or not isinstance(working_directory, str)
-                or not working_directory
-                or Path(working_directory).is_absolute()
-                or ".." in Path(working_directory).parts
-                or not isinstance(environment, dict)
-                or any(
-                    not isinstance(key, str) or not isinstance(value, str)
-                    for key, value in environment.items()
-                )
-                or not isinstance(artifacts, list)
-                or any(not isinstance(value, str) or not value for value in artifacts)
-                or not isinstance(receipt_required, bool)
-            ):
-                raise HarnessError(f"task {identifier} check {ordinal} identity is malformed")
-            check_ids.add(check_id)
-    for task in result["tasks"]:
-        unknown = set(task["depends_on"]) - identifiers
-        if unknown or task["id"] in task["depends_on"]:
-            raise HarnessError(f"task {task['id']} has invalid dependencies: {sorted(unknown)}")
-    dependencies = {str(task["id"]): set(task["depends_on"]) for task in result["tasks"]}
-    remaining = set(dependencies)
-    while remaining:
-        ready = {identifier for identifier in remaining if not dependencies[identifier] & remaining}
-        if not ready:
-            cycle = ", ".join(sorted(remaining))
-            raise HarnessError(f"workload dependency graph contains a cycle: {cycle}")
-        remaining -= ready
-    checker = result.get("checker")
-    if checker is not None:
-        if not isinstance(checker, dict):
-            raise HarnessError("workload checker must be a mapping")
-        paths = checker.get("paths")
-        qualification = checker.get("qualification")
-        prospective_gate = checker.get("prospective_gate")
-        infrastructure_codes = checker.get("infrastructure_exit_codes", [2, 124])
-        if (
-            not isinstance(paths, list)
-            or not paths
-            or any(
-                not isinstance(value, str)
-                or not value
-                or Path(value).is_absolute()
-                or ".." in Path(value).parts
-                for value in paths
-            )
-            or len(set(paths)) != len(paths)
-            or not isinstance(qualification, list)
-            or not qualification
-            or not all(isinstance(value, str) and value.strip() for value in qualification)
-            or not isinstance(prospective_gate, list)
-            or not prospective_gate
-            or not all(isinstance(value, str) and value.strip() for value in prospective_gate)
-            or not isinstance(infrastructure_codes, list)
-            or any(
-                isinstance(value, bool) or not isinstance(value, int)
-                for value in infrastructure_codes
-            )
-            or not isinstance(checker.get("timeout_seconds", 1800), int)
-            or not 1 <= int(checker.get("timeout_seconds", 1800)) <= 86400
-            or not isinstance(checker.get("max_artifact_bytes", 16777216), int)
-            or not 1 <= int(checker.get("max_artifact_bytes", 16777216)) <= 67108864
-            or not isinstance(checker.get("prospective_receipt_required", False), bool)
-        ):
-            raise HarnessError("workload checker contract is malformed")
-    try:
-        json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False)
-    except (TypeError, ValueError) as error:
-        raise HarnessError(
-            "workload contract must contain only finite JSON-compatible values"
-        ) from error
-    return result
-
-
-def load_stage(path: str | Path) -> dict[str, Any]:
-    source = Path(path)
-    try:
-        loaded = yaml.safe_load(source.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as error:
-        raise HarnessError(f"invalid workload contract {source}: {error}") from error
-    return _validate_stage(loaded, source)
 
 
 def _run_dir(workload: str) -> Path:
@@ -211,16 +72,17 @@ def _config_path(workload: str) -> Path:
     return _run_dir(workload) / "run.json"
 
 
-def _stage_path(target: str | Path, workload: str) -> Path:
-    if _WORKLOAD_NAME.fullmatch(workload) is None:
-        raise HarnessError("workload must be a safe name, not a path")
+def _contract_path(target: str | Path, contract: str) -> Path:
     target_root = Path(target).resolve()
-    root = (target_root / TARGET_HARNESS_DIRECTORY).resolve()
+    root = (target_root / TARGET_VERIFICATION_DIRECTORY).resolve()
     if not root.is_relative_to(target_root):
-        raise HarnessError("target harness directory must not escape through a symlink")
-    path = (root / f"{workload}.yaml").resolve()
+        raise HarnessError("target verification directory must not escape through a symlink")
+    relative = Path(contract)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HarnessError("verification contract must be a target-relative path")
+    path = (target_root / relative).resolve()
     if not path.is_relative_to(root):
-        raise HarnessError("workload contract escaped the target harness directory")
+        raise HarnessError("verification contract must live under verification/")
     return path
 
 
@@ -229,7 +91,7 @@ def _repository_identity(target: Path) -> str:
     return remote or str(target.resolve())
 
 
-def _checker_entries(target: Path, base_commit: str, paths: list[str]) -> list[dict[str, str]]:
+def _immutable_entries(target: Path, base_commit: str, paths: list[str]) -> list[dict[str, str]]:
     raw = subprocess.run(
         ["git", "ls-tree", "-r", "-z", "--full-tree", base_commit, "--", *paths],
         cwd=target,
@@ -237,7 +99,7 @@ def _checker_entries(target: Path, base_commit: str, paths: list[str]) -> list[d
         check=False,
     )
     if raw.returncode:
-        raise HarnessError(raw.stderr.decode(errors="replace").strip() or "cannot freeze checker")
+        raise HarnessError(raw.stderr.decode(errors="replace").strip() or "cannot freeze contract")
     entries: list[dict[str, str]] = []
     for item in raw.stdout.split(b"\0"):
         if not item:
@@ -247,73 +109,71 @@ def _checker_entries(target: Path, base_commit: str, paths: list[str]) -> list[d
             mode, kind, object_id = header.decode("ascii").split()
             path = encoded_path.decode("utf-8")
         except (ValueError, UnicodeDecodeError) as error:
-            raise HarnessError("checker closure contains an unsupported Git entry") from error
+            raise HarnessError("contract closure contains an unsupported Git entry") from error
         if kind != "blob" or mode not in {"100644", "100755"}:
-            raise HarnessError(f"checker path is not a regular tracked file: {path}")
+            raise HarnessError(f"immutable contract path is not a regular tracked file: {path}")
         entries.append({"path": path, "mode": mode, "blob": object_id})
     for configured in paths:
         prefix = configured.rstrip("/")
         if not any(
             item["path"] == prefix or item["path"].startswith(prefix + "/") for item in entries
         ):
-            raise HarnessError(f"checker path is absent from the staged base: {configured}")
+            raise HarnessError(
+                f"immutable contract path is absent from the staged base: {configured}"
+            )
     if not entries:
-        raise HarnessError("checker closure is empty")
+        raise HarnessError("immutable contract closure is empty")
     return sorted(entries, key=lambda item: item["path"])
 
 
 def _frozen_workload_ref(
     target: Path,
     base_commit: str,
-    workload: str,
-    stage: dict[str, Any] | None = None,
+    contract_path: Path,
+    stage: dict[str, Any],
 ) -> dict[str, Any]:
-    path = _stage_path(target, workload)
-    relative = path.relative_to(target).as_posix()
+    relative = contract_path.relative_to(target).as_posix()
     blob = _git(target, "rev-parse", f"{base_commit}:{relative}")
-    tree = _git(target, "rev-parse", f"{base_commit}:{TARGET_HARNESS_DIRECTORY}")
+    verification = stage["verification"]
+    immutable_paths = list(verification["immutable_paths"])
+    if relative not in immutable_paths:
+        raise HarnessError("contract.immutable_paths must include the contract itself")
+    entries = _immutable_entries(target, base_commit, immutable_paths)
     result: dict[str, Any] = {
-        "schema": "OxideWorkloadRefV1",
+        "schema": "OxideVerificationContractRefV1",
         "target_repository": _repository_identity(target),
         "base_commit": base_commit,
-        "workload_path": relative,
-        "workload_blob": blob,
-        "harness_tree": tree,
+        "contract_path": relative,
+        "contract_blob": blob,
+        "immutable_paths": immutable_paths,
+        "immutable_entries": entries,
+        "contract_closure_sha256": sha256_bytes(canonical_bytes(entries)),
+        "verification_engine_sha256": engine_digest(),
         "harness_version": implementation_digest(ROOT),
+        "verification": {
+            "schema": "OxideFrozenVerificationPolicyV1",
+            "evidence_policy": str(verification["evidence_policy"]),
+            "timeout_seconds": int(verification["timeout_seconds"]),
+            "infrastructure_exit_codes": list(verification["infrastructure_exit_codes"]),
+            "max_artifact_bytes": int(verification["max_artifact_bytes"]),
+            "prospective_receipt_required": bool(verification["prospective_receipt_required"]),
+        },
     }
-    checker = stage.get("checker") if isinstance(stage, dict) else None
-    if isinstance(checker, dict):
-        entries = _checker_entries(target, base_commit, list(checker["paths"]))
-        result["checker"] = {
-            "schema": "OxideFrozenCheckerV1",
-            "paths": list(checker["paths"]),
-            "entries": entries,
-            "closure_sha256": sha256_bytes(canonical_bytes(entries)),
-            "evidence_policy": str(checker.get("evidence_policy", "one-qualified-execution-v1")),
-            "timeout_seconds": int(checker.get("timeout_seconds", 1800)),
-            "infrastructure_exit_codes": list(checker.get("infrastructure_exit_codes", [2, 124])),
-            "max_artifact_bytes": int(checker.get("max_artifact_bytes", 16777216)),
-            "prospective_receipt_required": bool(
-                checker.get("prospective_receipt_required", False)
-            ),
-        }
     return result
 
 
-def _materialize_checker(config: dict[str, Any]) -> Path | None:
-    checker = config["workload_ref"].get("checker")
-    if not isinstance(checker, dict):
-        return None
+def _materialize_contract(config: dict[str, Any]) -> Path:
+    reference = config["workload_ref"]
     target = Path(config["target_repo"])
-    root = Path(config["checker_root"])
+    root = Path(config["contract_root"]).resolve()
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
     base = str(config["base_commit"])
-    for entry in checker["entries"]:
+    for entry in reference["immutable_entries"]:
         destination = (root / str(entry["path"])).resolve()
         if not destination.is_relative_to(root):
-            raise HarnessError("checker entry escaped its frozen root")
+            raise HarnessError("contract entry escaped its frozen root")
         blob = subprocess.run(
             ["git", "show", f"{base}:{entry['path']}"],
             cwd=target,
@@ -323,7 +183,7 @@ def _materialize_checker(config: dict[str, Any]) -> Path | None:
         if blob.returncode:
             raise HarnessError(
                 blob.stderr.decode(errors="replace").strip()
-                or f"cannot materialize checker entry {entry['path']}"
+                or f"cannot materialize contract entry {entry['path']}"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(blob.stdout)
@@ -334,10 +194,10 @@ def _materialize_checker(config: dict[str, Any]) -> Path | None:
             "mode": entry["mode"],
             "blob": _git(target, "rev-parse", f"{base}:{entry['path']}"),
         }
-        for entry in checker["entries"]
+        for entry in reference["immutable_entries"]
     ]
-    if sha256_bytes(canonical_bytes(actual)) != checker["closure_sha256"]:
-        raise HarnessError("materialized checker closure identity changed")
+    if sha256_bytes(canonical_bytes(actual)) != reference["contract_closure_sha256"]:
+        raise HarnessError("materialized contract closure identity changed")
     return root
 
 
@@ -347,33 +207,31 @@ def _load_frozen_stage(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(reference, dict):
         raise HarnessError("run has no frozen workload reference")
     base = str(reference.get("base_commit", ""))
-    path = str(reference.get("workload_path", ""))
+    path = str(reference.get("contract_path", ""))
     if reference.get("target_repository") != _repository_identity(target):
         raise HarnessError("target repository identity changed since run creation")
-    if _git(target, "rev-parse", f"{base}:{path}") != reference.get("workload_blob"):
-        raise HarnessError("frozen workload blob no longer matches the staged base")
-    if _git(target, "rev-parse", f"{base}:{TARGET_HARNESS_DIRECTORY}") != reference.get(
-        "harness_tree"
-    ):
-        raise HarnessError("frozen target harness tree no longer matches the staged base")
-    if _git(target, "rev-parse", f"HEAD:{TARGET_HARNESS_DIRECTORY}") != reference.get(
-        "harness_tree"
-    ):
-        raise HarnessError("workload/specification area changed; start a new run")
+    if _git(target, "rev-parse", f"{base}:{path}") != reference.get("contract_blob"):
+        raise HarnessError("frozen contract blob no longer matches the staged base")
+    entries = reference.get("immutable_entries")
+    if not isinstance(entries, list):
+        raise HarnessError("run has no immutable contract closure")
+    for entry in entries:
+        if _git(target, "rev-parse", f"HEAD:{entry['path']}", check=False) != entry["blob"]:
+            raise HarnessError("immutable verification contract changed; start a new run")
     if _git(
         target,
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
         "--",
-        TARGET_HARNESS_DIRECTORY,
+        *reference["immutable_paths"],
     ):
-        raise HarnessError("workload/specification area changed; start a new run")
+        raise HarnessError("immutable verification contract changed; start a new run")
+    frozen_path = Path(config["contract_root"]) / path
     try:
-        loaded = yaml.safe_load(_git(target, "show", f"{base}:{path}"))
-    except yaml.YAMLError as error:
-        raise HarnessError(f"frozen workload is invalid: {error}") from error
-    return _validate_stage(loaded, f"{base}:{path}")
+        return load_contract(frozen_path)
+    except ContractError as error:
+        raise HarnessError(str(error)) from error
 
 
 def _workflow_client(config: dict[str, Any], journal: JournalPort) -> WorkflowClient:
@@ -436,7 +294,7 @@ def _load_config(workload: str) -> dict[str, Any]:
     run_id = config.get("run_id")
     expected_prefix = f"codex/oxide-{_slug(str(run_id))}"
     if (
-        config.get("schema_version") != 8
+        config.get("schema_version") != 9
         or config.get("workload") != workload
         or not isinstance(run_id, str)
         or re.fullmatch(re.escape(workload) + r"-\d{8}-\d{6}", run_id) is None
@@ -454,7 +312,7 @@ def _load_config(workload: str) -> dict[str, Any]:
         or not isinstance(config.get("concurrency_validation"), dict)
         or not isinstance(config.get("workload_ref"), dict)
         or not isinstance(config.get("evidence_root"), str)
-        or not isinstance(config.get("checker_root"), str)
+        or not isinstance(config.get("contract_root"), str)
         or re.fullmatch(r"[0-9a-f]{32}", str(config.get("replay_root", ""))) is None
         or not _valid_epoch_frontiers(
             config.get("epoch_frontiers"),
@@ -476,14 +334,16 @@ def _load_config(workload: str) -> dict[str, Any]:
         config["database"] = str(run_dir / "journal.sqlite3")
         config["socket"] = str(run_dir / "journal.sock")
         config["evidence_root"] = str(run_dir / "evidence" / "checks")
-        config["checker_root"] = str(run_dir / "frozen-checker")
+        config["contract_root"] = str(run_dir / "frozen-contract")
     elif (
         Path(str(config["evidence_root"])).resolve() != run_dir / "evidence" / "checks"
-        or Path(str(config["checker_root"])).resolve() != run_dir / "frozen-checker"
+        or Path(str(config["contract_root"])).resolve() != run_dir / "frozen-contract"
     ):
-        raise HarnessError("run evidence or checker root failed integrity validation")
+        raise HarnessError("run evidence or contract root failed integrity validation")
     target = Path(str(config.get("target_repo", ""))).resolve()
-    config["stage_path"] = str(_stage_path(target, workload))
+    config["contract_path"] = str(
+        _contract_path(target, str(config["workload_ref"]["contract_path"]))
+    )
     return config
 
 
@@ -614,28 +474,10 @@ def _prepare_repositories(config: dict[str, Any]) -> None:
             _git(clone, "checkout", "-B", "oxide-worker", remote)
 
 
-def _run_checks(
-    repository: Path, checks: list[str], log: Callable[[str], None]
-) -> tuple[bool, str]:
-    for check in checks:
-        log(f"verify: {check}")
-        result = subprocess.run(
-            ["/bin/zsh", "-lc", check],
-            cwd=repository,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode:
-            output = (result.stdout + result.stderr).strip()
-            return False, f"check failed ({result.returncode}): {check}: {output[-1800:]}"
-    return True, ""
-
-
-def _run_qualified_commands(
+def _run_qualified_check(
     config: dict[str, Any],
     repository: Path,
-    commands: list[str],
+    check: dict[str, Any],
     requirement: dict[str, Any],
     *,
     candidate_commit: str,
@@ -648,9 +490,11 @@ def _run_qualified_commands(
     existing = load_terminal_receipt(root, requirement)
     if existing is not None:
         return existing
-    checker = config["workload_ref"].get("checker")
-    if not isinstance(checker, dict):
-        raise HarnessError("qualified command requires a frozen checker")
+    policy = config["workload_ref"].get("verification")
+    if not isinstance(policy, dict):
+        raise HarnessError("qualified check requires a frozen verification contract")
+    if config["workload_ref"].get("verification_engine_sha256") != engine_digest():
+        raise HarnessError("verification engine changed after run qualification; start a new run")
     attempt = hashlib.sha256(
         f"{evidence_key(requirement)}:{secrets.token_hex(16)}".encode()
     ).hexdigest()
@@ -664,8 +508,11 @@ def _run_qualified_commands(
         declared.mkdir()
         environment = os.environ.copy()
         environment.update(
+            {str(key): str(value) for key, value in check.get("environment", {}).items()}
+        )
+        environment.update(
             {
-                "OXIDE_FROZEN_CHECKER_ROOT": str(config["checker_root"]),
+                "OXIDE_FROZEN_CONTRACT_ROOT": str(config["contract_root"]),
                 "OXIDE_CANDIDATE_COMMIT": candidate_commit,
                 "OXIDE_CANDIDATE_TREE": candidate_tree,
                 "OXIDE_PROSPECTIVE_COMMIT": prospective_commit,
@@ -674,21 +521,39 @@ def _run_qualified_commands(
                 "OXIDE_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
             }
         )
-        script = "set -e\n" + "\n".join(commands)
         exit_code: int | None = None
         result_kind = "infrastructure_failure"
         try:
-            expected_environment = checker.get("execution_environment")
+            expected_environment = policy.get("execution_environment")
             if expected_environment is not None and expected_environment != observed_environment():
-                raise EvidenceError("execution environment differs from checker qualification")
+                raise EvidenceError("execution environment differs from contract qualification")
+            if check.get("driver") == "verus":
+                command = invocation(
+                    repository,
+                    config["contract_root"],
+                    str(check["operation"]),
+                    contract_path=str(config["workload_ref"]["contract_path"]),
+                    root=check.get("root"),
+                    candidate_tree=candidate_tree,
+                    prospective_tree=prospective_tree,
+                    receipt=declared / "receipt.json",
+                    artifact_dir=declared / "artifacts",
+                )
+            elif check.get("driver") == "command":
+                command = ["/bin/zsh", "-lc", "set -e\n" + str(check["command"])]
+            else:
+                raise EvidenceError("qualified check has an unsupported driver")
+            working_directory = (repository / str(check.get("working_directory", "."))).resolve()
+            if not working_directory.is_relative_to(repository) or not working_directory.is_dir():
+                raise EvidenceError("qualified check working directory is unavailable")
             with stdout.open("wb") as out, stderr.open("wb") as err:
                 completed = subprocess.run(
-                    ["/bin/zsh", "-lc", script],
-                    cwd=repository,
+                    command,
+                    cwd=repository if check.get("driver") == "verus" else working_directory,
                     env=environment,
                     stdout=out,
                     stderr=err,
-                    timeout=int(checker["timeout_seconds"]),
+                    timeout=int(policy["timeout_seconds"]),
                     check=False,
                 )
             exit_code = completed.returncode
@@ -696,13 +561,13 @@ def _run_qualified_commands(
                 "passed"
                 if exit_code == 0
                 else "infrastructure_failure"
-                if exit_code in checker["infrastructure_exit_codes"]
+                if exit_code in policy["infrastructure_exit_codes"]
                 else "product_failure"
             )
             if receipt_required:
                 validate_declared_json_receipt(
                     declared / "receipt.json",
-                    maximum_bytes=int(checker["max_artifact_bytes"]),
+                    maximum_bytes=int(policy["max_artifact_bytes"]),
                 )
         except subprocess.TimeoutExpired:
             stderr.write_text("qualified command timed out\n", encoding="utf-8")
@@ -724,19 +589,19 @@ def _run_qualified_commands(
             stdout=stdout,
             stderr=stderr,
             artifact_paths=artifacts,
-            maximum_artifact_bytes=int(checker["max_artifact_bytes"]),
+            maximum_artifact_bytes=int(policy["max_artifact_bytes"]),
             started_at=started_at,
         )
     return receipt, digest
 
 
-def _qualify_checker(config: dict[str, Any], stage: dict[str, Any]) -> None:
-    checker_contract = stage.get("checker")
-    checker_ref = config["workload_ref"].get("checker")
-    if not isinstance(checker_contract, dict) or not isinstance(checker_ref, dict):
-        return
+def _qualify_contract(config: dict[str, Any], stage: dict[str, Any]) -> None:
+    verification = stage["verification"]
+    policy_ref = config["workload_ref"]["verification"]
     target = Path(config["target_repo"])
-    with tempfile.TemporaryDirectory(prefix="checker-qualification-", dir=config["run_dir"]) as raw:
+    with tempfile.TemporaryDirectory(
+        prefix="contract-qualification-", dir=config["run_dir"]
+    ) as raw:
         repository = Path(raw) / "repository"
         completed = subprocess.run(
             ["git", "clone", "--no-hardlinks", str(target), str(repository)],
@@ -746,35 +611,43 @@ def _qualify_checker(config: dict[str, Any], stage: dict[str, Any]) -> None:
         )
         if completed.returncode:
             raise HarnessError(
-                completed.stderr.strip() or "cannot create checker qualification clone"
+                completed.stderr.strip() or "cannot create contract qualification clone"
             )
         _git(repository, "checkout", "--detach", str(config["base_commit"]))
         tree = _git(repository, "rev-parse", "HEAD^{tree}")
         requirement = {
-            "schema": "OxideCheckerQualificationV1",
+            "schema": "OxideVerificationQualificationV1",
             "run_id": config["run_id"],
             "base_commit": config["base_commit"],
             "base_tree": tree,
-            "workload_blob": config["workload_ref"]["workload_blob"],
-            "checker_closure": checker_ref["closure_sha256"],
-            "commands": list(checker_contract["qualification"]),
+            "contract_path": config["workload_ref"]["contract_path"],
+            "contract_blob": config["workload_ref"]["contract_blob"],
+            "contract_closure": config["workload_ref"]["contract_closure_sha256"],
+            "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+            "operations": list(verification["qualification"]),
             "environment": observed_environment(),
         }
-        receipt, digest = _run_qualified_commands(
-            config,
-            repository,
-            list(checker_contract["qualification"]),
-            requirement,
-            candidate_commit=str(config["base_commit"]),
-            candidate_tree=tree,
-            prospective_commit=str(config["base_commit"]),
-            prospective_tree=tree,
-            receipt_required=False,
-        )
-    if receipt["result"] != "passed":
-        raise HarnessError(f"frozen checker qualification failed: {receipt['result']}")
-    checker_ref["qualification_receipt_sha256"] = digest
-    checker_ref["execution_environment"] = observed_environment()
+        digests: list[str] = []
+        for operation in verification["qualification"]:
+            operation_requirement = {**requirement, "operation": operation}
+            receipt, digest = _run_qualified_check(
+                config,
+                repository,
+                {"driver": "verus", "operation": operation},
+                operation_requirement,
+                candidate_commit=str(config["base_commit"]),
+                candidate_tree=tree,
+                prospective_commit=str(config["base_commit"]),
+                prospective_tree=tree,
+                receipt_required=False,
+            )
+            if receipt["result"] != "passed":
+                raise HarnessError(
+                    f"frozen contract qualification failed ({operation}): {receipt['result']}"
+                )
+            digests.append(digest)
+    policy_ref["qualification_receipt_sha256"] = sha256_bytes(canonical_bytes(digests))
+    policy_ref["execution_environment"] = observed_environment()
 
 
 def _merge_failed(
@@ -867,34 +740,33 @@ def _merge_task(
                     prospective.stderr.strip() or "candidate conflicts with current target",
                 )
                 return
-        checker_ref = config["workload_ref"].get("checker")
-        protected = [TARGET_HARNESS_DIRECTORY]
-        if isinstance(checker_ref, dict):
-            protected.extend(str(value) for value in checker_ref["paths"])
-        protected = sorted(set(protected))
+        verification_ref = config["workload_ref"]["verification"]
+        protected = sorted(set(config["workload_ref"]["immutable_paths"]))
         if not _git_succeeds(verification, "diff", "--quiet", before, "HEAD", "--", *protected):
             _merge_failed(
                 config,
                 client,
                 task,
-                "candidate modifies immutable workload or frozen-checker inputs",
+                "candidate modifies immutable verification-contract inputs",
             )
             return
         verified_commit = _git(verification, "rev-parse", "HEAD")
         expected_tree = _git(verification, "rev-parse", "HEAD^{tree}")
         prospective_receipt = ""
         stage = _load_frozen_stage(config)
-        checker_contract = stage.get("checker")
-        if isinstance(checker_contract, dict):
-            commands = [str(value) for value in checker_contract["prospective_gate"]]
+        verification_contract = stage["verification"]
+        if isinstance(verification_contract, dict):
+            operation = str(verification_contract["prospective_operation"])
             requirement = {
                 "schema": "OxideProspectiveGateRequirementV1",
                 "run_id": config["run_id"],
                 "epoch": int(config["epoch"]),
                 "workload": {
                     "base_commit": config["workload_ref"]["base_commit"],
-                    "workload_blob": config["workload_ref"]["workload_blob"],
-                    "harness_tree": config["workload_ref"]["harness_tree"],
+                    "contract_path": config["workload_ref"]["contract_path"],
+                    "contract_blob": config["workload_ref"]["contract_blob"],
+                    "contract_closure": config["workload_ref"]["contract_closure_sha256"],
+                    "verification_engine": config["workload_ref"]["verification_engine_sha256"],
                 },
                 "candidate": {
                     "task": task["root_task_id"],
@@ -910,27 +782,29 @@ def _merge_task(
                 },
                 "check": {
                     "id": "prospective-authoritative-tree",
-                    "commands": commands,
+                    "driver": "verus",
+                    "operation": operation,
                     "working_directory": ".",
-                    "receipt_required": checker_ref["prospective_receipt_required"],
+                    "receipt_required": verification_ref["prospective_receipt_required"],
                 },
                 "qualification": {
-                    "checker_closure": checker_ref["closure_sha256"],
-                    "receipt": checker_ref["qualification_receipt_sha256"],
-                    "environment": checker_ref["execution_environment"],
-                    "policy": checker_ref["evidence_policy"],
+                    "contract_closure": config["workload_ref"]["contract_closure_sha256"],
+                    "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+                    "receipt": verification_ref["qualification_receipt_sha256"],
+                    "environment": verification_ref["execution_environment"],
+                    "policy": verification_ref["evidence_policy"],
                 },
             }
-            receipt, prospective_receipt = _run_qualified_commands(
+            receipt, prospective_receipt = _run_qualified_check(
                 config,
                 verification,
-                commands,
+                {"driver": "verus", "operation": operation},
                 requirement,
                 candidate_commit=head,
                 candidate_tree=str(task["tree_sha"]),
                 prospective_commit=verified_commit,
                 prospective_tree=expected_tree,
-                receipt_required=checker_ref["prospective_receipt_required"],
+                receipt_required=verification_ref["prospective_receipt_required"],
             )
             if receipt["result"] != "passed":
                 _merge_failed(
@@ -1033,25 +907,6 @@ def _publish(config: dict[str, Any], client: WorkflowClient, log: Callable[[str]
             target, "merge-base", "--is-ancestor", commit, tip
         ):
             raise HarnessError(f"task {task['task_id']} merge is absent from main")
-    stage = client.workload(config["run_id"])
-    with tempfile.TemporaryDirectory(prefix="final-check-", dir=config["run_dir"]) as temporary:
-        verification = Path(temporary) / "repository"
-        cloned = subprocess.run(
-            ["git", "clone", "--no-hardlinks", str(target), str(verification)],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if cloned.returncode:
-            raise HarnessError(cloned.stderr.strip() or "could not create final-check clone")
-        _git(verification, "checkout", target_branch)
-        if _git(verification, "rev-parse", "HEAD") != tip:
-            raise HarnessError("final-check clone does not match the target frontier")
-        passed, reason = _run_checks(
-            verification, [str(value) for value in stage["stage_gate"]], log
-        )
-        if not passed:
-            raise HarnessError(f"workload final gate failed: {reason}")
     result = client.add(
         config["run_id"],
         "launcher",
@@ -1249,9 +1104,7 @@ def _stop_processes(config: dict[str, Any]) -> None:
 def _start(config: dict[str, Any], foreground: bool) -> int:
     if foreground:
         return command_launch(argparse.Namespace(workload=config["workload"]))
-    _launch_terminal(
-        [str(ROOT / "oxide"), "harness", "launch", "--workload", config["workload"]]
-    )
+    _launch_terminal([str(ROOT / "oxide"), "harness", "launch", "--workload", config["workload"]])
     print(f"Started {config['workload']} in the background.")
     print(f"Observe: ./oxide harness observe --workload {config['workload']} --slot worker-0")
     print(f"Queue:   ./oxide harness observe-queue --workload {config['workload']}")
@@ -1286,16 +1139,9 @@ def _validate_bound_concurrency(config: dict[str, Any]) -> None:
 
 
 def command_run(arguments: argparse.Namespace) -> int:
-    if arguments.resume:
-        return command_resume(arguments)
     target = Path(arguments.target).expanduser().resolve()
-    run_dir = _run_dir(arguments.workload)
-    if _config_path(arguments.workload).exists():
-        raise HarnessError("run already exists; use resume or reset")
     if arguments.workers < 1:
         raise HarnessError("workers must be positive")
-    if not 1 <= arguments.reviews <= 16:
-        raise HarnessError("reviews must be between 1 and 16")
     try:
         min_exact, max_results = validate_search_capacity(
             int(arguments.min_exact), int(arguments.max_results)
@@ -1309,13 +1155,27 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError("target must be a Git worktree")
     if Path(_git(target, "rev-parse", "--show-toplevel")).resolve() != target:
         raise HarnessError("target must be the Git worktree root")
-    stage_path = _stage_path(target, arguments.workload)
-    stage = load_stage(stage_path)
-    stage_relative = str(stage_path.relative_to(target))
-    if not _git_succeeds(target, "ls-files", "--error-unmatch", "--", stage_relative):
+    contract_path = _contract_path(target, arguments.contract)
+    try:
+        stage = load_contract(contract_path)
+    except ContractError as error:
+        raise HarnessError(str(error)) from error
+    workload = str(stage["contract"]["id"])
+    arguments.workload = workload
+    run_dir = _run_dir(workload)
+    if _config_path(workload).exists():
+        raise HarnessError("run already exists; use resume or reset")
+    required_reviews = (
+        int(arguments.reviews) if arguments.reviews is not None else int(stage["minimum_reviews"])
+    )
+    if not int(stage["minimum_reviews"]) <= required_reviews <= 16:
         raise HarnessError(
-            f"workload contract must be committed inside {TARGET_HARNESS_DIRECTORY}/: "
-            f"{stage_relative}"
+            f"reviews must be between the contract minimum ({stage['minimum_reviews']}) and 16"
+        )
+    contract_relative = str(contract_path.relative_to(target))
+    if not _git_succeeds(target, "ls-files", "--error-unmatch", "--", contract_relative):
+        raise HarnessError(
+            f"verification contract must be committed under verification/: {contract_relative}"
         )
     journal_command = shlex.split(getattr(arguments, "journal_command", "") or "")
     receipt_path = Path(
@@ -1337,13 +1197,13 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError("target has changes; commit, stash, or remove them first")
     base_commit = _git(target, "rev-parse", "HEAD")
     git_identity = _target_git_identity(target)
-    run_id = f"{arguments.workload}-{time.strftime('%Y%m%d-%H%M%S')}"
-    workload_ref = _frozen_workload_ref(target, base_commit, arguments.workload, stage)
+    run_id = f"{workload}-{time.strftime('%Y%m%d-%H%M%S')}"
+    workload_ref = _frozen_workload_ref(target, base_commit, contract_path, stage)
     config = {
-        "schema_version": 8,
+        "schema_version": 9,
         "run_id": run_id,
-        "workload": arguments.workload,
-        "stage_path": str(stage_path),
+        "workload": workload,
+        "contract_path": str(contract_path),
         "target_repo": str(target),
         "target_branch": target_branch,
         "base_commit": base_commit,
@@ -1352,9 +1212,9 @@ def command_run(arguments: argparse.Namespace) -> int:
         "database": str(run_dir / "journal.sqlite3"),
         "socket": str(run_dir / "journal.sock"),
         "evidence_root": str(run_dir / "evidence" / "checks"),
-        "checker_root": str(run_dir / "frozen-checker"),
+        "contract_root": str(run_dir / "frozen-contract"),
         "workers": arguments.workers,
-        "required_reviews": arguments.reviews,
+        "required_reviews": required_reviews,
         "model": arguments.model,
         "journal_command": journal_command,
         "min_exact": min_exact,
@@ -1381,9 +1241,9 @@ def command_run(arguments: argparse.Namespace) -> int:
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
         Path(config["evidence_root"]).mkdir(parents=True)
-        _materialize_checker(config)
-        _qualify_checker(config, stage)
-        _atomic_json(_config_path(arguments.workload), config)
+        _materialize_contract(config)
+        _qualify_contract(config, stage)
+        _atomic_json(_config_path(workload), config)
         _snapshot_checkpoint(config, "initial")
     except Exception:
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -1443,6 +1303,7 @@ def command_launch(arguments: argparse.Namespace) -> int:
 
 def command_worker(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
+    _validate_bound_concurrency(config)
     _wait_socket(Path(config["socket"]))
     log = _Log(Path(config["run_dir"]) / "logs" / f"{arguments.slot}.log")
     worker = Worker(
@@ -1457,7 +1318,8 @@ def command_worker(arguments: argparse.Namespace) -> int:
         assignment_path=Path(config["run_dir"]) / "assignments" / f"{arguments.slot}.txt",
         run_config=_config_path(arguments.workload),
         evidence_root=config["evidence_root"],
-        checker_root=config["checker_root"],
+        contract_root=config["contract_root"],
+        contract_path=str(config["workload_ref"]["contract_path"]),
         epoch=int(config["epoch"]),
         log=log,
     )
@@ -2118,7 +1980,7 @@ def _render_queue(
         lines.extend((line, code) for line in wrapped or [""])
 
     if header:
-        add("OXIDE JOURNAL", code="1;36")
+        add("Oxide JOURNAL", code="1;36")
     if snapshot is None:
         add("WAITING FOR JOURNAL", code="1;33")
         return "\n".join(_style(line, code, color) for line, code in lines) + "\n"
@@ -2195,6 +2057,36 @@ def command_status(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def command_verify_contract(arguments: argparse.Namespace) -> int:
+    """Run the harness-owned verifier locally for contract development feedback."""
+
+    target = Path(arguments.target).expanduser().resolve()
+    if (
+        not target.is_dir()
+        or _git(target, "rev-parse", "--is-inside-work-tree", check=False) != "true"
+        or Path(_git(target, "rev-parse", "--show-toplevel")).resolve() != target
+    ):
+        raise HarnessError("target must be a Git worktree root")
+    contract = _contract_path(target, arguments.contract)
+    try:
+        load_contract(contract)
+    except ContractError as error:
+        raise HarnessError(str(error)) from error
+    relative = contract.relative_to(target).as_posix()
+    command = invocation(
+        target,
+        target,
+        arguments.operation,
+        contract_path=relative,
+        root=arguments.root,
+        candidate_tree=arguments.candidate_tree,
+        prospective_tree=arguments.prospective_tree,
+        receipt=arguments.receipt,
+        artifact_dir=arguments.artifact_dir,
+    )
+    return int(subprocess.run(command, cwd=target, check=False).returncode)
+
+
 def command_verify(_arguments: argparse.Namespace) -> int:
     commands = (
         [sys.executable, "-m", "ruff", "check", "."],
@@ -2243,10 +2135,14 @@ def build_parser() -> argparse.ArgumentParser:
     harness = root.add_parser("harness")
     commands = harness.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
-    run.add_argument("--workload", required=True)
+    run.add_argument(
+        "--contract",
+        default="verification/contract.toml",
+        help="target-relative formal implementation contract (default: verification/contract.toml)",
+    )
     run.add_argument("--target", default=str(ROOT.parent / "memory"))
     run.add_argument("--workers", type=int, default=7)
-    run.add_argument("--reviews", type=int, default=3)
+    run.add_argument("--reviews", type=int, help="review quorum; may not weaken contract minimum")
     run.add_argument("--model")
     run.add_argument(
         "--min-exact",
@@ -2269,7 +2165,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="passing campaign receipt to bind to this run; default: .oxide/validation/latest.json",
     )
     run.add_argument("--foreground", action="store_true")
-    run.add_argument("--resume", action="store_true")
     run.set_defaults(handler=command_run)
     concurrency = commands.add_parser("validate-concurrency")
     concurrency.add_argument("--workers", type=int, default=7)
@@ -2289,6 +2184,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"maximum SEARCH results (default: {DEFAULT_MAX_RESULTS})",
     )
     concurrency.set_defaults(handler=command_validate_concurrency)
+    contract_verify = commands.add_parser(
+        "verify-contract",
+        help="run the harness-owned Verus judge locally (advisory; runs freeze inputs separately)",
+    )
+    contract_verify.add_argument(
+        "operation", choices=("toolchain", "policy", "proof", "gate", "composition")
+    )
+    contract_verify.add_argument("--target", default=str(Path.cwd()))
+    contract_verify.add_argument("--contract", default="verification/contract.toml")
+    contract_verify.add_argument("--root")
+    contract_verify.add_argument("--candidate-tree")
+    contract_verify.add_argument("--prospective-tree")
+    contract_verify.add_argument("--receipt", type=Path)
+    contract_verify.add_argument("--artifact-dir", type=Path)
+    contract_verify.set_defaults(handler=command_verify_contract)
     for name, handler in (("pause", command_pause), ("reset", command_reset)):
         command = commands.add_parser(name)
         command.add_argument("--workload", required=True)

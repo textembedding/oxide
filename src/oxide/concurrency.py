@@ -42,7 +42,13 @@ def _write_json(path: Path, value: object) -> None:
 def implementation_digest(root: Path) -> str:
     hasher = hashlib.sha256()
     package = root / "src" / "oxide"
-    paths = sorted(package.glob("*.py")) + [
+    paths = [
+        path
+        for path in package.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    ] + [
         root / "oxide",
         root / "pyproject.toml",
         root / "uv.lock",
@@ -78,7 +84,6 @@ def kernel_digest(command: Sequence[str] | None) -> str:
 def _stage(_namespace: str) -> dict[str, Any]:
     return {
         "required_reviews": 3,
-        "stage_gate": ["true"],
         "tasks": [
             {"id": "A", "checks": ["true"]},
             {"id": "B", "depends_on": ["A"], "checks": ["true"]},
@@ -88,12 +93,13 @@ def _stage(_namespace: str) -> dict[str, Any]:
 
 def _workload_ref(namespace: str) -> dict[str, str]:
     return {
-        "schema": "OxideWorkloadRefV1",
+        "schema": "OxideVerificationContractRefV1",
         "target_repository": "concurrency-fixture",
         "base_commit": "0" * 40,
-        "workload_path": "oxide-harness/concurrency.yaml",
-        "workload_blob": hashlib.sha256(_compact(_stage(namespace)).encode()).hexdigest(),
-        "harness_tree": "0" * 40,
+        "contract_path": "verification/contract.toml",
+        "contract_blob": hashlib.sha256(_compact(_stage(namespace)).encode()).hexdigest(),
+        "contract_closure_sha256": "sha256:" + "0" * 64,
+        "verification_engine_sha256": "sha256:" + "1" * 64,
         "harness_version": "concurrency-fixture",
     }
 

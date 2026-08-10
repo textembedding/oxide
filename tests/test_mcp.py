@@ -9,7 +9,6 @@ from oxide.workflow import WorkflowClient
 
 STAGE = {
     "required_reviews": 3,
-    "stage_gate": ["test all"],
     "tasks": [
         {
             "id": "A",

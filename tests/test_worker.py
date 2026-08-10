@@ -211,6 +211,7 @@ def test_acceptance_check_runs_once_and_retries_only_terminal_publication(tmp_pa
     ).stdout.strip()
     check = {
         "id": "acceptance",
+        "driver": "command",
         "command": command,
         "working_directory": ".",
         "environment": {},
@@ -281,6 +282,7 @@ def test_required_machine_receipt_fails_closed_and_valid_receipt_is_preserved(
         claim = f"claim: verify:A:{head}:1"
         check = {
             "id": "proof",
+            "driver": "command",
             "command": command,
             "working_directory": ".",
             "environment": {},

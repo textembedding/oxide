@@ -90,7 +90,7 @@ def _slug(value: str) -> str:
 def _normalize_check(value: object, ordinal: int) -> dict[str, Any]:
     if isinstance(value, str):
         command = value
-        source: dict[str, Any] = {}
+        source: dict[str, Any] = {"driver": "command"}
     elif isinstance(value, dict):
         source = dict(value)
         command = source.get("command")
@@ -99,6 +99,9 @@ def _normalize_check(value: object, ordinal: int) -> dict[str, Any]:
     if not isinstance(command, str) or not command.strip():
         raise WorkflowError("acceptance check command must be nonempty")
     check_id = source.get("id", f"check-{ordinal}")
+    driver = source.get("driver", "command")
+    operation = source.get("operation")
+    root = source.get("root")
     working_directory = source.get("working_directory", ".")
     slot = source.get("evidence_slot", "qualified-once")
     environment = source.get("environment", {})
@@ -107,6 +110,10 @@ def _normalize_check(value: object, ordinal: int) -> dict[str, Any]:
     if (
         not isinstance(check_id, str)
         or not check_id
+        or driver not in {"command", "verus"}
+        or (driver == "verus" and operation not in {"proof", "gate", "composition"})
+        or (driver == "verus" and operation == "proof" and (not isinstance(root, str) or not root))
+        or (driver == "command" and (operation is not None or root is not None))
         or not isinstance(working_directory, str)
         or not working_directory
         or Path(working_directory).is_absolute()
@@ -126,6 +133,9 @@ def _normalize_check(value: object, ordinal: int) -> dict[str, Any]:
     return {
         "id": check_id,
         "ordinal": ordinal,
+        "driver": driver,
+        "operation": operation,
+        "root": root,
         "command": command,
         "working_directory": working_directory,
         "environment": dict(sorted(environment.items())),
@@ -141,7 +151,6 @@ class Projection:
     records: list[dict[str, Any]]
     state: str = "uninitialized"
     stage: dict[str, Any] | None = None
-    stage_bytes: str | None = None
     workload_ref: dict[str, Any] | None = None
     epoch: int = 0
     required_reviews: int = 0
@@ -382,7 +391,6 @@ class WorkflowReducer:
             view.reject(record, "bootstrap workload reference does not match the frozen run")
             return
         stage = self.workload
-        canonical = _compact(stage)
         if view.stage is not None:
             if recorded_ref != view.workload_ref:
                 view.reject(record, "workflow was bootstrapped with a different workload reference")
@@ -460,12 +468,6 @@ class WorkflowReducer:
                     "reviews": [],
                 }
             )
-        stage_gate = stage.get("stage_gate", [])
-        if not isinstance(stage_gate, list) or not all(
-            isinstance(item, str) and item for item in stage_gate
-        ):
-            view.reject(record, "stage gate must be a list of commands")
-            return
         remaining = {task["task_id"]: set(task["depends_on"]) for task in normalized}
         while remaining:
             ready = {task_id for task_id, dependencies in remaining.items() if not dependencies}
@@ -478,7 +480,6 @@ class WorkflowReducer:
                 if task_id not in ready
             }
         view.stage = stage
-        view.stage_bytes = canonical
         view.workload_ref = dict(recorded_ref)
         view.required_reviews = required
         view.tasks = {task["task_id"]: task for task in normalized}
@@ -633,15 +634,19 @@ class WorkflowReducer:
     ) -> dict[str, Any]:
         check = task["checks"][check_ordinal - 1]
         workload = view.workload_ref or {}
-        checker = workload.get("checker") if isinstance(workload.get("checker"), dict) else {}
+        policy = (
+            workload.get("verification") if isinstance(workload.get("verification"), dict) else {}
+        )
         return {
             "schema": "OxideCheckRequirementV1",
             "run_id": view.namespace,
             "epoch": view.epoch,
             "workload": {
                 "base_commit": workload.get("base_commit"),
-                "workload_blob": workload.get("workload_blob"),
-                "harness_tree": workload.get("harness_tree"),
+                "contract_path": workload.get("contract_path"),
+                "contract_blob": workload.get("contract_blob"),
+                "contract_closure": workload.get("contract_closure_sha256"),
+                "verification_engine": workload.get("verification_engine_sha256"),
             },
             "task": task["task_id"],
             "candidate": {
@@ -652,6 +657,9 @@ class WorkflowReducer:
             "check": {
                 "id": check["id"],
                 "ordinal": check_ordinal,
+                "driver": check["driver"],
+                "operation": check["operation"],
+                "root": check["root"],
                 "command": check["command"],
                 "working_directory": check["working_directory"],
                 "environment": check["environment"],
@@ -660,13 +668,14 @@ class WorkflowReducer:
                 "receipt_required": check["receipt_required"],
             },
             "qualification": {
-                "checker_closure": checker.get("closure_sha256"),
-                "receipt": checker.get("qualification_receipt_sha256"),
-                "environment": checker.get("execution_environment"),
-                "policy": checker.get("evidence_policy", "one-qualified-execution-v1"),
-                "timeout_seconds": checker.get("timeout_seconds", 1800),
-                "infrastructure_exit_codes": checker.get("infrastructure_exit_codes", [2, 124]),
-                "max_artifact_bytes": checker.get("max_artifact_bytes", 16777216),
+                "contract_closure": workload.get("contract_closure_sha256"),
+                "verification_engine": workload.get("verification_engine_sha256"),
+                "receipt": policy.get("qualification_receipt_sha256"),
+                "environment": policy.get("execution_environment"),
+                "policy": policy.get("evidence_policy", "one-qualified-execution-v1"),
+                "timeout_seconds": policy.get("timeout_seconds", 1800),
+                "infrastructure_exit_codes": policy.get("infrastructure_exit_codes", [2, 124]),
+                "max_artifact_bytes": policy.get("max_artifact_bytes", 16777216),
             },
         }
 
@@ -1075,10 +1084,10 @@ class WorkflowReducer:
         tree = _line_value(text, "tree") or ""
         candidate_tree = _line_value(text, "candidate-tree") or ""
         prospective_receipt = _line_value(text, "prospective-receipt") or ""
-        checker = (
-            view.workload_ref.get("checker")
+        verification = (
+            view.workload_ref.get("verification")
             if isinstance(view.workload_ref, dict)
-            and isinstance(view.workload_ref.get("checker"), dict)
+            and isinstance(view.workload_ref.get("verification"), dict)
             else None
         )
         if not _COMMIT.fullmatch(merge) or not _COMMIT.fullmatch(tree):
@@ -1087,7 +1096,7 @@ class WorkflowReducer:
         if candidate_tree != task["tree_sha"]:
             view.reject(record, "successful merge does not identify the exact candidate tree")
             return
-        if checker is not None and _SHA256.fullmatch(prospective_receipt) is None:
+        if verification is not None and _SHA256.fullmatch(prospective_receipt) is None:
             view.reject(record, "successful merge lacks an exact prospective-tree gate receipt")
             return
         task.update(
@@ -1396,8 +1405,8 @@ class WorkflowClient:
         self._workload = workload
         self.workload_ref = workload_ref or (
             {
-                "schema": "OxideWorkloadRefV1",
-                "workload_blob": hashlib.sha256(_compact(workload).encode()).hexdigest(),
+                "schema": "OxideInlineWorkflowRefV1",
+                "contract_blob": hashlib.sha256(_compact(workload).encode()).hexdigest(),
             }
             if workload is not None
             else None
@@ -1537,16 +1546,6 @@ class WorkflowClient:
         """Return the complete ordered workflow log through journal_search only."""
 
         return self._records(namespace)
-
-    def workload(self, namespace: str) -> dict[str, Any]:
-        """Return the repository-loaded workload bound by the bootstrap reference."""
-
-        view = self._view(namespace)
-        if view.stage_bytes is None:
-            raise WorkflowError("workflow is not bootstrapped")
-        value = json.loads(view.stage_bytes)
-        assert isinstance(value, dict)
-        return value
 
     def _view(self, namespace: str) -> Projection:
         cached = self._views.get(namespace)

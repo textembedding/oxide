@@ -13,10 +13,7 @@ def test_importing_backend_does_not_load_python_prototype() -> None:
         [
             sys.executable,
             "-c",
-            (
-                "import sys; import oxide.journal_backend; "
-                "assert 'oxide.journal' not in sys.modules"
-            ),
+            ("import sys; import oxide.journal_backend; assert 'oxide.journal' not in sys.modules"),
         ],
         check=False,
         capture_output=True,

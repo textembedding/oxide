@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxide.dev/verification/evidence-v1.schema.json",
+  "title": "Oxide Verus proof receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "result",
+    "candidate_tree",
+    "prospective_tree",
+    "specifications",
+    "proof_closure_sha256",
+    "manifest_sha256",
+    "contract_sha256",
+    "engine_sha256",
+    "toolchain_lock_sha256",
+    "toolchain_revision",
+    "toolchain_execution",
+    "production_features",
+    "target",
+    "trusted_computing_base",
+    "trusted_assumptions",
+    "components",
+    "theorem_roots",
+    "command",
+    "exit_code",
+    "log",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": { "const": "OxideVerusEvidenceV1" },
+    "result": { "enum": ["passed", "product_failure", "infrastructure_failure"] },
+    "candidate_tree": { "$ref": "#/$defs/git_tree" },
+    "prospective_tree": { "$ref": "#/$defs/git_tree" },
+    "specifications": {
+      "type": "object",
+      "minProperties": 2,
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "proof_closure_sha256": { "$ref": "#/$defs/sha256" },
+    "manifest_sha256": { "$ref": "#/$defs/sha256" },
+    "contract_sha256": { "$ref": "#/$defs/sha256" },
+    "engine_sha256": { "$ref": "#/$defs/sha256" },
+    "toolchain_lock_sha256": { "$ref": "#/$defs/sha256" },
+    "toolchain_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "toolchain_execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "asset", "asset_sha256", "verus_version", "verus_revision", "rust_toolchain"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "asset": { "type": "string", "minLength": 1 },
+        "asset_sha256": { "$ref": "#/$defs/sha256" },
+        "verus_version": { "type": "string", "minLength": 1 },
+        "verus_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "rust_toolchain": { "type": "string", "minLength": 1 }
+      }
+    },
+    "production_features": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "target": { "type": "string", "minLength": 1 },
+    "trusted_computing_base": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "trusted_assumptions": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "components": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "theorem_roots": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "command": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "exit_code": { "type": "integer" },
+    "log": { "$ref": "#/$defs/artifact" },
+    "artifacts": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/artifact" } }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "git_tree": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes", "media_type"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "media_type": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

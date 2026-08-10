@@ -309,9 +309,8 @@ def test_minimum_exact_floor_replays_identical_workflow_after_restart(tmp_path: 
                 "checks": ["test A"],
             }
         ],
-        "stage_gate": ["test all"],
     }
-    reference = {"schema": "OxideWorkloadRefV1", "workload_blob": "fixture"}
+    reference = {"schema": "OxideVerificationContractRefV1", "contract_blob": "fixture"}
     replay_root = "a" * 32
     first = start_journal(
         database,
