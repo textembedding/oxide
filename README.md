@@ -8,22 +8,18 @@
 
 ## How it works
 
-Oxide is a meta-harness that coordinates parallel Codex agents across
-implementation, review, and proof work.
-
-People or agents translate the natural-language specification into a structured
-contract of tasks, dependencies, proofs, and acceptance checks. Independent
-review confirms the contract reflects the specification, then Oxide freezes it
-for execution.
+Oxide is a meta-harness for coordinating Codex agents in parallel. It compiles
+natural-language specifications into executable contracts for implementation,
+review, and formal verification.
 
 ```text
  human-written specifications
               |
               v
-     contract drafting + review
+       Oxide contract generation
               |
               v
- reviewed verification contract
+ executable verification contract
               |
               v
  +-----------------------------------------------------------+
