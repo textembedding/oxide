@@ -8,10 +8,8 @@
 
 ## How it works
 
-The shared journal backend makes parallel execution safe. Claims, candidates,
-check evidence, reviews, merges, and recovery form one durable chronological
-history. Atomic claims select one owner per assignment, while deterministic replay
-lets every worker recover the same state without a privileged orchestrator.
+Oxide is a meta-harness that coordinates parallel Codex agents across
+implementation, review, and proof work.
 
 ```text
  human-written specifications
@@ -135,19 +133,16 @@ judge starts a new run.
 
 ## The journal backend
 
+The shared journal backend makes parallel execution safe. Claims, candidates,
+check evidence, reviews, merges, and recovery form one durable chronological
+history. Atomic claims select one owner per assignment, while deterministic replay
+lets every worker recover the same state without a privileged orchestrator.
+
 Workers see one append-only journal through exactly two operations:
 
 - `journal_add` appends records and atomically arbitrates competing claims.
 - bounded `journal_search` returns exact and threshold-eligible semantic context
   in chronological order.
-
-The default search capacity reserves five exact results when available and returns
-at most ten total results:
-
-```text
-min_exact   = 5
-max_results = 10
-```
 
 Workflow meaning remains above this generic two-operation interface. The bundled
 Python backend is the current prototype; it can be replaced by a Rust backend only
@@ -178,11 +173,9 @@ Then launch against a target Rust project:
   --workers 8
 ```
 
-The default contract is `verification/contract.toml`. `min_exact` and
-`max_results` use the defaults above unless configured during qualification and
-run creation. Useful parallelism is determined by the contract’s dependency graph
-and its live mix of implementation, review, and proof work, up to the current
-64-worker process limit.
+The default contract is `verification/contract.toml`. Useful parallelism is
+determined by the contract’s dependency graph and its live mix of implementation,
+review, and proof work, up to the current 64-worker process limit.
 
 ## Observe and control
 
