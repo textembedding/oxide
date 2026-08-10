@@ -1459,7 +1459,7 @@ class WorkflowClient:
         self, namespace: str, prefix: str
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         root = self._root(namespace)
-        query = f"oxide-routing:{root}:{prefix}"
+        query = f"{root}:{prefix}"
         returned = self.journal.search(namespace, query)
         exact: list[dict[str, Any]] = []
         for record in returned:

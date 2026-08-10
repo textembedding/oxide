@@ -21,6 +21,10 @@ class JournalError(RuntimeError):
     """The selected journal kernel or its fixed transport rejected an operation."""
 
 
+class JournalTimeoutError(JournalError):
+    """A journal request exceeded the transport deadline and may be retried."""
+
+
 def validate_search_capacity(min_exact: int, max_results: int) -> tuple[int, int]:
     """Validate the authoritative-replay subset of the kernel capacity contract."""
 
@@ -42,7 +46,7 @@ def _encode(value: object) -> bytes:
 class _SocketJournalClient:
     """Kernel-neutral client for the fixed journal_add/journal_search wire protocol."""
 
-    def __init__(self, socket_path: str | Path, timeout: float = 10.0) -> None:
+    def __init__(self, socket_path: str | Path, timeout: float = 60.0) -> None:
         self.socket_path = str(socket_path)
         self.timeout = timeout
 
@@ -56,6 +60,8 @@ class _SocketJournalClient:
                 connection.sendall(_encode(request))
                 raw = connection.makefile("rb").readline()
             response = json.loads(raw)
+        except TimeoutError as error:
+            raise JournalTimeoutError("journal transport timed out") from error
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise JournalError(f"journal transport failed: {error}") from error
         if not isinstance(response, dict) or response.get("request_id") != request_id:
@@ -108,7 +114,7 @@ class JournalRuntime:
             self._close = None
 
 
-def connect_journal(socket_path: str | Path, *, timeout: float = 10.0) -> JournalPort:
+def connect_journal(socket_path: str | Path, *, timeout: float = 60.0) -> JournalPort:
     """Connect through the fixed journal_add/journal_search transport contract."""
 
     return _SocketJournalClient(socket_path, timeout=timeout)

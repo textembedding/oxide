@@ -68,6 +68,10 @@ class Journal:
         self.min_exact = min_exact
         self.max_results = max_results
         self.semantic_threshold = float(semantic_threshold)
+        self._cache_lock = threading.RLock()
+        self._records_by_namespace: dict[str, list[dict[str, Any]]] = {}
+        self._cache_highwater: dict[str, int] = {}
+        self._terms_by_record: dict[int, frozenset[str]] = {}
         self.database.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             existing = {
@@ -110,24 +114,24 @@ class Journal:
             raise JournalError("namespace and author must not exceed 1024 UTF-8 bytes")
         if not text.strip() or len(text.encode("utf-8")) > 524_288:
             raise JournalError("text must be 1..524288 UTF-8 bytes")
-        with self._connect() as connection:
+        created_at = self.clock()
+        with self._cache_lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 "INSERT INTO records(namespace,author,text,created_at) VALUES(?,?,?,?)",
-                (namespace, author, text, self.clock()),
+                (namespace, author, text, created_at),
             )
-        return {"saved": True, "record_id": int(cursor.lastrowid)}
+            sequence = int(cursor.lastrowid)
+        return {"saved": True, "record_id": sequence}
 
     @staticmethod
-    def _semantic_score(query: str, text: str) -> float:
-        query_terms = {item.casefold() for item in _TOKEN.findall(query)}
+    def _semantic_score(query_terms: set[str], text_terms: frozenset[str]) -> float:
         if not query_terms:
             return 0.0
-        text_terms = {item.casefold() for item in _TOKEN.findall(text)}
         return len(query_terms & text_terms) / len(query_terms)
 
     @staticmethod
-    def _public_record(row: sqlite3.Row, *, exact: bool) -> dict[str, Any]:
+    def _public_record(row: sqlite3.Row | dict[str, Any], *, exact: bool) -> dict[str, Any]:
         value = dict(row)
         sequence = int(value["record_id"])
         value.update(
@@ -142,21 +146,39 @@ class Journal:
             raise JournalError("namespace must not exceed 1024 UTF-8 bytes")
         if not query or len(query.encode("utf-8")) > 4096:
             raise JournalError("query must be 1..4096 UTF-8 bytes")
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT record_id,namespace,author,text,created_at FROM records
-                WHERE namespace=? ORDER BY record_id
-                """,
-                (namespace,),
-            ).fetchall()
+        query_terms = {item.casefold() for item in _TOKEN.findall(query)}
+        with self._cache_lock:
+            highwater = self._cache_highwater.get(namespace, 0)
+            with self._connect() as connection:
+                new_rows = connection.execute(
+                    """
+                    SELECT record_id,namespace,author,text,created_at FROM records
+                    WHERE namespace=? AND record_id>? ORDER BY record_id
+                    """,
+                    (namespace, highwater),
+                ).fetchall()
+            rows = self._records_by_namespace.setdefault(namespace, [])
+            for row in new_rows:
+                value = dict(row)
+                sequence = int(value["record_id"])
+                rows.append(value)
+                self._terms_by_record[sequence] = frozenset(
+                    item.casefold() for item in _TOKEN.findall(str(value["text"]))
+                )
+                self._cache_highwater[namespace] = sequence
 
-        qualifying: list[tuple[sqlite3.Row, bool]] = []
-        for row in rows:
-            text = str(row["text"])
-            exact = query in text
-            if exact or self._semantic_score(query, text) >= self.semantic_threshold:
-                qualifying.append((row, exact))
+            qualifying: list[tuple[dict[str, Any], bool]] = []
+            for row in rows:
+                text = str(row["text"])
+                exact = query in text
+                if (
+                    exact
+                    or self._semantic_score(
+                        query_terms, self._terms_by_record[int(row["record_id"])]
+                    )
+                    >= self.semantic_threshold
+                ):
+                    qualifying.append((row, exact))
 
         exact = [item for item in qualifying if item[1]]
         required_exact = min(self.min_exact, len(exact), self.max_results)

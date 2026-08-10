@@ -241,6 +241,20 @@ def test_kernel_is_only_generic_ordered_append_and_search(tmp_path: Path) -> Non
         journal.dispatch("claim", {})
 
 
+def test_warm_search_observes_records_appended_by_another_client(tmp_path: Path) -> None:
+    database = tmp_path / "kernel.sqlite3"
+    journal = Journal(database)
+    journal.add("space", "alice", "anything: alpha")
+    assert [item["text"] for item in journal.search("space", "anything")] == ["anything: alpha"]
+
+    Journal(database).add("space", "bob", "anything: beta")
+
+    assert [item["text"] for item in journal.search("space", "anything")] == [
+        "anything: alpha",
+        "anything: beta",
+    ]
+
+
 def test_bootstrap_cites_frozen_workload_without_journalizing_specification(
     workflow,
 ) -> None:
@@ -382,7 +396,7 @@ def test_semantic_noise_does_not_make_an_empty_replay_partition_nonempty() -> No
 
         def search(self, namespace: str, query: str) -> list[dict]:
             assert namespace == "run"
-            assert query.startswith(f"oxide-routing:{replay_root}:")
+            assert query.startswith(f"{replay_root}:")
             return [noise]
 
     client = WorkflowClient(SemanticOnlyPort(), replay_root=replay_root)  # type: ignore[arg-type]

@@ -43,6 +43,7 @@ from .journal_backend import (
     DEFAULT_MIN_EXACT,
     JournalError,
     JournalPort,
+    JournalTimeoutError,
     connect_journal,
     start_journal,
     validate_search_capacity,
@@ -1284,20 +1285,27 @@ def command_launch(arguments: argparse.Namespace) -> int:
             log(f"run {config['run_id']}: {state.upper()}")
             return 0 if state in {"paused", "complete", "stopped"} else 1
         while True:
-            state = str(client.search(config["run_id"], "run:state")[0]["state"])
-            if state == "publishing":
-                tip = _publish(config, client, log)
-                log(f"verified reviewed main {tip[:12]} on {config['target_branch']}")
-                log(f"run {config['run_id']}: COMPLETE")
-                return 0
-            if state != "running":
-                log(f"run {config['run_id']}: {state.upper()}")
-                return 0 if state in {"paused", "complete", "stopped"} else 1
-            assert supervisor is not None
-            for task in client.search(config["run_id"], "merge:requested"):
-                _merge_task(config, client, task, log)
-            supervisor.tick()
-            time.sleep(0.5)
+            try:
+                state = str(client.search(config["run_id"], "run:state")[0]["state"])
+                if state == "publishing":
+                    tip = _publish(config, client, log)
+                    log(f"verified reviewed main {tip[:12]} on {config['target_branch']}")
+                    log(f"run {config['run_id']}: COMPLETE")
+                    return 0
+                if state != "running":
+                    log(f"run {config['run_id']}: {state.upper()}")
+                    return 0 if state in {"paused", "complete", "stopped"} else 1
+                assert supervisor is not None
+                for task in client.search(config["run_id"], "merge:requested"):
+                    _merge_task(config, client, task, log)
+                supervisor.tick()
+                time.sleep(0.5)
+            except JournalTimeoutError as error:
+                log(f"journal operation will retry: {error}")
+                time.sleep(1)
+    except Exception as error:
+        log(f"launcher failed: {type(error).__name__}: {error}")
+        raise
     finally:
         runtime.close()
 

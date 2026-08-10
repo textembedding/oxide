@@ -211,7 +211,7 @@ def test_semantic_only_result_does_not_make_exact_replay_partition_nonempty(
     tmp_path: Path,
 ) -> None:
     replay_root = "a" * 32
-    query = f"oxide-routing:{replay_root}:"
+    query = f"{replay_root}:"
     with _backend(tmp_path) as runtime:
         runtime.client.add(
             "empty-partition",
@@ -288,7 +288,7 @@ def test_large_replay_uses_one_exact_anchor_per_partition_without_wildcard_or_pa
     assert [item["journal_sequence"] for item in recovered] == list(range(1, 1_026))
     assert len({item["stable_id"] for item in recovered}) == 1_025
     assert backend.queries
-    assert all(query.startswith(f"oxide-routing:{replay_root}:") for query in backend.queries)
+    assert all(query.startswith(f"{replay_root}:") for query in backend.queries)
     assert all("*" not in query for query in backend.queries)
 
 
