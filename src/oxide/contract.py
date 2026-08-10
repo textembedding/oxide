@@ -124,7 +124,7 @@ def validate_contract(
     if not isinstance(value, dict):
         raise ContractError("verification contract must be a TOML table")
     contract = dict(value)
-    if contract.get("schema") != 1:
+    if contract.get("schema") != 2:
         raise ContractError("unsupported verification contract schema")
     identifier = contract.get("id")
     if not isinstance(identifier, str) or not _SAFE_ID.fullmatch(identifier):

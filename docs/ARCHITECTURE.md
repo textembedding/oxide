@@ -16,7 +16,7 @@ Oxide turns a reviewed, target-owned Rust/Verus implementation contract into an
 authoritative Git tree with maximal useful parallelism.
 
 - The **target repository** owns product requirements, roadmap, verification
-  contract and DAG, production code, abstract specifications, implementation
+  contract and DAG, production code, abstract models, implementation
   contracts, proof sources, coverage manifest, pinned toolchain, and empirical
   subjects.
 - **Oxide** owns contract validation, the deterministic verification judge,
@@ -45,7 +45,7 @@ The contract MUST identify:
 
 - its run identity, goal, minimum review count, and evidence policy;
 - immutable product, verification, manifest, and toolchain inputs;
-- production, contract, abstract-specification, proof, trusted-adapter, and
+- production, contract, abstract-model, proof, trusted-adapter, and
   non-authoritative roots;
 - production features, target, entry point, and composition theorem;
 - one acyclic implementation DAG with at least one evidence requirement per task;

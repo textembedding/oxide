@@ -31,7 +31,7 @@ ROOT = Path(__file__).parents[1]
 
 def _contract_text() -> str:
     return """\
-schema = 1
+schema = 2
 id = "web-app"
 stage = "foundation"
 enabled = true
@@ -140,7 +140,7 @@ resource_policy = "fail-closed"
 
 def _smoke_contract_text() -> str:
     return f"""\
-schema = 1
+schema = 2
 id = "smoke"
 stage = "smoke"
 enabled = true
@@ -154,7 +154,7 @@ product_spec = "docs/PRODUCT.md"
 immutable_paths = ["verification/contract.toml", "verification/toolchain.lock.toml", "docs"]
 production_roots = ["src"]
 contract_roots = ["verification/contracts"]
-abstract_spec_roots = ["verification/spec"]
+abstract_model_roots = ["verification/models"]
 proof_roots = ["verification/proofs"]
 trusted_adapter_roots = ["src/effects"]
 non_authoritative_roots = ["verification/fixtures"]

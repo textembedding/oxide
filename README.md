@@ -118,7 +118,7 @@ my-rust-product/
     ├── manifest.toml
     ├── toolchain.lock.toml
     ├── contracts/
-    ├── spec/
+    ├── models/
     ├── proofs/
     ├── fixtures/
     └── fuzz/

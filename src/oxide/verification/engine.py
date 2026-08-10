@@ -709,7 +709,7 @@ def validate_policy(
     contract_path: str = _DEFAULT_CONTRACT_PATH,
 ) -> tuple[dict[str, Any], dict[str, Any], list[Path]]:
     policy = read_toml(inside(contract_root, contract_path))
-    if policy.get("schema") != 1:
+    if policy.get("schema") != 2:
         raise VerificationError("unsupported verification policy schema")
     if policy.get("hash_algorithm") != "sha256":
         raise VerificationError("verification policy must use sha256 identities")
@@ -1001,7 +1001,7 @@ def validate_policy(
             )
 
     scan_roots: list[Path] = []
-    for field in ("contract_roots", "abstract_spec_roots", "proof_roots"):
+    for field in ("contract_roots", "abstract_model_roots", "proof_roots"):
         for value in string_list(policy.get(field), f"policy.{field}", nonempty=True):
             path = inside(repository, value)
             if path.exists():
@@ -1121,7 +1121,7 @@ def validate_policy(
     verification_subject = inside(contract_root, policy["verification_spec"])
     if verification_subject.exists():
         subject_files.append(verification_subject)
-    for field in ("contract_roots", "abstract_spec_roots", "proof_roots"):
+    for field in ("contract_roots", "abstract_model_roots", "proof_roots"):
         roots = [
             inside(repository, value)
             for value in policy[field]
@@ -1512,7 +1512,7 @@ def run_proof(args: argparse.Namespace, repository: Path, contract_root: Path) -
     root = inside(repository, args.root)
     allowed_roots = [
         inside(repository, value)
-        for field in ("contract_roots", "abstract_spec_roots", "proof_roots")
+        for field in ("contract_roots", "abstract_model_roots", "proof_roots")
         for value in policy[field]
     ]
     if not root.is_file() or not any(root.is_relative_to(value) for value in allowed_roots):

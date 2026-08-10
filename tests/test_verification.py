@@ -16,7 +16,7 @@ from oxide.verification.engine import (
 
 def _contract() -> str:
     return """\
-schema = 1
+schema = 2
 id = "formal-rust"
 stage = "foundation"
 enabled = true
@@ -30,7 +30,7 @@ product_spec = "docs/PRODUCT.md"
 immutable_paths = ["verification/contract.toml", "verification/toolchain.lock.toml", "docs"]
 production_roots = ["src"]
 contract_roots = ["verification/contracts"]
-abstract_spec_roots = ["verification/spec"]
+abstract_model_roots = ["verification/models"]
 proof_roots = ["verification/proofs"]
 trusted_adapter_roots = ["src/effects"]
 non_authoritative_roots = ["verification/fixtures"]
@@ -70,7 +70,7 @@ root = "verification/proofs/component.rs"
 
 def _repository(root: Path) -> tuple[Path, Path]:
     repository = root / "repository"
-    (repository / "verification" / "spec").mkdir(parents=True)
+    (repository / "verification" / "models").mkdir(parents=True)
     (repository / "docs").mkdir()
     (repository / "verification" / "contract.toml").write_text(_contract(), encoding="utf-8")
     (repository / "verification" / "toolchain.lock.toml").write_text(
@@ -146,7 +146,7 @@ def test_harness_policy_accepts_an_honest_empty_program_and_rejects_proof_escape
     assert state["manifest"]["status"] == "unimplemented"
     assert policy["production_features"] == ["production", "verified"]
 
-    (repository / "verification" / "spec" / "escape.rs").write_text(
+    (repository / "verification" / "models" / "escape.rs").write_text(
         "proof fn shortcut() { assume(false); }\n", encoding="utf-8"
     )
     with pytest.raises(VerificationError, match="forbidden proof escape"):
