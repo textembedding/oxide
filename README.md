@@ -6,19 +6,12 @@
 
 <p align="center"><strong>Build formally verified Rust programs with highly concurrent agent swarms.</strong></p>
 
-Oxide turns a reviewed implementation contract into parallel coding, review, and
-proof work, assigning every task to a fresh Codex agent.
-
-The shared journal backend is what makes that parallelism safe. It keeps claims,
-candidates, check evidence, reviews, merges, and recovery in one durable,
-chronological history. Workers coordinate through the journal rather than a
-privileged orchestrator or a chain of prompts: atomic claims choose one owner for
-each assignment, and deterministic replay gives every worker the same state after
-a restart.
-
 ## How it works
 
-Independent work is visible to every worker through one shared journal:
+The shared journal backend makes parallel execution safe. Claims, candidates,
+check evidence, reviews, merges, and recovery form one durable chronological
+history. Atomic claims select one owner per assignment, while deterministic replay
+lets every worker recover the same state without a privileged orchestrator.
 
 ```text
  human-written specifications
@@ -51,22 +44,17 @@ Independent work is visible to every worker through one shared journal:
                   newly unblocked work
 ```
 
-The contract describes tasks and their real dependencies. The scheduler derives a
-single ready-work list from the journal and gives each idle worker the
-highest-value assignment it can claim. There are no fixed author, reviewer, or
-check-worker pools, so implementation, independent review, and missing proof work
-can proceed concurrently.
+The contract defines tasks and their dependencies. The scheduler gives each idle
+worker the highest-value ready assignment. With no fixed role pools,
+implementation, review, and proof work can proceed concurrently.
 
-An implementation worker publishes an immutable Git candidate before its
-acceptance checks finish. That publication makes its reviews and unsatisfied
-checks independently claimable. For one exact candidate and one exact requirement,
-only the winning journal claimant runs the command. The resulting evidence is
-reused by authors, reviewers, replacement processes, and replay; changing the
-candidate tree creates a new evidence requirement.
+Publishing an immutable Git candidate makes its reviews and unsatisfied checks
+independently claimable. Evidence is bound to the exact candidate and check, then
+reused across roles. Changing the candidate tree creates a new requirement.
 
 Once every required review and check passes, Oxide constructs the exact tree that
 would be merged and runs the whole-tree gate against it. A successful merge
-updates the journal and may expose more independent implementation work.
+unlocks dependent work.
 
 ## Verification philosophy
 
