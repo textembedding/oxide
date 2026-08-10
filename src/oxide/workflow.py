@@ -1542,6 +1542,38 @@ class WorkflowClient:
         ]
         return max(sequences, default=0)
 
+    def _tail_records(self, namespace: str, start_ordinal: int) -> list[dict[str, Any]]:
+        """Recover the contiguous suffix after an already validated projection."""
+
+        recovered: list[dict[str, Any]] = []
+        prior_sequence = 0
+        for ordinal in range(start_ordinal, 2**_REPLAY_WIDTH):
+            replay_id = f"{ordinal:0{_REPLAY_WIDTH}b}"
+            exact, _ = self._partition_records(namespace, replay_id)
+            if not exact:
+                break
+            identities = {str((_record_route(record) or {}).get("stable_id")) for record in exact}
+            if len(identities) != 1:
+                raise WorkflowError("replay leaf identity is not unique")
+            by_sequence: dict[int, dict[str, Any]] = {}
+            for record in exact:
+                route = _record_route(record)
+                if route is None or route["replay_id"] != replay_id:
+                    continue
+                try:
+                    sequence = int(record["journal_sequence"])
+                except (KeyError, TypeError, ValueError) as error:
+                    raise WorkflowError("journal record is missing its stable sequence") from error
+                by_sequence[sequence] = record
+            if len(by_sequence) != 1:
+                raise WorkflowError("replay leaf does not identify exactly one record")
+            sequence, record = next(iter(by_sequence.items()))
+            if recovered and sequence <= prior_sequence:
+                raise WorkflowError("workflow journal sequence is not increasing")
+            recovered.append(record)
+            prior_sequence = sequence
+        return recovered
+
     def replay_records(self, namespace: str) -> list[dict[str, Any]]:
         """Return the complete ordered workflow log through journal_search only."""
 
@@ -1551,8 +1583,19 @@ class WorkflowClient:
         cached = self._views.get(namespace)
         if cached is not None:
             cached_sequence = int(cached.records[-1]["journal_sequence"]) if cached.records else 0
-            if self._latest_sequence(namespace) == cached_sequence:
+            latest_sequence = self._latest_sequence(namespace)
+            if latest_sequence == cached_sequence:
                 return cached
+            if latest_sequence > cached_sequence:
+                tail = self._tail_records(namespace, len(cached.records))
+                if tail and int(tail[-1]["journal_sequence"]) == latest_sequence:
+                    for record in tail:
+                        if int(record["journal_sequence"]) <= cached_sequence:
+                            raise WorkflowError("workflow journal sequence is not increasing")
+                        cached.records.append(record)
+                        self.reducer._apply(cached, record)
+                        cached_sequence = int(record["journal_sequence"])
+                    return cached
         records = self._records(namespace)
         view = cached
         if (
@@ -1655,11 +1698,7 @@ class WorkflowClient:
                 raise WorkflowError("client run epoch is stale")
             # Synchronize stable history while ownership is serialized, then append and
             # recover the new record through its unique exact routing identity.
-            view = (
-                self._view(namespace)
-                if self._views.get(namespace) is None
-                else self._views[namespace]
-            )
+            view = self._view(namespace)
             if isinstance(lock_state, dict):
                 cached_sequence = int(view.records[-1]["journal_sequence"]) if view.records else 0
                 if int(lock_state.get("sequence", cached_sequence)) != cached_sequence:

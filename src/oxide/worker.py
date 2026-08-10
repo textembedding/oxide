@@ -202,7 +202,7 @@ class Worker:
             "mcp_servers.journal.required=true",
             'mcp_servers.journal.enabled_tools=["journal_add","journal_search"]',
             "mcp_servers.journal.startup_timeout_sec=5",
-            "mcp_servers.journal.tool_timeout_sec=10",
+            "mcp_servers.journal.tool_timeout_sec=180",
         ]
 
     def _claim(self, ready: list[dict]) -> dict | None:

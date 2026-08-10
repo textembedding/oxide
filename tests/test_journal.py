@@ -391,6 +391,25 @@ def test_semantic_noise_does_not_make_an_empty_replay_partition_nonempty() -> No
     assert client.replay_records("run") == []
 
 
+def test_cached_projection_recovers_only_the_new_replay_leaves(workflow, monkeypatch) -> None:
+    writer, _, socket = workflow
+    observer = _client(socket)
+    assert observer.search("run", "run:state")[0]["state"] == "running"
+
+    writer.add("run", "worker-0", "claim: task:A")
+    writer.add("run", "worker-0", "checkpoint: task:A\nimplementation saved")
+    monkeypatch.setattr(
+        observer,
+        "_records",
+        lambda _namespace: (_ for _ in ()).throw(AssertionError("full replay")),
+    )
+
+    task = next(item for item in observer.search("run", "queue:all") if item["task_id"] == "A")
+    assert task["state"] == "working"
+    assert task["checkpoint"] is True
+    assert len(observer._views["run"].records) == 3
+
+
 def test_first_valid_claim_wins_by_generic_record_order(workflow) -> None:
     client, _, socket = workflow
     outcomes = _race_claim(socket, "claim: task:A", ("worker-0", "worker-1"))

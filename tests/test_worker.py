@@ -102,6 +102,7 @@ print(json.dumps({'type':'turn.completed'}))
     record = json.loads(capture.read_text(encoding="utf-8"))
     joined = " ".join(record["argv"])
     assert 'enabled_tools=["journal_add","journal_search"]' in joined
+    assert "mcp_servers.journal.tool_timeout_sec=180" in joined
     assert "sandbox_workspace_write.network_access=true" in joined
     assert "journal_mcp" in joined
     assert str((tmp_path / ".git").resolve()) in joined
