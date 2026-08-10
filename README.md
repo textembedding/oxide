@@ -2,8 +2,8 @@
 
 Swarm Harness is a local, specification-driven coding swarm for arbitrary Git
 repositories. The target repository owns product intent and verification gates;
-the harness supplies scheduling, Git/worktree management, review, verification,
-merge, recovery, and observability.
+the harness supplies scheduling, Git/worktree management, review, shared formal
+check execution, merge, recovery, and observability.
 
 Workers coordinate through exactly two journal tools:
 
@@ -58,7 +58,9 @@ metadata and applies it to every worker and merge commit.
 A workload is a committed verification-gated graph. Required top-level fields
 are `stage`, `enabled`, `goal`, `tasks`, and `stage_gate`. Every task requires a
 safe unique `id`, `title`, `prompt`, `depends_on`, and one or more exact
-`checks`; dependencies must form an acyclic graph.
+`checks`; dependencies must form an acyclic graph. `stage_gate` is a list of
+additional final integration commands and may be empty when candidate-owned
+checks already cover completion.
 
 ```yaml
 stage: foundation
@@ -82,10 +84,14 @@ stage_gate:
   - npm run build
 ```
 
-Checks execute from the target repository root. The contract supplies product
-intent; the harness does not infer a language, framework, package manager, file
-layout, or deployment model. The only bundled workload is the model-free test
-fixture at `tests/fixtures/workloads/smoke.yaml`.
+Checks execute from the target repository root. After an author publishes an
+immutable candidate, each exact command becomes one journal-claimed formal
+assignment. The qualified harness process executes the winning assignment once
+against that commit; authors and reviewers may run targeted development
+diagnostics, but do not mechanically rerun the formal list. The contract
+supplies product intent; the harness does not infer a language, framework,
+package manager, file layout, or deployment model. The only bundled workload is
+the model-free test fixture at `tests/fixtures/workloads/smoke.yaml`.
 
 ## One bounded ADD/SEARCH journal
 
@@ -147,11 +153,20 @@ pass.
   --reviews 3
 ```
 
-Tasks use independent branches. After implementation checks, the configured
-internal reviews and exact-frontier verification must pass. A worker then
-requests merge; the launcher verifies a prospective merge in isolation and
+Tasks use independent branches. Publishing a candidate exposes its configured
+internal reviews and one acceptance assignment per declared check concurrently.
+Acceptance requires every review and every candidate-bound check result to pass.
+A worker then requests merge; the launcher verifies the immutable branch and
+prospective tree in isolation without rerunning candidate checks, and
 fast-forwards the target to that exact object. Dependencies release after merge,
-and the workload gate runs in another isolated clone before completion.
+and any additional commands in `stage_gate` run in another isolated clone before
+completion.
+
+A check mapping may set `receipt_required: true` when successful execution must
+also emit a bounded JSON-object receipt at `$SWARM_EVIDENCE_RECEIPT`. A frozen
+checker may likewise set `prospective_receipt_required: true` for its exact-tree
+gate. Missing, malformed, non-regular, or oversized required receipts are
+infrastructure failures, even when the command exits zero.
 
 To select a compatible external backend, pass the same command during
 qualification and run creation:

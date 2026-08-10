@@ -97,6 +97,7 @@ def _open_pr(
                 f"branch: {claimed['branch']}",
                 f"base: {base:040x}",
                 f"head: {head:040x}",
+                f"tree: {head:040x}",
                 "verified: true",
             )
         ),
@@ -122,6 +123,56 @@ def _approve(
                 f"head: {head:040x}",
                 "verified: true",
                 "evidence: objective and checks passed",
+            )
+        ),
+    )
+
+
+def _verify(
+    client: WorkflowClient,
+    run_id: str,
+    worker: str,
+    task_id: str,
+    head: int,
+    ordinal: int = 1,
+    *,
+    result: str = "passed",
+    preclaimed: bool = False,
+) -> dict:
+    identity = f"verify:{task_id}:{head:040x}:{ordinal}"
+    if preclaimed:
+        work = next(
+            item
+            for item in client.search(run_id, f"worker:{worker}")
+            if item.get("claim") == f"claim: {identity}"
+        )
+    else:
+        work = client.add(run_id, worker, f"claim: {identity}")["work"]
+    marker = {
+        "passed": "verify-pass",
+        "product_failure": "verify-fail",
+        "infrastructure_failure": "verify-infrastructure",
+    }[result]
+    detail = "evidence" if result == "passed" else "reason"
+    receipt = (
+        "sha256:"
+        + hashlib.sha256(f"{identity}:{work['execution_attempt']}:{result}".encode()).hexdigest()
+    )
+    return client.add(
+        run_id,
+        worker,
+        "\n".join(
+            (
+                f"{marker}: {identity}",
+                f"head: {head:040x}",
+                f"tree: {work['tree_sha']}",
+                f"base: {work['evidence_requirement']['candidate']['base']}",
+                f"evidence-key: {work['evidence_key']}",
+                f"claim-attempt: {work['execution_attempt']}",
+                f"execution-attempt: {work['execution_attempt']}",
+                f"receipt: {receipt}",
+                "verified: true",
+                f"{detail}: exact frozen command {result}",
             )
         ),
     )
@@ -153,6 +204,8 @@ def _merge(
                 f"head: {head:040x}",
                 f"merge: {merge:040x}",
                 f"tree: {merge + 1:040x}",
+                f"candidate-tree: {head:040x}",
+                "prospective-receipt:",
             )
         ),
     )
@@ -379,6 +432,7 @@ def test_launcher_reclaims_crashed_author_review_and_merge_owners(workflow) -> N
     _approve(client, "run", "worker-3", "A", 1, 1, 2)
     _approve(client, "run", "worker-4", "A", 1, 2, 2)
     _approve(client, "run", "worker-5", "A", 1, 3, 2)
+    _verify(client, "run", "worker-6", "A", 2)
 
     client.add("run", "worker-6", "claim: merge:A:1")
     assert client.add("run", "launcher", "control: reclaim worker:worker-6")["reclaimed"] == (
@@ -414,15 +468,12 @@ def test_internal_verification_review_claim_uses_the_same_atomic_race(workflow) 
 def test_idle_workers_atomically_claim_candidate_frontier_verification(workflow) -> None:
     client, database, socket = workflow
     client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
-    client.add("run", "launcher", "control: worker-verification")
     _open_pr(client, "run", "worker-0", "A", 1, 2)
     candidate_claim = f"claim: verify:A:{2:040x}:1"
     candidate = next(
         item for item in client.search("run", "queue:ready") if item["claim"] == candidate_claim
     )
     assert candidate["role"] == "verification"
-    with pytest.raises(WorkflowError, match="own task"):
-        client.add("run", "worker-0", candidate_claim)
     _approve(client, "run", "worker-1", "A", 1, 1, 2)
     _approve(client, "run", "worker-2", "A", 1, 2, 2)
     _approve(client, "run", "worker-3", "A", 1, 3, 2)
@@ -431,21 +482,37 @@ def test_idle_workers_atomically_claim_candidate_frontier_verification(workflow)
     winner = next(worker for worker, outcome in outcomes.items() if outcome == "accepted")
     active = client.search("run", f"worker:{winner}")
     assert [(item["role"], item["claim"]) for item in active] == [("verification", candidate_claim)]
+    work = active[0]
+    with pytest.raises(WorkflowError, match="owned exact frontier"):
+        client.add(
+            "run",
+            winner,
+            "\n".join(
+                (
+                    f"verify-pass: verify:A:{2:040x}:1",
+                    f"head: {2:040x}",
+                    f"tree: {work['tree_sha']}",
+                    f"base: {work['evidence_requirement']['candidate']['base']}",
+                    f"evidence-key: {work['evidence_key']}",
+                    f"claim-attempt: {work['execution_attempt']}",
+                    f"execution-attempt: {'f' * 64}",
+                    f"receipt: sha256:{'e' * 64}",
+                    "verified: true",
+                    "evidence: exact command passed",
+                )
+            ),
+        )
     with pytest.raises(WorkflowError, match="exact frontier"):
         client.add(
             "run",
             winner,
             f"verify-pass: verify:A:{2:040x}:1\nhead: {4:040x}\nverified: true\nevidence: pass",
         )
-    result = client.add(
-        "run",
-        winner,
-        f"verify-pass: verify:A:{2:040x}:1\nhead: {2:040x}\nverified: true\nevidence: test A passed",
-    )
+    result = _verify(client, "run", winner, "A", 2, preclaimed=True)
     assert result["verification"] == "passed"
     assert all(item["claim"] != candidate_claim for item in client.search("run", "queue:ready"))
     assert client.search("run", "task:A")[0]["verifications"][0]["state"] == "passed"
-    assert _exact_count(database, "run", candidate_claim) == 3
+    assert _exact_count(database, "run", candidate_claim) == 2
     _merge(client, "run", "worker-4", "A", 1, 2, 3)
     assert ("B", "author") in {
         (item["root_task_id"], item["role"]) for item in client.search("run", "queue:ready")
@@ -455,7 +522,6 @@ def test_idle_workers_atomically_claim_candidate_frontier_verification(workflow)
 def test_launcher_reclaims_crashed_frontier_verifier(workflow) -> None:
     client, _, _ = workflow
     client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
-    client.add("run", "launcher", "control: worker-verification")
     _open_pr(client, "run", "worker-0", "A", 1, 2)
     claim = f"claim: verify:A:{2:040x}:1"
     client.add("run", "worker-5", claim)
@@ -467,15 +533,10 @@ def test_launcher_reclaims_crashed_frontier_verifier(workflow) -> None:
 def test_revision_claim_uses_the_same_atomic_race(workflow) -> None:
     client, database, socket = workflow
     client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
-    client.add("run", "launcher", "control: worker-verification")
     _open_pr(client, "run", "worker-0", "A", 1, 2)
     verification = f"claim: verify:A:{2:040x}:1"
     client.add("run", "worker-4", verification)
-    client.add(
-        "run",
-        "worker-4",
-        f"verify-pass: verify:A:{2:040x}:1\nhead: {2:040x}\nverified: true\nevidence: pass",
-    )
+    _verify(client, "run", "worker-4", "A", 2, preclaimed=True)
     client.add("run", "worker-1", "claim: review:A:1:1")
     client.add(
         "run",
@@ -494,6 +555,11 @@ def test_revision_claim_uses_the_same_atomic_race(workflow) -> None:
     loser = next(worker for worker, outcome in outcomes.items() if outcome == "rejected")
     assert _client(socket).search("run", f"worker:{loser}") == []
     assert _exact_count(database, "run", claim) == 3
+
+    _open_pr(client, "run", winner, "A", 3, 4)
+    revised = f"claim: verify:A:{4:040x}:1"
+    assert revised in {item["claim"] for item in client.search("run", "queue:ready")}
+    assert verification not in {item["claim"] for item in client.search("run", "queue:ready")}
 
 
 def test_terminal_blocker_activation_is_forward_only_and_parks_exact_revision(workflow) -> None:
@@ -581,6 +647,7 @@ def test_merge_claim_uses_the_same_atomic_race(workflow) -> None:
     _approve(client, "run", "worker-1", "A", 1, 1, 2)
     _approve(client, "run", "worker-2", "A", 1, 2, 2)
     _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    _verify(client, "run", "worker-6", "A", 2)
     claim = "claim: merge:A:1"
     assert client.search("run", "queue:ready")[0]["claim"] == claim
 
@@ -594,17 +661,15 @@ def test_merge_claim_uses_the_same_atomic_race(workflow) -> None:
     assert _exact_count(database, "run", claim) == 2
 
 
-def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> None:
+def test_pr_requires_three_internal_review_decisions_before_merge(workflow) -> None:
     client, database, socket = workflow
     _open_pr(client, "run", "worker-0", "A", 1, 2)
     ready = client.search("run", "queue:ready")
-    assert [item["review_role"] for item in ready] == [
+    assert [item["review_role"] for item in ready if str(item["role"]).startswith("review:")] == [
         "specification",
         "adversarial",
         "integration",
     ]
-    with pytest.raises(WorkflowError, match="own candidate"):
-        client.add("run", "worker-0", "claim: review:A:1:1")
     client.add("run", "worker-1", "claim: review:A:1:1")
     with pytest.raises(WorkflowError, match="owned current candidate"):
         client.add(
@@ -613,11 +678,10 @@ def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> N
             f"approve: review:A:1:1\nhead: {2:040x}\nverified: true",
         )
     _approve(client, "run", "worker-1", "A", 1, 1, 2)
-    with pytest.raises(WorkflowError, match="distinct"):
-        client.add("run", "worker-1", "claim: review:A:1:2")
     _approve(client, "run", "worker-2", "A", 1, 2, 2)
-    assert all(item["role"].startswith("review:") for item in client.search("run", "queue:ready"))
+    assert any(item["role"].startswith("review:") for item in client.search("run", "queue:ready"))
     _approve(client, "run", "worker-3", "A", 1, 3, 2)
+    _verify(client, "run", "worker-5", "A", 2)
     merge = client.search("run", "queue:ready")
     assert [(item["root_task_id"], item["role"]) for item in merge] == [("A", "merge")]
     _merge(client, "run", "worker-4", "A", 1, 2, 3)
@@ -631,7 +695,6 @@ def test_pr_requires_three_distinct_internal_reviews_before_merge(workflow) -> N
 def test_worker_verification_and_review_quorum_jointly_authorize_merge(workflow) -> None:
     client, _, socket = workflow
     client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
-    client.add("run", "launcher", "control: worker-verification")
     _open_pr(client, "run", "worker-0", "A", 1, 2)
     _approve(client, "run", "worker-1", "A", 1, 1, 2)
     _approve(client, "run", "worker-2", "A", 1, 2, 2)
@@ -641,26 +704,125 @@ def test_worker_verification_and_review_quorum_jointly_authorize_merge(workflow)
         ("verification", f"claim: verify:A:{2:040x}:1")
     ]
     client.add("run", "worker-4", f"claim: verify:A:{2:040x}:1")
-    client.add(
-        "run",
-        "worker-4",
-        f"verify-pass: verify:A:{2:040x}:1\nhead: {2:040x}\nverified: true\nevidence: test A passed",
-    )
+    _verify(client, "run", "worker-4", "A", 2, preclaimed=True)
     assert client.search("run", "queue:ready")[0]["role"] == "merge"
     restarted = _client(socket)
     assert restarted.search("run", "queue:ready")[0]["role"] == "merge"
 
 
-def test_worker_verification_activation_catches_an_open_generation(workflow) -> None:
+def test_published_candidate_exposes_shared_checks_and_reviews_concurrently(
+    tmp_path: Path,
+) -> None:
+    stage = _stage()
+    stage["tasks"][0]["checks"] = ["test A one", "test A two"]
+    stage["tasks"][1]["depends_on"] = []
+    stage["stage_gate"] = []
+    socket = _socket()
+    server, thread = serve_in_thread(tmp_path / "shared-checks.sqlite3", socket)
+    client = WorkflowClient(JournalClient(socket), stage)
+    try:
+        _bootstrap(client, "shared", stage)
+        client.add("shared", "launcher", "control: worker-capacity\nworkers: 6")
+
+        author = client.add("shared", "worker-0", "claim: task:A")["work"]
+        assert author["checks"] == []
+        client.add("shared", "worker-0", "checkpoint: task:A\ncandidate committed")
+        client.add("shared", "worker-0", "handoff: task:A\ncandidate pushed")
+        client.add(
+            "shared",
+            "worker-0",
+            "\n".join(
+                (
+                    "open-pr: task:A",
+                    f"branch: {author['branch']}",
+                    f"base: {1:040x}",
+                    f"head: {2:040x}",
+                    f"tree: {2:040x}",
+                    "verified: true",
+                )
+            ),
+        )
+
+        ready = client.search("shared", "queue:ready")
+        assert sum(str(item["role"]).startswith("review:") for item in ready) == 3
+        assert sum(item["role"] == "verification" for item in ready) == 2
+        scheduled = {
+            item["role"]
+            for worker in (f"worker-{ordinal}" for ordinal in range(6))
+            for item in client.worker_snapshot("shared", worker)[2]
+        }
+        assert {"author", "verification"} <= scheduled
+        assert any(str(role).startswith("review:") for role in scheduled)
+
+        first = f"claim: verify:A:{2:040x}:1"
+        client.add("shared", "worker-0", first)
+        _verify(client, "shared", "worker-0", "A", 2, 1, preclaimed=True)
+        review = client.add("shared", "worker-1", "claim: review:A:1:1")["work"]
+        assert review["checks"] == []
+        assert [item["state"] for item in review["acceptance_results"]] == ["passed", "pending"]
+        for ordinal, worker in enumerate(("worker-1", "worker-2", "worker-3"), 1):
+            if ordinal != 1:
+                client.add("shared", worker, f"claim: review:A:1:{ordinal}")
+            client.add(
+                "shared",
+                worker,
+                f"approve: review:A:1:{ordinal}\nhead: {2:040x}\nverified: true\n"
+                "evidence: independent candidate review passed",
+            )
+        client.add("shared", "worker-4", f"claim: verify:A:{2:040x}:2")
+        _verify(client, "shared", "worker-4", "A", 2, 2, preclaimed=True)
+        assert client.search("shared", "task:A")[0]["state"] == "merge_ready"
+
+        restarted = WorkflowClient(JournalClient(socket), stage, client.workload_ref)
+        assert not any(
+            item["role"] == "verification" for item in restarted.search("shared", "queue:ready")
+        )
+        assert (
+            _exact_count(
+                tmp_path / "shared-checks.sqlite3",
+                "shared",
+                f"verify-pass: verify:A:{2:040x}:1",
+            )
+            == 1
+        )
+        assert (
+            _exact_count(
+                tmp_path / "shared-checks.sqlite3",
+                "shared",
+                f"verify-pass: verify:A:{2:040x}:2",
+            )
+            == 1
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_failed_check_is_terminal_for_candidate_and_revision_gets_new_checks(workflow) -> None:
     client, _, _ = workflow
     client.add("run", "launcher", "control: worker-capacity\nworkers: 8")
     _open_pr(client, "run", "worker-0", "A", 1, 2)
-    for ordinal, worker in enumerate(("worker-1", "worker-2", "worker-3"), 1):
-        _approve(client, "run", worker, "A", 1, ordinal, 2)
-    assert client.search("run", "queue:ready")[0]["role"] == "merge"
-    client.add("run", "launcher", "control: worker-verification")
-    ready = client.search("run", "queue:ready")
-    assert [(item["role"], item["verification_ordinal"]) for item in ready] == [("verification", 1)]
+    old_claim = f"claim: verify:A:{2:040x}:1"
+    client.add("run", "worker-1", old_claim)
+    _verify(
+        client,
+        "run",
+        "worker-1",
+        "A",
+        2,
+        result="product_failure",
+        preclaimed=True,
+    )
+    assert client.search("run", "task:A")[0]["state"] == "revision"
+    assert old_claim not in {item["claim"] for item in client.search("run", "queue:ready")}
+    with pytest.raises(WorkflowError, match="obsolete or unavailable"):
+        client.add("run", "worker-2", old_claim)
+
+    _open_pr(client, "run", "worker-2", "A", 3, 4)
+    new_claim = f"claim: verify:A:{4:040x}:1"
+    assert new_claim in {item["claim"] for item in client.search("run", "queue:ready")}
+    assert old_claim not in {item["claim"] for item in client.search("run", "queue:ready")}
 
 
 def test_challenge_invalidates_generation_and_requires_all_reviews_again(workflow) -> None:
@@ -679,39 +841,13 @@ def test_challenge_invalidates_generation_and_requires_all_reviews_again(workflo
     summary = client.search("run", "task:A")[0]
     assert summary["generation"] == 2
     assert summary["approvals"] == 0
-    assert len(client.search("run", "queue:ready")) == 3
+    assert len(client.search("run", "queue:ready")) == 4
     with pytest.raises(WorkflowError, match="current candidate"):
         client.add(
             "run",
             "worker-3",
             f"approve: review:A:1:3\nhead: {2:040x}\nverified: true",
         )
-
-
-def test_review_drain_collects_every_sibling_decision_before_revision(workflow) -> None:
-    client, _, socket = workflow
-    client.add("run", "launcher", "control: drain-reviews")
-    _open_pr(client, "run", "worker-0", "A", 1, 2)
-    _approve(client, "run", "worker-1", "A", 1, 1, 2)
-    client.add("run", "worker-2", "claim: review:A:1:2")
-    client.add(
-        "run",
-        "worker-2",
-        f"challenge: review:A:1:2\nhead: {2:040x}\nverified: true\nreason: defect",
-    )
-    remaining = client.search("run", "queue:ready")
-    assert [(item["role"], item["review_ordinal"]) for item in remaining] == [
-        ("review:integration", 3)
-    ]
-    _approve(client, "run", "worker-3", "A", 1, 3, 2)
-    summary = _client(socket).search("run", "task:A")[0]
-    assert summary["state"] == "revision"
-    assert summary["approvals"] == 2
-    assert [review["state"] for review in summary["reviews"]] == [
-        "approved",
-        "challenged",
-        "approved",
-    ]
 
 
 def test_pause_resume_is_derived_from_generic_records(workflow) -> None:
@@ -797,6 +933,7 @@ def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_
                         f"branch: {item['branch']}",
                         f"base: {base:040x}",
                         f"head: {head:040x}",
+                        f"tree: {head:040x}",
                         "verified: true",
                     )
                 ),
@@ -814,6 +951,16 @@ def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_
                         "evidence: simulated criterion and check pass",
                     )
                 ),
+            )
+        elif role == "verification":
+            _verify(
+                client,
+                "product",
+                worker,
+                task_id,
+                int(str(item["head_sha"]), 16),
+                int(item["verification_ordinal"]),
+                preclaimed=True,
             )
         elif role == "merge":
             client.add(
@@ -834,6 +981,8 @@ def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_
                         f"head: {item['head_sha']}",
                         f"merge: {merge:040x}",
                         f"tree: {merge + 1:040x}",
+                        f"candidate-tree: {item['tree_sha']}",
+                        "prospective-receipt:",
                     )
                 ),
             )

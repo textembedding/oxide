@@ -115,6 +115,7 @@ def author(mcp: Mcp, item: str, task: str, target_branch: str) -> None:
     git("commit", "-m", f"Complete {task}")
     git("push", "origin", f"HEAD:refs/heads/{branch}")
     head = git("rev-parse", "HEAD")
+    tree = git("rev-parse", "HEAD^{tree}")
     mcp.tool("journal_add", block("text", f"handoff: task:{task}\nchecks passed"))
     mcp.tool(
         "journal_add",
@@ -126,6 +127,7 @@ def author(mcp: Mcp, item: str, task: str, target_branch: str) -> None:
                     f"branch: {branch}",
                     f"base: {base}",
                     f"head: {head}",
+                    f"tree: {tree}",
                     "verified: true",
                 )
             ),
@@ -177,26 +179,6 @@ def merge(mcp: Mcp, item: str, task: str) -> None:
     )
 
 
-def verification(mcp: Mcp, item: str) -> None:
-    claim = str(field(item, "claim"))
-    identity = claim.removeprefix("claim: ")
-    head = str(field(item, "head_sha"))
-    mcp.tool(
-        "journal_add",
-        block(
-            "text",
-            "\n".join(
-                (
-                    f"verify-pass: {identity}",
-                    f"head: {head}",
-                    "verified: true",
-                    "evidence: fixture regression command passed",
-                )
-            ),
-        ),
-    )
-
-
 def main() -> int:
     prompt = sys.argv[-1]
     worker = re.search(r"as ([^.]+)\.", prompt).group(1)
@@ -227,8 +209,6 @@ def main() -> int:
             review(mcp, item, task)
         elif role == "merge":
             merge(mcp, item, task)
-        elif role == "verification":
-            verification(mcp, item)
         else:
             raise RuntimeError(f"unexpected fixture role: {role}")
         print(

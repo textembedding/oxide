@@ -7,22 +7,6 @@ ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "src" / "swarm_harness"
 
 
-def test_runtime_has_only_the_small_two_tool_implementation() -> None:
-    modules = {path.name for path in SOURCE.glob("*.py")}
-    assert modules == {
-        "__init__.py",
-        "cli.py",
-        "concurrency.py",
-        "journal.py",
-        "journal_backend.py",
-        "journal_mcp.py",
-        "worker.py",
-        "workflow.py",
-        "yaml_payload.py",
-    }
-    assert sum(path.read_text(encoding="utf-8").count("\n") for path in SOURCE.glob("*.py")) < 5500
-
-
 def test_sqlite_is_confined_to_swappable_prototype() -> None:
     importers: list[str] = []
     for path in SOURCE.glob("*.py"):

@@ -128,6 +128,7 @@ def _open_pr(client: WorkflowClient, namespace: str) -> None:
                 f"branch: {work['branch']}",
                 f"base: {1:040x}",
                 f"head: {2:040x}",
+                f"tree: {2:040x}",
                 "verified: true",
             )
         ),
@@ -157,7 +158,6 @@ def _prepare_case(client: WorkflowClient, namespace: str, role: str) -> tuple[st
         return "claim: task:A", "author"
     if role == "verification":
         client.add(namespace, "launcher", "control: worker-capacity\nworkers: 64")
-        client.add(namespace, "launcher", "control: worker-verification")
         _open_pr(client, namespace)
         return f"claim: verify:A:{2:040x}:1", "verification"
     _open_pr(client, namespace)
@@ -174,6 +174,23 @@ def _prepare_case(client: WorkflowClient, namespace: str, role: str) -> tuple[st
     if role == "merge":
         for ordinal in range(1, 4):
             _approve(client, namespace, ordinal)
+        verification = f"verify:A:{2:040x}:1"
+        work = client.add(namespace, "setup-verifier", f"claim: {verification}")["work"]
+        result = "\n".join(
+            (
+                f"verify-pass: {verification}",
+                f"head: {work['head_sha']}",
+                f"tree: {work['tree_sha']}",
+                f"base: {work['evidence_requirement']['candidate']['base']}",
+                f"evidence-key: {work['evidence_key']}",
+                f"claim-attempt: {work['execution_attempt']}",
+                f"execution-attempt: {work['execution_attempt']}",
+                f"receipt: sha256:{'e' * 64}",
+                "verified: true",
+                "evidence: qualified concurrency-fixture command passed",
+            )
+        )
+        client.add(namespace, "setup-verifier", result)
         return "claim: merge:A:1", "merge"
     raise ConcurrencyError(f"unknown validation role: {role}")
 

@@ -1,5 +1,6 @@
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,17 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from .concurrency import ConcurrencyError, implementation_digest, run_campaign, validate_receipt
+from .evidence import (
+    EvidenceError,
+    begin_attempt,
+    canonical_bytes,
+    evidence_key,
+    finish_attempt,
+    load_terminal_receipt,
+    observed_environment,
+    sha256_bytes,
+    validate_declared_json_receipt,
+)
 from .journal_backend import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_MIN_EXACT,
@@ -42,6 +54,7 @@ RUNS = ROOT / ".swarm" / "runs"
 CHECKPOINTS = ROOT / ".swarm" / "checkpoints"
 TARGET_HARNESS_DIRECTORY = "swarm-harness"
 _WORKLOAD_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class HarnessError(RuntimeError):
@@ -59,12 +72,10 @@ def _validate_stage(loaded: object, source: object) -> dict[str, Any]:
         raise HarnessError("workload goal must be a nonempty string")
     if not isinstance(result["tasks"], list) or not result["tasks"]:
         raise HarnessError("workload must contain tasks")
-    if (
-        not isinstance(result["stage_gate"], list)
-        or not result["stage_gate"]
-        or not all(isinstance(command, str) and command.strip() for command in result["stage_gate"])
+    if not isinstance(result["stage_gate"], list) or not all(
+        isinstance(command, str) and command.strip() for command in result["stage_gate"]
     ):
-        raise HarnessError("workload stage_gate must contain commands")
+        raise HarnessError("workload stage_gate must be a list of commands")
     identifiers: set[str] = set()
     for task in result["tasks"]:
         if not isinstance(task, dict):
@@ -86,12 +97,43 @@ def _validate_stage(loaded: object, source: object) -> dict[str, Any]:
             isinstance(item, str) for item in task["depends_on"]
         ):
             raise HarnessError(f"task {identifier} dependencies must be a list of task IDs")
-        if (
-            not isinstance(task["checks"], list)
-            or not task["checks"]
-            or not all(isinstance(command, str) and command.strip() for command in task["checks"])
-        ):
+        if not isinstance(task["checks"], list) or not task["checks"]:
             raise HarnessError(f"task {identifier} checks must contain commands")
+        check_ids: set[str] = set()
+        for ordinal, check in enumerate(task["checks"], 1):
+            if isinstance(check, str):
+                if not check.strip():
+                    raise HarnessError(f"task {identifier} check {ordinal} is empty")
+                continue
+            if not isinstance(check, dict):
+                raise HarnessError(f"task {identifier} check {ordinal} is malformed")
+            command = check.get("command")
+            check_id = check.get("id", f"check-{ordinal}")
+            working_directory = check.get("working_directory", ".")
+            environment = check.get("environment", {})
+            artifacts = check.get("artifacts", [])
+            receipt_required = check.get("receipt_required", False)
+            if (
+                not isinstance(command, str)
+                or not command.strip()
+                or not isinstance(check_id, str)
+                or not check_id
+                or check_id in check_ids
+                or not isinstance(working_directory, str)
+                or not working_directory
+                or Path(working_directory).is_absolute()
+                or ".." in Path(working_directory).parts
+                or not isinstance(environment, dict)
+                or any(
+                    not isinstance(key, str) or not isinstance(value, str)
+                    for key, value in environment.items()
+                )
+                or not isinstance(artifacts, list)
+                or any(not isinstance(value, str) or not value for value in artifacts)
+                or not isinstance(receipt_required, bool)
+            ):
+                raise HarnessError(f"task {identifier} check {ordinal} identity is malformed")
+            check_ids.add(check_id)
     for task in result["tasks"]:
         unknown = set(task["depends_on"]) - identifiers
         if unknown or task["id"] in task["depends_on"]:
@@ -104,6 +146,43 @@ def _validate_stage(loaded: object, source: object) -> dict[str, Any]:
             cycle = ", ".join(sorted(remaining))
             raise HarnessError(f"workload dependency graph contains a cycle: {cycle}")
         remaining -= ready
+    checker = result.get("checker")
+    if checker is not None:
+        if not isinstance(checker, dict):
+            raise HarnessError("workload checker must be a mapping")
+        paths = checker.get("paths")
+        qualification = checker.get("qualification")
+        prospective_gate = checker.get("prospective_gate")
+        infrastructure_codes = checker.get("infrastructure_exit_codes", [2, 124])
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or any(
+                not isinstance(value, str)
+                or not value
+                or Path(value).is_absolute()
+                or ".." in Path(value).parts
+                for value in paths
+            )
+            or len(set(paths)) != len(paths)
+            or not isinstance(qualification, list)
+            or not qualification
+            or not all(isinstance(value, str) and value.strip() for value in qualification)
+            or not isinstance(prospective_gate, list)
+            or not prospective_gate
+            or not all(isinstance(value, str) and value.strip() for value in prospective_gate)
+            or not isinstance(infrastructure_codes, list)
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in infrastructure_codes
+            )
+            or not isinstance(checker.get("timeout_seconds", 1800), int)
+            or not 1 <= int(checker.get("timeout_seconds", 1800)) <= 86400
+            or not isinstance(checker.get("max_artifact_bytes", 16777216), int)
+            or not 1 <= int(checker.get("max_artifact_bytes", 16777216)) <= 67108864
+            or not isinstance(checker.get("prospective_receipt_required", False), bool)
+        ):
+            raise HarnessError("workload checker contract is malformed")
     try:
         json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError) as error:
@@ -150,12 +229,50 @@ def _repository_identity(target: Path) -> str:
     return remote or str(target.resolve())
 
 
-def _frozen_workload_ref(target: Path, base_commit: str, workload: str) -> dict[str, Any]:
+def _checker_entries(target: Path, base_commit: str, paths: list[str]) -> list[dict[str, str]]:
+    raw = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", "--full-tree", base_commit, "--", *paths],
+        cwd=target,
+        capture_output=True,
+        check=False,
+    )
+    if raw.returncode:
+        raise HarnessError(raw.stderr.decode(errors="replace").strip() or "cannot freeze checker")
+    entries: list[dict[str, str]] = []
+    for item in raw.stdout.split(b"\0"):
+        if not item:
+            continue
+        try:
+            header, encoded_path = item.split(b"\t", 1)
+            mode, kind, object_id = header.decode("ascii").split()
+            path = encoded_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise HarnessError("checker closure contains an unsupported Git entry") from error
+        if kind != "blob" or mode not in {"100644", "100755"}:
+            raise HarnessError(f"checker path is not a regular tracked file: {path}")
+        entries.append({"path": path, "mode": mode, "blob": object_id})
+    for configured in paths:
+        prefix = configured.rstrip("/")
+        if not any(
+            item["path"] == prefix or item["path"].startswith(prefix + "/") for item in entries
+        ):
+            raise HarnessError(f"checker path is absent from the staged base: {configured}")
+    if not entries:
+        raise HarnessError("checker closure is empty")
+    return sorted(entries, key=lambda item: item["path"])
+
+
+def _frozen_workload_ref(
+    target: Path,
+    base_commit: str,
+    workload: str,
+    stage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     path = _stage_path(target, workload)
     relative = path.relative_to(target).as_posix()
     blob = _git(target, "rev-parse", f"{base_commit}:{relative}")
     tree = _git(target, "rev-parse", f"{base_commit}:{TARGET_HARNESS_DIRECTORY}")
-    return {
+    result: dict[str, Any] = {
         "schema": "SwarmWorkloadRefV1",
         "target_repository": _repository_identity(target),
         "base_commit": base_commit,
@@ -164,6 +281,64 @@ def _frozen_workload_ref(target: Path, base_commit: str, workload: str) -> dict[
         "harness_tree": tree,
         "harness_version": implementation_digest(ROOT),
     }
+    checker = stage.get("checker") if isinstance(stage, dict) else None
+    if isinstance(checker, dict):
+        entries = _checker_entries(target, base_commit, list(checker["paths"]))
+        result["checker"] = {
+            "schema": "SwarmFrozenCheckerV1",
+            "paths": list(checker["paths"]),
+            "entries": entries,
+            "closure_sha256": sha256_bytes(canonical_bytes(entries)),
+            "evidence_policy": str(checker.get("evidence_policy", "one-qualified-execution-v1")),
+            "timeout_seconds": int(checker.get("timeout_seconds", 1800)),
+            "infrastructure_exit_codes": list(checker.get("infrastructure_exit_codes", [2, 124])),
+            "max_artifact_bytes": int(checker.get("max_artifact_bytes", 16777216)),
+            "prospective_receipt_required": bool(
+                checker.get("prospective_receipt_required", False)
+            ),
+        }
+    return result
+
+
+def _materialize_checker(config: dict[str, Any]) -> Path | None:
+    checker = config["workload_ref"].get("checker")
+    if not isinstance(checker, dict):
+        return None
+    target = Path(config["target_repo"])
+    root = Path(config["checker_root"])
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    base = str(config["base_commit"])
+    for entry in checker["entries"]:
+        destination = (root / str(entry["path"])).resolve()
+        if not destination.is_relative_to(root):
+            raise HarnessError("checker entry escaped its frozen root")
+        blob = subprocess.run(
+            ["git", "show", f"{base}:{entry['path']}"],
+            cwd=target,
+            capture_output=True,
+            check=False,
+        )
+        if blob.returncode:
+            raise HarnessError(
+                blob.stderr.decode(errors="replace").strip()
+                or f"cannot materialize checker entry {entry['path']}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(blob.stdout)
+        destination.chmod(0o755 if entry["mode"] == "100755" else 0o644)
+    actual = [
+        {
+            "path": entry["path"],
+            "mode": entry["mode"],
+            "blob": _git(target, "rev-parse", f"{base}:{entry['path']}"),
+        }
+        for entry in checker["entries"]
+    ]
+    if sha256_bytes(canonical_bytes(actual)) != checker["closure_sha256"]:
+        raise HarnessError("materialized checker closure identity changed")
+    return root
 
 
 def _load_frozen_stage(config: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +436,7 @@ def _load_config(workload: str) -> dict[str, Any]:
     run_id = config.get("run_id")
     expected_prefix = f"codex/swarm-{_slug(str(run_id))}"
     if (
-        config.get("schema_version") != 7
+        config.get("schema_version") != 8
         or config.get("workload") != workload
         or not isinstance(run_id, str)
         or re.fullmatch(re.escape(workload) + r"-\d{8}-\d{6}", run_id) is None
@@ -278,6 +453,8 @@ def _load_config(workload: str) -> dict[str, Any]:
         or not all(isinstance(value, str) for value in config["journal_command"])
         or not isinstance(config.get("concurrency_validation"), dict)
         or not isinstance(config.get("workload_ref"), dict)
+        or not isinstance(config.get("evidence_root"), str)
+        or not isinstance(config.get("checker_root"), str)
         or re.fullmatch(r"[0-9a-f]{32}", str(config.get("replay_root", ""))) is None
         or not _valid_epoch_frontiers(
             config.get("epoch_frontiers"),
@@ -298,6 +475,13 @@ def _load_config(workload: str) -> dict[str, Any]:
         config["run_dir"] = str(run_dir)
         config["database"] = str(run_dir / "journal.sqlite3")
         config["socket"] = str(run_dir / "journal.sock")
+        config["evidence_root"] = str(run_dir / "evidence" / "checks")
+        config["checker_root"] = str(run_dir / "frozen-checker")
+    elif (
+        Path(str(config["evidence_root"])).resolve() != run_dir / "evidence" / "checks"
+        or Path(str(config["checker_root"])).resolve() != run_dir / "frozen-checker"
+    ):
+        raise HarnessError("run evidence or checker root failed integrity validation")
     target = Path(str(config.get("target_repo", ""))).resolve()
     config["stage_path"] = str(_stage_path(target, workload))
     return config
@@ -448,8 +632,158 @@ def _run_checks(
     return True, ""
 
 
+def _run_qualified_commands(
+    config: dict[str, Any],
+    repository: Path,
+    commands: list[str],
+    requirement: dict[str, Any],
+    *,
+    candidate_commit: str,
+    candidate_tree: str,
+    prospective_commit: str,
+    prospective_tree: str,
+    receipt_required: bool = False,
+) -> tuple[dict[str, Any], str]:
+    root = Path(config["evidence_root"])
+    existing = load_terminal_receipt(root, requirement)
+    if existing is not None:
+        return existing
+    checker = config["workload_ref"].get("checker")
+    if not isinstance(checker, dict):
+        raise HarnessError("qualified command requires a frozen checker")
+    attempt = hashlib.sha256(
+        f"{evidence_key(requirement)}:{secrets.token_hex(16)}".encode()
+    ).hexdigest()
+    started_at = time.time()
+    begin_attempt(root, requirement, attempt)
+    with tempfile.TemporaryDirectory(prefix="qualified-check-", dir=config["run_dir"]) as raw:
+        temporary = Path(raw)
+        stdout = temporary / "stdout.log"
+        stderr = temporary / "stderr.log"
+        declared = temporary / "declared"
+        declared.mkdir()
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SWARM_FROZEN_CHECKER_ROOT": str(config["checker_root"]),
+                "SWARM_CANDIDATE_COMMIT": candidate_commit,
+                "SWARM_CANDIDATE_TREE": candidate_tree,
+                "SWARM_PROSPECTIVE_COMMIT": prospective_commit,
+                "SWARM_PROSPECTIVE_TREE": prospective_tree,
+                "SWARM_EVIDENCE_RECEIPT": str(declared / "receipt.json"),
+                "SWARM_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
+            }
+        )
+        script = "set -e\n" + "\n".join(commands)
+        exit_code: int | None = None
+        result_kind = "infrastructure_failure"
+        try:
+            expected_environment = checker.get("execution_environment")
+            if expected_environment is not None and expected_environment != observed_environment():
+                raise EvidenceError("execution environment differs from checker qualification")
+            with stdout.open("wb") as out, stderr.open("wb") as err:
+                completed = subprocess.run(
+                    ["/bin/zsh", "-lc", script],
+                    cwd=repository,
+                    env=environment,
+                    stdout=out,
+                    stderr=err,
+                    timeout=int(checker["timeout_seconds"]),
+                    check=False,
+                )
+            exit_code = completed.returncode
+            result_kind = (
+                "passed"
+                if exit_code == 0
+                else "infrastructure_failure"
+                if exit_code in checker["infrastructure_exit_codes"]
+                else "product_failure"
+            )
+            if receipt_required:
+                validate_declared_json_receipt(
+                    declared / "receipt.json",
+                    maximum_bytes=int(checker["max_artifact_bytes"]),
+                )
+        except subprocess.TimeoutExpired:
+            stderr.write_text("qualified command timed out\n", encoding="utf-8")
+            stdout.touch(exist_ok=True)
+            exit_code = 124
+        except (OSError, EvidenceError) as error:
+            with stderr.open("a", encoding="utf-8") as stream:
+                stream.write(f"qualified command infrastructure failure: {error}\n")
+            stdout.touch(exist_ok=True)
+            exit_code = 2
+            result_kind = "infrastructure_failure"
+        artifacts = [path for path in declared.rglob("*") if path.is_file()]
+        receipt, digest = finish_attempt(
+            root,
+            requirement,
+            attempt,
+            result=result_kind,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            artifact_paths=artifacts,
+            maximum_artifact_bytes=int(checker["max_artifact_bytes"]),
+            started_at=started_at,
+        )
+    return receipt, digest
+
+
+def _qualify_checker(config: dict[str, Any], stage: dict[str, Any]) -> None:
+    checker_contract = stage.get("checker")
+    checker_ref = config["workload_ref"].get("checker")
+    if not isinstance(checker_contract, dict) or not isinstance(checker_ref, dict):
+        return
+    target = Path(config["target_repo"])
+    with tempfile.TemporaryDirectory(prefix="checker-qualification-", dir=config["run_dir"]) as raw:
+        repository = Path(raw) / "repository"
+        completed = subprocess.run(
+            ["git", "clone", "--no-hardlinks", str(target), str(repository)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            raise HarnessError(
+                completed.stderr.strip() or "cannot create checker qualification clone"
+            )
+        _git(repository, "checkout", "--detach", str(config["base_commit"]))
+        tree = _git(repository, "rev-parse", "HEAD^{tree}")
+        requirement = {
+            "schema": "SwarmCheckerQualificationV1",
+            "run_id": config["run_id"],
+            "base_commit": config["base_commit"],
+            "base_tree": tree,
+            "workload_blob": config["workload_ref"]["workload_blob"],
+            "checker_closure": checker_ref["closure_sha256"],
+            "commands": list(checker_contract["qualification"]),
+            "environment": observed_environment(),
+        }
+        receipt, digest = _run_qualified_commands(
+            config,
+            repository,
+            list(checker_contract["qualification"]),
+            requirement,
+            candidate_commit=str(config["base_commit"]),
+            candidate_tree=tree,
+            prospective_commit=str(config["base_commit"]),
+            prospective_tree=tree,
+            receipt_required=False,
+        )
+    if receipt["result"] != "passed":
+        raise HarnessError(f"frozen checker qualification failed: {receipt['result']}")
+    checker_ref["qualification_receipt_sha256"] = digest
+    checker_ref["execution_environment"] = observed_environment()
+
+
 def _merge_failed(
-    config: dict[str, Any], client: WorkflowClient, task: dict[str, Any], reason: str
+    config: dict[str, Any],
+    client: WorkflowClient,
+    task: dict[str, Any],
+    reason: str,
+    *,
+    kind: str = "product",
 ) -> None:
     client.add(
         config["run_id"],
@@ -460,6 +794,7 @@ def _merge_failed(
                 f"task: {task['root_task_id']}",
                 f"generation: {task['generation']}",
                 f"head: {task['head_sha']}",
+                f"kind: {kind}",
                 f"reason: {' '.join(reason.splitlines())[:1800]}",
             )
         ),
@@ -482,6 +817,11 @@ def _merge_task(
         raise HarnessError("cannot merge over target changes")
     if _git(target, "rev-parse", "--verify", f"refs/heads/{branch}", check=False) != head:
         _merge_failed(config, client, task, "PR branch no longer matches approved head")
+        return
+    if _git(target, "rev-parse", f"{head}^{{tree}}", check=False) != task.get("tree_sha"):
+        _merge_failed(
+            config, client, task, "candidate commit no longer resolves to its frozen tree"
+        )
         return
     before = _git(target, "rev-parse", "HEAD")
     with tempfile.TemporaryDirectory(prefix="merge-check-", dir=config["run_dir"]) as temporary:
@@ -527,30 +867,84 @@ def _merge_task(
                     prospective.stderr.strip() or "candidate conflicts with current target",
                 )
                 return
-        if not _git_succeeds(
-            verification,
-            "diff",
-            "--quiet",
-            before,
-            "HEAD",
-            "--",
-            TARGET_HARNESS_DIRECTORY,
-        ):
+        checker_ref = config["workload_ref"].get("checker")
+        protected = [TARGET_HARNESS_DIRECTORY]
+        if isinstance(checker_ref, dict):
+            protected.extend(str(value) for value in checker_ref["paths"])
+        protected = sorted(set(protected))
+        if not _git_succeeds(verification, "diff", "--quiet", before, "HEAD", "--", *protected):
             _merge_failed(
                 config,
                 client,
                 task,
-                f"candidate modifies immutable {TARGET_HARNESS_DIRECTORY}/ workload inputs",
+                "candidate modifies immutable workload or frozen-checker inputs",
             )
-            return
-        passed, reason = _run_checks(
-            verification, [str(value) for value in task.get("checks", [])], log
-        )
-        if not passed:
-            _merge_failed(config, client, task, reason)
             return
         verified_commit = _git(verification, "rev-parse", "HEAD")
         expected_tree = _git(verification, "rev-parse", "HEAD^{tree}")
+        prospective_receipt = ""
+        stage = _load_frozen_stage(config)
+        checker_contract = stage.get("checker")
+        if isinstance(checker_contract, dict):
+            commands = [str(value) for value in checker_contract["prospective_gate"]]
+            requirement = {
+                "schema": "SwarmProspectiveGateRequirementV1",
+                "run_id": config["run_id"],
+                "epoch": int(config["epoch"]),
+                "workload": {
+                    "base_commit": config["workload_ref"]["base_commit"],
+                    "workload_blob": config["workload_ref"]["workload_blob"],
+                    "harness_tree": config["workload_ref"]["harness_tree"],
+                },
+                "candidate": {
+                    "task": task["root_task_id"],
+                    "generation": int(task["generation"]),
+                    "base": task["base_sha"],
+                    "commit": head,
+                    "tree": task["tree_sha"],
+                },
+                "prospective": {
+                    "base": before,
+                    "commit": verified_commit,
+                    "tree": expected_tree,
+                },
+                "check": {
+                    "id": "prospective-authoritative-tree",
+                    "commands": commands,
+                    "working_directory": ".",
+                    "receipt_required": checker_ref["prospective_receipt_required"],
+                },
+                "qualification": {
+                    "checker_closure": checker_ref["closure_sha256"],
+                    "receipt": checker_ref["qualification_receipt_sha256"],
+                    "environment": checker_ref["execution_environment"],
+                    "policy": checker_ref["evidence_policy"],
+                },
+            }
+            receipt, prospective_receipt = _run_qualified_commands(
+                config,
+                verification,
+                commands,
+                requirement,
+                candidate_commit=head,
+                candidate_tree=str(task["tree_sha"]),
+                prospective_commit=verified_commit,
+                prospective_tree=expected_tree,
+                receipt_required=checker_ref["prospective_receipt_required"],
+            )
+            if receipt["result"] != "passed":
+                _merge_failed(
+                    config,
+                    client,
+                    task,
+                    f"prospective-tree gate {receipt['result']}",
+                    kind=(
+                        "infrastructure"
+                        if receipt["result"] == "infrastructure_failure"
+                        else "product"
+                    ),
+                )
+                return
         transferred = subprocess.run(
             [
                 "git",
@@ -614,6 +1008,8 @@ def _merge_task(
                 f"head: {head}",
                 f"merge: {merged}",
                 f"tree: {tree}",
+                f"candidate-tree: {task['tree_sha']}",
+                f"prospective-receipt: {prospective_receipt}",
             )
         ),
     )
@@ -900,8 +1296,6 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError("workers must be positive")
     if not 1 <= arguments.reviews <= 16:
         raise HarnessError("reviews must be between 1 and 16")
-    if arguments.workers < arguments.reviews + 1:
-        raise HarnessError("workers must include an author plus distinct reviewers")
     try:
         min_exact, max_results = validate_search_capacity(
             int(arguments.min_exact), int(arguments.max_results)
@@ -943,10 +1337,10 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError("target has changes; commit, stash, or remove them first")
     base_commit = _git(target, "rev-parse", "HEAD")
     git_identity = _target_git_identity(target)
-    workload_ref = _frozen_workload_ref(target, base_commit, arguments.workload)
     run_id = f"{arguments.workload}-{time.strftime('%Y%m%d-%H%M%S')}"
+    workload_ref = _frozen_workload_ref(target, base_commit, arguments.workload, stage)
     config = {
-        "schema_version": 7,
+        "schema_version": 8,
         "run_id": run_id,
         "workload": arguments.workload,
         "stage_path": str(stage_path),
@@ -957,6 +1351,8 @@ def command_run(arguments: argparse.Namespace) -> int:
         "run_dir": str(run_dir),
         "database": str(run_dir / "journal.sqlite3"),
         "socket": str(run_dir / "journal.sock"),
+        "evidence_root": str(run_dir / "evidence" / "checks"),
+        "checker_root": str(run_dir / "frozen-checker"),
         "workers": arguments.workers,
         "required_reviews": arguments.reviews,
         "model": arguments.model,
@@ -982,8 +1378,16 @@ def command_run(arguments: argparse.Namespace) -> int:
         "max_results": concurrency_receipt["max_results"],
         "report_path": concurrency_receipt["report_path"],
     }
-    _atomic_json(_config_path(arguments.workload), config)
-    _snapshot_checkpoint(config, "initial")
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+        Path(config["evidence_root"]).mkdir(parents=True)
+        _materialize_checker(config)
+        _qualify_checker(config, stage)
+        _atomic_json(_config_path(arguments.workload), config)
+        _snapshot_checkpoint(config, "initial")
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        raise
     return _start(config, arguments.foreground)
 
 
@@ -1003,8 +1407,6 @@ def command_launch(arguments: argparse.Namespace) -> int:
         result = client.bootstrap(config["run_id"])
         log(f"run {config['run_id']}: {'created' if result['saved'] else 'resumed'}")
         state = str(result["state"])
-        if state == "running" and not client.search(config["run_id"], "control: drain-reviews"):
-            client.add(config["run_id"], "launcher", "control: drain-reviews")
         capacity_record = (
             f"control: worker-capacity\nworkers: {int(config['workers'])}\nterminal-blockers: true"
         )
@@ -1013,12 +1415,6 @@ def command_launch(arguments: argparse.Namespace) -> int:
             for item in client.search(config["run_id"], "control: worker-capacity")
         ):
             client.add(config["run_id"], "launcher", capacity_record)
-        if state == "running" and not client.search(
-            config["run_id"], "control: worker-verification"
-        ):
-            client.add(config["run_id"], "launcher", "control: worker-verification")
-        if state == "running" and not client.search(config["run_id"], "control: reusable-slots"):
-            client.add(config["run_id"], "launcher", "control: reusable-slots")
         supervisor: _Supervisor | None = None
         if state == "running":
             _prepare_repositories(config)
@@ -1060,6 +1456,8 @@ def command_worker(arguments: argparse.Namespace) -> int:
         model=config.get("model"),
         assignment_path=Path(config["run_dir"]) / "assignments" / f"{arguments.slot}.txt",
         run_config=_config_path(arguments.workload),
+        evidence_root=config["evidence_root"],
+        checker_root=config["checker_root"],
         epoch=int(config["epoch"]),
         log=log,
     )

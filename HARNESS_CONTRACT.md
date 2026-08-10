@@ -140,8 +140,9 @@ specification change starts a new run.
 
 Workloads fail closed when they are missing, disabled, uncommitted, malformed,
 cyclic, path-escaping, or changed after run creation. Task identifiers are safe
-and unique, dependencies remain within one acyclic graph, and every task and
-final workload gate supplies at least one exact check command.
+and unique, dependencies remain within one acyclic graph, and every task
+supplies at least one exact check command. `stage_gate` is a required list of
+additional final integration commands and may be empty.
 
 The frozen target identity supplies both author and committer metadata for all
 worker and prospective merge commits.
@@ -157,15 +158,47 @@ search again. Implementation, review, verification, candidate invalidation,
 merge authorization, dependency release, and completion all remain workflow
 semantics above the journal.
 
-Each mutating task has its own branch. A candidate is reviewed and independently
-verified at its exact frontier. A challenge invalidates that candidate
-generation and requires its gates to run again. The thin launcher verifies a
-prospective merge in an isolated clone and imports only that verified commit
-object. Dependencies release only after merge, and the final workload gate runs
-in another isolated clone before completion. There is no integration branch or
-persistent semantic orchestrator, and every role starts a fresh model context.
+Each mutating task has its own branch. Authoring produces and pushes an immutable
+candidate before acceptance checks begin. Publication exposes the configured
+reviews and one assignment for every declared check at the same time. Reviewers
+inspect the diff and repository contract and may run targeted diagnostics, but
+review does not imply acceptance-command execution.
+
+The existing `verify:<task>:<candidate-commit>:<check-ordinal>` claim is the
+single acceptance requirement identity. Its ordinal resolves the exact command from
+the frozen workload; the immutable commit resolves its tree; the run and
+external epoch resolve workload and qualification authority; and commands run
+from the checked-out repository root. Atomic claim replay selects one owner, and
+the qualified harness process—not a model instruction—executes that command in
+an isolated clone. One `verify-pass` or `verify-fail` terminal record bound to
+the same identity satisfies the attempt. A durable result is never scheduled
+again after restart.
+
+When a frozen check declares `receipt_required`, its exact requirement also
+binds that policy. The command must emit one bounded regular JSON-object receipt
+through `SWARM_EVIDENCE_RECEIPT`; the harness content-addresses it with the other
+attempt artifacts. Absence, malformed JSON, a non-regular file, or an oversized
+receipt converts the attempt to infrastructure failure regardless of exit code.
+The same generic rule applies to a frozen prospective-tree checker through
+`prospective_receipt_required`.
+
+Acceptance requires every declared check to pass and every configured review to
+approve the same candidate. A real command failure or rejecting review makes
+that immutable candidate revision-required and obsoletes its remaining work; a
+new commit creates new check identities even when command text is unchanged.
+The thin launcher verifies repository and prospective-tree invariants in an
+isolated clone without rerunning candidate checks, then imports only that exact
+commit object. Dependencies release after merge, and only additional commands
+listed in `stage_gate` run before completion. There is no integration branch or
+persistent semantic orchestrator, and every model role starts a fresh context.
+
 On a local machine, directly observed process liveness drives immediate crash
-reclamation; ownership is not kept alive by a long fixed-duration lease.
+reclamation; ownership is not kept alive by a long fixed-duration lease. A dead
+winner is reclaimed only after its process can no longer execute. If it had
+durably published a terminal result, replay suppresses replacement execution;
+otherwise a replacement may run. A live process that loses connectivity retains
+its completed terminal text and retries publication without rerunning the
+command.
 
 ## Administrative destructive rewind
 
@@ -194,9 +227,10 @@ live-migrate repository specifications, split semantic and deterministic memory,
 offer per-query search modes, scan history with wildcards, or depend on early
 pagination. Archived demo campaigns have no compatibility guarantee.
 
-Review quorum, exact-check verification, candidate invalidation, merge
+Review quorum, shared exact-check execution, candidate invalidation, merge
 authorization, dependency release, and completion are workflow semantics—not
-journal-backend features.
+journal-backend features. There is no check cache, evidence database, lease
+service, or second claim protocol.
 
 ## Qualification and honest compatibility
 

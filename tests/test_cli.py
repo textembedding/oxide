@@ -114,6 +114,23 @@ def test_arbitrary_product_contract_parses_without_rewriting_checks(tmp_path: Pa
     assert workload["tasks"][1]["depends_on"] == ["API"]
     assert workload["tasks"][0]["checks"] == ["npm test -- api"]
     assert workload["stage_gate"] == ["npm test"]
+    path.write_text(_workload_text().replace("stage_gate:\n  - npm test", "stage_gate: []"))
+    assert cli.load_stage(path)["stage_gate"] == []
+
+
+def test_workload_rejects_nonboolean_required_receipt_policy(tmp_path: Path) -> None:
+    path = tmp_path / "web-app.yaml"
+    path.write_text(
+        _workload_text().replace(
+            "      - npm test -- api",
+            "      - id: api-check\n"
+            "        command: npm test -- api\n"
+            "        receipt_required: yes-please",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(cli.HarnessError, match="identity is malformed"):
+        cli.load_stage(path)
 
 
 def test_workload_contract_rejects_dependency_cycles(tmp_path: Path) -> None:
@@ -634,12 +651,14 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
     (run_dir / "run.json").write_text(
         json.dumps(
             {
-                "schema_version": 7,
+                "schema_version": 8,
                 "run_id": "web-app-20260808-120000",
                 "workload": "web-app",
                 "run_dir": "/old/checkout/.swarm/runs/web-app",
                 "database": "/old/checkout/.swarm/runs/web-app/journal.sqlite3",
                 "socket": "/old/checkout/.swarm/runs/web-app/journal.sock",
+                "evidence_root": "/old/checkout/.swarm/runs/web-app/evidence/checks",
+                "checker_root": "/old/checkout/.swarm/runs/web-app/frozen-checker",
                 "stage_path": "/old/target/swarm-harness/web-app.yaml",
                 "target_repo": "/target/remains/unchanged",
                 "target_branch": "main",
@@ -669,6 +688,8 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
     assert config["run_dir"] == str(run_dir.resolve())
     assert config["database"] == str(run_dir.resolve() / "journal.sqlite3")
     assert config["socket"] == str(run_dir.resolve() / "journal.sock")
+    assert config["evidence_root"] == str(run_dir.resolve() / "evidence" / "checks")
+    assert config["checker_root"] == str(run_dir.resolve() / "frozen-checker")
     assert config["stage_path"] == str(
         Path("/target/remains/unchanged/swarm-harness/web-app.yaml").resolve()
     )
@@ -763,7 +784,7 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
     ).stdout.strip()
     run_id = "rewind-20260809-120000"
     config = {
-        "schema_version": 7,
+        "schema_version": 8,
         "run_id": run_id,
         "workload": "rewind",
         "target_repo": str(target),
@@ -773,6 +794,8 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         "run_dir": str(run_dir),
         "database": str(run_dir / "journal.sqlite3"),
         "socket": str(run_dir / "journal.sock"),
+        "evidence_root": str(run_dir / "evidence" / "checks"),
+        "checker_root": str(run_dir / "frozen-checker"),
         "workers": 4,
         "required_reviews": 3,
         "journal_command": [],
@@ -980,7 +1003,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    assert config["schema_version"] == 7
+    assert config["schema_version"] == 8
     assert (config["min_exact"], config["max_results"]) == (5, 10)
     assert config["epoch"] == 0
     workload_ref = config["workload_ref"]
@@ -1096,6 +1119,9 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     assert '"tool": "journal_add"' in worker_logs
     assert "approve: review:" in worker_logs
     assert "merge: task:" in worker_logs
+    assert worker_logs.count("ACCEPTANCE CHECK STARTED verify:") == 3
+    assert worker_logs.count("ACCEPTANCE CHECK COMPLETED verify:") == 3
+    assert "Finished verification" not in worker_logs
 
     reset = subprocess.run(
         [str(ROOT / "swarmctl"), "harness", "reset", "--workload", "smoke"],

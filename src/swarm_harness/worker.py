@@ -4,10 +4,22 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from .evidence import (
+    EvidenceError,
+    artifact_digest,
+    begin_attempt,
+    evidence_key,
+    finish_attempt,
+    load_terminal_receipt,
+    observed_environment,
+    validate_declared_json_receipt,
+)
+from .journal_backend import JournalError
 from .workflow import WorkflowClient, WorkflowError
 
 
@@ -97,6 +109,8 @@ class Worker:
         model: str | None = None,
         assignment_path: str | Path | None = None,
         run_config: str | Path | None = None,
+        evidence_root: str | Path | None = None,
+        checker_root: str | Path | None = None,
         epoch: int = 0,
         log: Callable[[str], None] = print,
     ) -> None:
@@ -111,6 +125,16 @@ class Worker:
         self.model = model
         self.assignment_path = Path(assignment_path) if assignment_path else None
         self.run_config = Path(run_config) if run_config else None
+        self.evidence_root = (
+            Path(evidence_root)
+            if evidence_root
+            else ((self.run_config.parent / "evidence" / "checks") if self.run_config else None)
+        )
+        self.checker_root = (
+            Path(checker_root)
+            if checker_root
+            else ((self.run_config.parent / "frozen-checker") if self.run_config else None)
+        )
         self.epoch = epoch
         self.process: subprocess.Popen[str] | None = None
         self.log = log
@@ -135,7 +159,15 @@ class Worker:
 
     def _prompt(self) -> str:
         ordinal = int(self.worker_id.rsplit("-", 1)[-1])
-        return f"""Perform exactly one journal-assigned role as {self.worker_id}.\nThe journal is the entire coordination interface between workers. journal_search and journal_add are the only journal operations. Use repository, Git, shell, and test tools normally for the assigned role; never inspect the harness, journal socket, or journal database by shell. Treat the repository's swarm-harness directory as immutable workload input, never as product implementation.\nSEARCH returns one bounded union of exact and threshold-eligible semantic records. The configured exact floor preserves exact anchors when available, but one response is not necessarily exhaustive. Results are ordered only by journal sequence; semantic score never controls position. Use match_kind and stored routing metadata to distinguish exact records, and use returned task IDs, errors, hashes, decisions, components, or concepts for iterative follow-up searches. Absence from an ordinary natural-language search is not proof that no record exists.\n1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, prefer implementation work, rotate that group left by {ordinal} modulo its length, and journal_add exact claims until accepted.\n2. Orient only with records bound to the assignment: REVISION searches `review:<root_task_id>:<generation>` and `verify:<root_task_id>:<head_sha>`; INTERNAL REVIEW searches the exact assigned `head_sha`; VERIFICATION searches its exact claim identity; MERGE searches `review:<root_task_id>:<generation>`. Never assume one bounded response exhausts assignment history; follow useful returned identifiers with more specific searches.\n3. Keep the shared truth current with substantive work records. Immediately after orientation or a new finding, before and after every command or check batch that can materially affect the outcome, and after each durable edit, add:\n  work-log: <exact claim identity after `claim: `>\n  phase: <oriented|diagnosed|editing|checking|check-result|ready>\n  evidence: <one concise concrete fact, file/change, command, or result>\nNever add timer, heartbeat, elapsed-time, or empty progress records. Each work-log must communicate new reusable information. After every work-log, search the exact claim identity again before beginning the next phase so concurrent facts and invalidation are observed.\n4. Follow the assigned role. A fresh session may receive any role.\nAUTHOR or REVISION\n- Inspect the checked-out repository specification directly with rg, file reads, and Git. Journal citations, discoveries, decisions, and evidence, never copied roadmap or specification content.\n- Fetch origin. For a new PR, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.\n- Journal the concrete diagnosis before editing. Implement only the objective. After each coherent durable edit, add both `checkpoint: task:<root_task_id>` with concise files/status evidence and a `work-log` editing record. Before each returned check, journal the exact command as checking; immediately journal its pass/fail result before continuing. Fix failures, commit, and push HEAD to the exact branch.\n- Search the exact claim once more, then add `handoff: task:<root_task_id>` with files and check evidence, followed by:\n  open-pr: task:<root_task_id>\n  branch: <exact assigned branch>\n  base: <exact commit the candidate is based on>\n  head: <exact pushed HEAD>\n  verified: true\n- If a required external capability is unavailable, journal this exact terminal form:\n  blocked: task:<root_task_id>\n  role: <returned role>\n  branch: <returned branch>\n  generation: <returned generation>\n  head: <returned head>\n  verified: false\n  reason: <concise reason>\nINTERNAL REVIEW\n- An accepted claim is final eligibility for that generation. Worker slots are reusable and every role starts a fresh context, so current or prior authorship does not exclude a slot. Review the exact assigned head.\n- Work read-only. Fetch the branch and detach at exact `head_sha`; journal the inspected base-to-head diff finding. Before each returned check, journal the exact command as checking and immediately journal its result. Re-search the exact review identity before deciding. Do not edit, commit, or push.\n- On pass, add the exact review identity from the work item:\n  approve: review:<root_task_id>:<generation>:<review_ordinal>\n  head: <exact reviewed head>\n  verified: true\n  evidence: <criterion-level evidence>\n- On any defect use `challenge:` with the same identity, exact head, `verified: true`, and `reason:`. Finish your decision even if a sibling challenged; a changed candidate requires all reviews again.\nVERIFICATION\n- Work read-only. Fetch origin and detach at the exact assigned `head_sha`. Journal the exact acceptance command as checking, run it, immediately journal the concrete result, then re-search the exact verification identity before the terminal decision. Do not edit, commit, or push.\n- If `last_error` is present, this is revision support: inspect that defect alongside the check and include concrete repair guidance in the result work-log and terminal evidence.\n- On pass add:\n  verify-pass: <exact claim identity after `claim: `>\n  head: <exact assigned head>\n  verified: true\n  evidence: <command result and, when applicable, targeted repair guidance>\n- On failure use `verify-fail:` with the same identity, exact head, `verified: true`, and `reason:`.\nMERGE\n- Confirm the exact head and configured approval count from the bounded orientation search, journal that concrete authorization evidence, and re-search the exact merge identity. Add `merge: task:<root_task_id>` with exact `generation:` and `head:`. The launcher verifies the prospective tree before merging to `{self.target_branch}`.\nDo not claim a second item. Finish after the terminal record is accepted.\nBoth tools take one `yaml` argument containing exactly one string field: `query` for journal_search or `text` for journal_add.\n"""
+        return (
+            f"Perform exactly one journal-assigned role as {self.worker_id}.\nThe journal is the entire coordination interface between workers. journal_search and journal_add are the only journal operations. Use repository, Git, shell, and test tools normally for the assigned role; never inspect the harness, journal socket, or journal database by shell. Treat the repository's swarm-harness directory as immutable workload input, never as product implementation.\n"
+            "SEARCH returns one bounded union of exact and threshold-eligible semantic records. The configured exact floor preserves exact anchors when available, but one response is not necessarily exhaustive. Results are ordered only by journal sequence; semantic score never controls position. Use match_kind and stored routing metadata to distinguish exact records, and use returned task IDs, errors, hashes, decisions, components, or concepts for iterative follow-up searches. Absence from an ordinary natural-language search is not proof that no record exists.\n"
+            f"1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, rotate the complete ready list left by {ordinal} modulo its length, and journal_add exact claims until accepted.\n2. Orient only with records bound to the assignment: REVISION searches `review:<root_task_id>:<generation>` and `verify:<root_task_id>:<head_sha>`; INTERNAL REVIEW searches the exact assigned `head_sha` and any returned acceptance-result identities; MERGE searches `review:<root_task_id>:<generation>`. Never assume one bounded response exhausts assignment history; follow useful returned identifiers with more specific searches.\n"
+            "3. Keep the shared truth current with substantive work records. Immediately after orientation or a new finding, before and after a material command or diagnostic, and after each durable edit, add `work-log: <claim identity after claim: >`, `phase: <oriented|diagnosed|editing|checking|check-result|ready>`, and one concise concrete `evidence:` fact. Never add timer, heartbeat, elapsed-time, or empty progress records. Re-search the exact claim after each work-log.\n4. Follow the assigned role. A fresh session may receive any role. Acceptance-check assignments are executed directly by the qualified harness process against the immutable candidate; they never require a model session.\n"
+            f"AUTHOR or REVISION\n- Inspect the repository specification directly with rg, file reads, and Git. Journal citations, discoveries, decisions, and evidence, never copied specification content.\n- Fetch origin. For a new candidate, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.\n- Diagnose, implement only the objective, and use targeted development diagnostics when useful, but do not run the returned acceptance list: publication creates shared candidate-bound check assignments. After each coherent durable edit, add `checkpoint: task:<root_task_id>` and a work-log. Commit and push the exact branch.\n- Re-search the claim, add `handoff: task:<root_task_id>` with candidate evidence, then add `open-pr: task:<root_task_id>` with exact `branch:`, `base:`, `head:`, `tree:` (from `git rev-parse HEAD^{{tree}}`), and `verified: true`. That flag attests immutable candidate publication, not acceptance-check success.\n- The target-owned judge is frozen outside the candidate. A change to its protected paths requires a newly qualified run and cannot judge itself.\n- If an external capability is unavailable, journal `blocked: task:<root_task_id>` with the returned role, branch, generation, head, `verified: false`, and reason.\n"
+            "INTERNAL REVIEW\n- An accepted claim is final eligibility for that generation. Worker slots are reusable and every role starts a fresh context, so current or prior authorship does not exclude a slot. Work read-only at exact `head_sha`; inspect the diff and repository specification for correctness, completeness, maintainability, tests, architectural fit, omissions, weak assertions, unsafe shortcuts, and integration hazards.\n- Apply the returned `review_role` as your primary independent question: `specification` asks whether the product model covers intended success, failure, boundary, and reachable-state behavior; `adversarial` asks whether the production implementation is actually connected to meaningful, non-vacuous proof obligations; `integration` asks whether concurrency, persistence, recovery, unsafe code, source closure, assumptions, scalability, and the trusted boundary are sound. Do not substitute one question for another.\n- Consume terminal acceptance results listed or found through exact `verify:<root_task_id>:<head_sha>:<ordinal>` searches. Review is independent of check execution: do not mechanically rerun the declared command list. Targeted diagnostics may investigate a concern; claim an unsatisfied acceptance check only as a separate fresh assignment after review. Passing review cannot replace a required check result, and passing checks cannot replace review.\n- Re-search the review identity. On pass add `approve: review:<root_task_id>:<generation>:<review_ordinal>` with exact head, `verified: true`, and criterion-level evidence for the assigned review question. On defect use `challenge:` with the same identity, exact head, `verified: true`, and reason. Do not edit, commit, or push.\n"
+            f"MERGE\n- Confirm the exact head, configured approval count, and shared acceptance results. Re-search the merge identity, then add `merge: task:<root_task_id>` with exact generation and head. The launcher verifies repository and prospective-tree invariants before merging to `{self.target_branch}`.\nDo not claim a second item. Both tools take one `yaml` argument containing exactly one string field: `query` for journal_search or `text` for journal_add.\n"
+        )
 
     def _configs(self) -> list[str]:
         # Keep the virtual-environment entry point. Resolving its symlink escapes
@@ -169,27 +201,252 @@ class Worker:
             "mcp_servers.journal.tool_timeout_sec=10",
         ]
 
-    def _claim(self, ready: list[dict]) -> bool:
-        groups = (
-            [item for item in ready if item.get("role") != "verification"],
-            [item for item in ready if item.get("role") == "verification"],
-        )
+    def _claim(self, ready: list[dict]) -> dict | None:
         ordinal = int(self.worker_id.rsplit("-", 1)[-1])
-        for group in groups:
-            eligible = group
-            if not eligible:
-                continue
-            item = eligible[ordinal % len(eligible)]
+        if not ready:
+            return None
+        item = ready[ordinal % len(ready)]
+        try:
+            response = self.client.add(self.run_id, self.worker_id, str(item["claim"]))
+        except WorkflowError:
+            # Search again after losing the atomic claim.
+            return None
+        claimed = response.get("work")
+        if not isinstance(claimed, dict):
+            raise WorkflowError("accepted claim did not return the owned assignment")
+        self._set_assignment(claimed)
+        self.log(f"journal_add accepted: {item['claim']}")
+        return claimed
+
+    def _publish_verification_result(self, text: str) -> int:
+        try:
+            self.client.add(self.run_id, self.worker_id, text)
+        except JournalError as error:
+            self.log(f"journal_add unavailable after acceptance check: {error}")
+            return 2
+        return 0
+
+    @staticmethod
+    def _verification_terminal(
+        item: dict,
+        receipt: dict,
+        receipt_digest: str,
+    ) -> str:
+        identity = str(item["claim"]).removeprefix("claim: ")
+        result = str(receipt["result"])
+        marker = {
+            "passed": "verify-pass",
+            "product_failure": "verify-fail",
+            "infrastructure_failure": "verify-infrastructure",
+        }[result]
+        detail_name = "evidence" if result == "passed" else "reason"
+        if result == "passed":
+            detail = (
+                "qualified command passed; stdout "
+                f"{artifact_digest(receipt, 'stdout')}; stderr "
+                f"{artifact_digest(receipt, 'stderr')}"
+            )
+        else:
+            detail = (
+                f"qualified command classified {result} with exit "
+                f"{receipt.get('exit_code')}; stdout {artifact_digest(receipt, 'stdout')}; "
+                f"stderr {artifact_digest(receipt, 'stderr')}"
+            )
+        return "\n".join(
+            (
+                f"{marker}: {identity}",
+                f"head: {item['head_sha']}",
+                f"tree: {item['tree_sha']}",
+                f"base: {item['evidence_requirement']['candidate']['base']}",
+                f"evidence-key: {item['evidence_key']}",
+                f"claim-attempt: {item['execution_attempt']}",
+                f"execution-attempt: {receipt['execution_attempt']}",
+                f"receipt: {receipt_digest}",
+                "verified: true",
+                f"{detail_name}: {detail}",
+            )
+        )
+
+    def _run_acceptance_check(self, item: dict) -> int:
+        claim = str(item.get("claim", ""))
+        head = str(item.get("head_sha", ""))
+        tree = str(item.get("tree_sha", ""))
+        task = str(item.get("root_task_id", ""))
+        ordinal = item.get("verification_ordinal")
+        checks = item.get("checks")
+        check = item.get("check_contract")
+        requirement = item.get("evidence_requirement")
+        key = item.get("evidence_key")
+        attempt = item.get("execution_attempt")
+        expected = f"claim: verify:{task}:{head}:{ordinal}"
+        if (
+            item.get("role") != "verification"
+            or claim != expected
+            or re.fullmatch(r"[0-9a-f]{40}", head) is None
+            or re.fullmatch(r"[0-9a-f]{40}", tree) is None
+            or not isinstance(ordinal, int)
+            or not isinstance(checks, list)
+            or len(checks) != 1
+            or not isinstance(checks[0], str)
+            or not checks[0]
+            or not isinstance(check, dict)
+            or not isinstance(requirement, dict)
+            or not isinstance(key, str)
+            or key != evidence_key(requirement)
+            or not isinstance(attempt, str)
+            or re.fullmatch(r"[0-9a-f]{64}", attempt) is None
+            or self.evidence_root is None
+        ):
+            raise WorkflowError("acceptance check assignment is malformed")
+        command = checks[0]
+        existing = load_terminal_receipt(
+            self.evidence_root,
+            requirement,
+            execution_attempt=attempt,
+        )
+        if existing is not None:
+            receipt, digest = existing
+            return self._publish_verification_result(
+                self._verification_terminal(item, receipt, digest)
+            )
+
+        qualification = requirement.get("qualification")
+        if not isinstance(qualification, dict):
+            raise WorkflowError("acceptance check qualification is malformed")
+        timeout = int(qualification.get("timeout_seconds", 1800))
+        maximum_artifact_bytes = int(qualification.get("max_artifact_bytes", 16777216))
+        infrastructure_codes = qualification.get("infrastructure_exit_codes", [2, 124])
+        expected_environment = qualification.get("environment")
+        result_kind = "infrastructure_failure"
+        exit_code: int | None = None
+        started_at = time.time()
+        begin_attempt(self.evidence_root, requirement, attempt)
+        with tempfile.TemporaryDirectory(
+            prefix=f"{self.worker_id}-acceptance-check-",
+            dir=self.evidence_root.parent,
+        ) as raw:
+            temporary = Path(raw)
+            repository = temporary / "repository"
+            stdout = temporary / "stdout.log"
+            stderr = temporary / "stderr.log"
+            declared = temporary / "declared"
+            declared.mkdir()
             try:
-                self.client.add(self.run_id, self.worker_id, str(item["claim"]))
-            except WorkflowError:
-                # The snapshot is stale after a losing atomic claim. Search again
-                # before proposing any other ownership record.
-                return False
-            self._set_assignment(item)
-            self.log(f"journal_add accepted: {item['claim']}")
-            return True
-        return False
+                if (
+                    expected_environment is not None
+                    and expected_environment != observed_environment()
+                ):
+                    raise EvidenceError("execution environment differs from checker qualification")
+                subprocess.run(
+                    ["git", "clone", "--no-hardlinks", str(self.target_repo), str(repository)],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "checkout", "--detach", head],
+                    cwd=repository,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                actual_tree = subprocess.run(
+                    ["git", "rev-parse", "HEAD^{tree}"],
+                    cwd=repository,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout.strip()
+                if actual_tree != tree:
+                    raise EvidenceError("candidate commit does not resolve to its frozen tree")
+                working_directory = (repository / str(check["working_directory"])).resolve()
+                if (
+                    not working_directory.is_relative_to(repository)
+                    or not working_directory.is_dir()
+                ):
+                    raise EvidenceError("qualified check working directory is unavailable")
+                environment = os.environ.copy()
+                environment.update(
+                    {str(k): str(v) for k, v in check.get("environment", {}).items()}
+                )
+                environment.update(
+                    {
+                        "SWARM_FROZEN_CHECKER_ROOT": str(self.checker_root or ""),
+                        "SWARM_CANDIDATE_COMMIT": head,
+                        "SWARM_CANDIDATE_TREE": tree,
+                        "SWARM_PROSPECTIVE_COMMIT": head,
+                        "SWARM_PROSPECTIVE_TREE": tree,
+                        "SWARM_EVIDENCE_RECEIPT": str(declared / "receipt.json"),
+                        "SWARM_EVIDENCE_ARTIFACT_DIR": str(declared / "artifacts"),
+                    }
+                )
+                self.log(f"ACCEPTANCE CHECK STARTED {claim.removeprefix('claim: ')}\n{command}")
+                with stdout.open("wb") as out, stderr.open("wb") as err:
+                    process = subprocess.Popen(
+                        ["/bin/zsh", "-lc", command],
+                        cwd=working_directory,
+                        env=environment,
+                        stdout=out,
+                        stderr=err,
+                        start_new_session=True,
+                    )
+                    self.process = process  # lets pause/reset kill the exact command group
+                    try:
+                        exit_code = process.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                        exit_code = 124
+                    finally:
+                        self.process = None
+                result_kind = (
+                    "passed"
+                    if exit_code == 0
+                    else "infrastructure_failure"
+                    if exit_code in infrastructure_codes
+                    else "product_failure"
+                )
+                if check.get("receipt_required", False):
+                    validate_declared_json_receipt(
+                        declared / "receipt.json",
+                        maximum_bytes=maximum_artifact_bytes,
+                    )
+            except (OSError, subprocess.CalledProcessError, EvidenceError, ValueError) as error:
+                with stderr.open("a", encoding="utf-8") as stream:
+                    stream.write(f"qualified-check infrastructure failure: {error}\n")
+                stdout.touch(exist_ok=True)
+                result_kind = "infrastructure_failure"
+                exit_code = 2
+            finally:
+                self.process = None
+            declared_paths = [path for path in declared.rglob("*") if path.is_file()]
+            for relative in check.get("artifacts", []):
+                candidate = (repository / str(relative)).resolve()
+                if candidate.is_relative_to(repository) and candidate.is_file():
+                    declared_paths.append(candidate)
+            receipt, digest = finish_attempt(
+                self.evidence_root,
+                requirement,
+                attempt,
+                result=result_kind,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                artifact_paths=declared_paths,
+                maximum_artifact_bytes=maximum_artifact_bytes,
+                started_at=started_at,
+            )
+            output = (
+                stdout.read_text(encoding="utf-8", errors="replace")
+                + stderr.read_text(encoding="utf-8", errors="replace")
+            ).rstrip()
+            if output:
+                self.log(output[-12000:])
+            self.log(
+                f"ACCEPTANCE CHECK COMPLETED {claim.removeprefix('claim: ')} "
+                f"result={receipt['result']} exit={receipt['exit_code']}"
+            )
+        return self._publish_verification_result(self._verification_terminal(item, receipt, digest))
 
     @staticmethod
     def _terminal_record(line: str) -> bool:
@@ -206,7 +463,7 @@ class Worker:
             == ("journal", "journal_add", "completed")
             and "saved: true" in json.dumps(item.get("result"))
             and re.search(
-                r"open-pr: task:|blocked: task:|(?:approve|challenge): review:|merge: task:|verify-(?:pass|fail): verify:",
+                r"open-pr: task:|blocked: task:|(?:approve|challenge): review:|merge: task:|verify-(?:pass|fail|infrastructure): verify:",
                 text,
             )
             is not None
@@ -257,13 +514,7 @@ class Worker:
             self._prompt() + "\nWhen re-searching after a work-log, query its complete first line "
             "(`work-log: <claim identity>`), not the bare `task:` identity. This "
             "retrieves only assignment-bound communication without replaying the "
-            "workflow projection. If the returned claim is `claim: verify:X`, the "
-            "first line is exactly `work-log: verify:X`; never write "
-            "`work-log: claim: verify:X`.\n"
-            + "\nA failing acceptance command is implementation work, not an unavailable "
-            "external capability. Diagnose and repair the first concrete failure rather "
-            "than recording an environmental blocker unless the required capability is "
-            "actually absent.\n"
+            "workflow projection.\n"
         )
         environment = os.environ.copy()
         environment.update(
@@ -315,16 +566,23 @@ class Worker:
             return str(state)
         if not active and not ready:
             return "idle"
-        if not active and not self._claim(ready):
-            # The losing claim was itself the atomic concurrency result. Do not
-            # reuse or immediately replace that snapshot; the next host cycle
-            # reconstructs current readiness before proposing another claim.
-            return "contended"
-        elif active:
-            self._set_assignment(active[0])
-        code = self._codex()
+        item: dict
+        if not active:
+            claimed = self._claim(ready)
+            if claimed is None:
+                # The next cycle reconstructs readiness after contention.
+                return "contended"
+            item = claimed
+        else:
+            item = active[0]
+            self._set_assignment(item)
+        code = (
+            self._run_acceptance_check(item)
+            if item.get("role") == "verification"
+            else self._codex()
+        )
         if code:
-            self.log(f"Codex exited {code}; the same slot will reconstruct from the journal")
+            self.log(f"worker action exited {code}; the slot will reconstruct from the journal")
             return "retry"
         return "worked"
 

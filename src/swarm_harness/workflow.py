@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .evidence import evidence_key
 from .journal_backend import JournalPort
 
 
@@ -17,6 +18,7 @@ class WorkflowError(RuntimeError):
 
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _AUTHOR_CLAIM = re.compile(r"^claim: task:([^\s:]+)$")
 _REVIEW_CLAIM = re.compile(r"^claim: review:([^\s:]+):(\d+):(\d+)$")
@@ -25,7 +27,10 @@ _VERIFY_CLAIM = re.compile(r"^claim: verify:([^\s:]+):([0-9a-f]{40}):(\d+)$")
 _AUTHOR_MARKER = re.compile(r"^(checkpoint|handoff|open-pr): task:([^\s:]+)$")
 _REVIEW_DECISION = re.compile(r"^(approve|challenge): review:([^\s:]+):(\d+):(\d+)$")
 _MERGE_REQUEST = re.compile(r"^merge: task:([^\s:]+)$")
-_VERIFY_RESULT = re.compile(r"^(verify-pass|verify-fail): verify:([^\s:]+):([0-9a-f]{40}):(\d+)$")
+_VERIFY_RESULT = re.compile(
+    r"^(verify-pass|verify-fail|verify-infrastructure): "
+    r"verify:([^\s:]+):([0-9a-f]{40}):(\d+)$"
+)
 _BLOCKED = re.compile(r"^(blocked|blocker): task:([^\s:]+)$")
 _RECLAIM = re.compile(r"^control: reclaim worker:([^\s:]+)$")
 _REVIEW_ROLES = ("specification", "adversarial", "integration")
@@ -82,6 +87,54 @@ def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
 
 
+def _normalize_check(value: object, ordinal: int) -> dict[str, Any]:
+    if isinstance(value, str):
+        command = value
+        source: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        source = dict(value)
+        command = source.get("command")
+    else:
+        raise WorkflowError("acceptance checks must be commands or check mappings")
+    if not isinstance(command, str) or not command.strip():
+        raise WorkflowError("acceptance check command must be nonempty")
+    check_id = source.get("id", f"check-{ordinal}")
+    working_directory = source.get("working_directory", ".")
+    slot = source.get("evidence_slot", "qualified-once")
+    environment = source.get("environment", {})
+    artifacts = source.get("artifacts", [])
+    receipt_required = source.get("receipt_required", False)
+    if (
+        not isinstance(check_id, str)
+        or not check_id
+        or not isinstance(working_directory, str)
+        or not working_directory
+        or Path(working_directory).is_absolute()
+        or ".." in Path(working_directory).parts
+        or not isinstance(slot, str)
+        or not slot
+        or not isinstance(environment, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(item, str)
+            for key, item in environment.items()
+        )
+        or not isinstance(artifacts, list)
+        or any(not isinstance(item, str) or not item for item in artifacts)
+        or not isinstance(receipt_required, bool)
+    ):
+        raise WorkflowError("acceptance check identity is malformed")
+    return {
+        "id": check_id,
+        "ordinal": ordinal,
+        "command": command,
+        "working_directory": working_directory,
+        "environment": dict(sorted(environment.items())),
+        "evidence_slot": slot,
+        "artifacts": list(artifacts),
+        "receipt_required": receipt_required,
+    }
+
+
 @dataclass
 class Projection:
     namespace: str
@@ -94,10 +147,7 @@ class Projection:
     required_reviews: int = 0
     worker_capacity: int = 0
     frontier_sha: str | None = None
-    drain_reviews: bool = False
     terminal_blockers: bool = False
-    worker_verification: bool = False
-    reusable_slots: bool = False
     tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
     verifications: dict[str, dict[str, Any]] = field(default_factory=dict)
     outcomes: dict[int, tuple[bool, dict[str, Any] | str]] = field(default_factory=dict)
@@ -184,44 +234,6 @@ class WorkflowReducer:
                     view.worker_capacity = capacity
                     view.terminal_blockers |= _line_value(text, "terminal-blockers") == "true"
                     view.accept(record, {"saved": saved, "workers": capacity})
-            return
-        if first == "control: drain-reviews":
-            if author != "launcher":
-                view.reject(record, "review-drain activation requires the launcher")
-            else:
-                saved = not view.drain_reviews
-                view.drain_reviews = True
-                view.accept(record, {"saved": saved, "review_drain": True})
-            return
-        if first == "control: worker-verification":
-            if author != "launcher":
-                view.reject(record, "worker verification activation requires the launcher")
-            else:
-                saved = not view.worker_verification
-                view.worker_verification = True
-                for task in view.tasks.values():
-                    stale_launcher_block = task["state"] == "blocked" and str(
-                        task["last_error"] or ""
-                    ).lower().startswith("merge launcher")
-                    if task["state"] in {"reviewing", "merge_ready"} or stale_launcher_block:
-                        task["verification_required"] = True
-                        if stale_launcher_block:
-                            task.update(state="reviewing", last_error=None)
-                            view.verifications = {
-                                key: item
-                                for key, item in view.verifications.items()
-                                if item["task_id"] != task["task_id"]
-                            }
-                        self._advance_candidate(view, task)
-                view.accept(record, {"saved": saved, "worker_verification": True})
-            return
-        if first == "control: reusable-slots":
-            if author != "launcher":
-                view.reject(record, "only the launcher may enable reusable worker slots")
-            else:
-                saved = not view.reusable_slots
-                view.reusable_slots = True
-                view.accept(record, {"saved": saved, "reusable_slots": True})
             return
         if first == "control: pause":
             if author != "launcher" or view.state == "complete":
@@ -327,9 +339,24 @@ class WorkflowReducer:
                 if review["state"] == "claimed" and review["worker_id"] == worker:
                     review.update(state="pending", worker_id=None)
                     recovered = f"{task['task_id']}/review-{review['ordinal']}"
-        for key, verification in list(view.verifications.items()):
+        for verification in view.verifications.values():
             if verification["state"] == "claimed" and verification["worker_id"] == worker:
-                del view.verifications[key]
+                attempt = verification.get("execution_attempt")
+                if attempt:
+                    verification.setdefault("attempts", []).append(
+                        {
+                            "execution_attempt": attempt,
+                            "state": "abandoned",
+                            "worker_id": worker,
+                        }
+                    )
+                verification.update(
+                    state="pending",
+                    worker_id=None,
+                    execution_attempt=None,
+                    result="abandoned",
+                    detail="worker process was durably reclaimed after liveness failure",
+                )
                 recovered = f"{verification['task_id']}/verify-{verification['check_ordinal']}"
         view.accept(record, {"saved": recovered is not None, "reclaimed": recovered})
 
@@ -379,7 +406,7 @@ class WorkflowReducer:
         normalized: list[dict[str, Any]] = []
         for ordinal, source in enumerate(tasks):
             dependencies = source.get("depends_on", [])
-            checks = source.get("checks", [])
+            raw_checks = source.get("checks", [])
             branch = str(
                 source.get("branch")
                 or f"codex/swarm-{_slug(view.namespace)}/{_slug(str(source['id']))}"
@@ -389,13 +416,23 @@ class WorkflowReducer:
                 or not all(isinstance(item, str) and item for item in dependencies)
                 or not set(dependencies) <= identifiers
                 or source["id"] in dependencies
-                or not isinstance(checks, list)
-                or not checks
-                or not all(isinstance(item, str) and item for item in checks)
+                or not isinstance(raw_checks, list)
+                or not raw_checks
                 or _BRANCH.fullmatch(branch) is None
                 or ".." in branch
             ):
                 view.reject(record, "task graph, checks, or branch is invalid")
+                return
+            try:
+                checks = [
+                    _normalize_check(check, check_ordinal)
+                    for check_ordinal, check in enumerate(raw_checks, 1)
+                ]
+            except WorkflowError as error:
+                view.reject(record, str(error))
+                return
+            if len({check["id"] for check in checks}) != len(checks):
+                view.reject(record, "acceptance check IDs must be unique within a task")
                 return
             normalized.append(
                 {
@@ -411,23 +448,23 @@ class WorkflowReducer:
                     "author_id": None,
                     "base_sha": None,
                     "head_sha": None,
+                    "tree_sha": None,
                     "generation": 0,
                     "merge_worker_id": None,
                     "merged_sha": None,
+                    "prospective_tree": None,
+                    "prospective_receipt": None,
                     "last_error": None,
                     "checkpoint": False,
                     "handoff": False,
                     "reviews": [],
-                    "verification_required": False,
                 }
             )
         stage_gate = stage.get("stage_gate", [])
-        if (
-            not isinstance(stage_gate, list)
-            or not stage_gate
-            or not all(isinstance(item, str) and item for item in stage_gate)
+        if not isinstance(stage_gate, list) or not all(
+            isinstance(item, str) and item for item in stage_gate
         ):
-            view.reject(record, "stage gate must contain commands")
+            view.reject(record, "stage gate must be a list of commands")
             return
         remaining = {task["task_id"]: set(task["depends_on"]) for task in normalized}
         while remaining:
@@ -548,16 +585,8 @@ class WorkflowReducer:
                 if review["state"] == "claimed"
                 else f"review is {review['state']}",
             )
-        elif not view.reusable_slots and worker == task["author_id"]:
-            view.reject(record, "an author cannot review its own candidate")
         elif self._owned(view, worker):
             view.reject(record, "worker already owns work")
-        elif not view.reusable_slots and any(
-            item["worker_id"] == worker and item["state"] in {"claimed", "approved", "challenged"}
-            for item in task["reviews"]
-            if item["generation"] == generation
-        ):
-            view.reject(record, "reviewers must be distinct for a candidate")
         else:
             review.update(state="claimed", worker_id=worker)
             view.accept(
@@ -596,9 +625,78 @@ class WorkflowReducer:
     def _verification_key(task_id: str, frontier: str, check_ordinal: int) -> str:
         return f"{task_id}:{frontier}:{check_ordinal}"
 
+    def _evidence_requirement(
+        self,
+        view: Projection,
+        task: dict[str, Any],
+        check_ordinal: int,
+    ) -> dict[str, Any]:
+        check = task["checks"][check_ordinal - 1]
+        workload = view.workload_ref or {}
+        checker = workload.get("checker") if isinstance(workload.get("checker"), dict) else {}
+        return {
+            "schema": "SwarmCheckRequirementV1",
+            "run_id": view.namespace,
+            "epoch": view.epoch,
+            "workload": {
+                "base_commit": workload.get("base_commit"),
+                "workload_blob": workload.get("workload_blob"),
+                "harness_tree": workload.get("harness_tree"),
+            },
+            "task": task["task_id"],
+            "candidate": {
+                "base": task["base_sha"],
+                "commit": task["head_sha"],
+                "tree": task["tree_sha"],
+            },
+            "check": {
+                "id": check["id"],
+                "ordinal": check_ordinal,
+                "command": check["command"],
+                "working_directory": check["working_directory"],
+                "environment": check["environment"],
+                "evidence_slot": check["evidence_slot"],
+                "artifacts": check["artifacts"],
+                "receipt_required": check["receipt_required"],
+            },
+            "qualification": {
+                "checker_closure": checker.get("closure_sha256"),
+                "receipt": checker.get("qualification_receipt_sha256"),
+                "environment": checker.get("execution_environment"),
+                "policy": checker.get("evidence_policy", "one-qualified-execution-v1"),
+                "timeout_seconds": checker.get("timeout_seconds", 1800),
+                "infrastructure_exit_codes": checker.get("infrastructure_exit_codes", [2, 124]),
+                "max_artifact_bytes": checker.get("max_artifact_bytes", 16777216),
+            },
+        }
+
+    def _new_verification(
+        self,
+        view: Projection,
+        task: dict[str, Any],
+        check_ordinal: int,
+    ) -> dict[str, Any]:
+        requirement = self._evidence_requirement(view, task, check_ordinal)
+        return {
+            "task_id": task["task_id"],
+            "frontier": task["head_sha"],
+            "tree": task["tree_sha"],
+            "base": task["base_sha"],
+            "check_ordinal": check_ordinal,
+            "evidence_requirement": requirement,
+            "evidence_key": evidence_key(requirement),
+            "state": "pending",
+            "worker_id": None,
+            "execution_attempt": None,
+            "attempts": [],
+            "result": None,
+            "detail": None,
+            "receipt_sha256": None,
+        }
+
     @staticmethod
     def _verification_head(view: Projection, task: dict[str, Any]) -> str | None:
-        if not task["verification_required"] or task["state"] == "complete":
+        if task["state"] == "complete":
             # Verification is a pre-merge acceptance gate. A completed task has
             # already crossed it and must never return to the work queue.
             return None
@@ -619,8 +717,7 @@ class WorkflowReducer:
         key = self._verification_key(task_id, frontier, check_ordinal)
         verification = view.verifications.get(key)
         if (
-            not view.worker_capacity
-            or task is None
+            task is None
             or frontier != self._verification_head(view, task)
             or not 1 <= check_ordinal <= len(task["checks"])
         ):
@@ -632,27 +729,25 @@ class WorkflowReducer:
         ):
             work = self._verification_work(view, task, verification)
             view.accept(record, {"saved": False, "claim": "resumed", "work": work})
-        elif not view.reusable_slots and worker == task["author_id"]:
-            view.reject(record, "an author cannot independently verify its own task")
         elif self._owned(view, worker):
             view.reject(record, "worker already owns work")
-        elif verification is not None and (
-            task["state"] != "authoring" or verification["state"] == "claimed"
-        ):
+        elif verification is not None and verification["state"] != "pending":
             view.reject(record, f"verification is {verification['state']}")
         else:
             if verification is None:
-                verification = {
-                    "task_id": task_id,
-                    "frontier": frontier,
-                    "check_ordinal": check_ordinal,
-                    "state": "claimed",
-                    "worker_id": worker,
-                    "result": None,
-                    "detail": None,
-                }
-            else:
-                verification.update(state="claimed", worker_id=worker, result=None, detail=None)
+                verification = self._new_verification(view, task, check_ordinal)
+            route = _record_route(record)
+            assert route is not None
+            attempt = hashlib.sha256(
+                f"{verification['evidence_key']}:{route['stable_id']}".encode()
+            ).hexdigest()
+            verification.update(
+                state="claimed",
+                worker_id=worker,
+                execution_attempt=attempt,
+                result=None,
+                detail=None,
+            )
             view.verifications[key] = verification
             work = self._verification_work(view, task, verification)
             view.accept(record, {"saved": True, "claim": "accepted", "work": work})
@@ -706,17 +801,20 @@ class WorkflowReducer:
         branch = _line_value(text, "branch") or ""
         base = _line_value(text, "base") or ""
         head = _line_value(text, "head") or ""
+        tree = _line_value(text, "tree") or ""
         if (
             branch != task["branch"]
             or not _COMMIT.fullmatch(base)
             or not _COMMIT.fullmatch(head)
+            or not _COMMIT.fullmatch(tree)
             or base == head
             or _line_value(text, "verified") != "true"
             or not task["checkpoint"]
             or not task["handoff"]
         ):
             view.reject(
-                record, "PR requires checkpoint, handoff, exact branch/base/head, and verified:true"
+                record,
+                "PR requires checkpoint, handoff, exact branch/base/head/tree, and verified:true",
             )
             return
         generation = int(task["generation"]) + 1
@@ -740,10 +838,10 @@ class WorkflowReducer:
             worker_id=None,
             base_sha=base,
             head_sha=head,
+            tree_sha=tree,
             generation=generation,
             merge_worker_id=None,
             last_error=None,
-            verification_required=view.worker_verification,
         )
         view.accept(
             record,
@@ -758,7 +856,7 @@ class WorkflowReducer:
         )
 
     def _advance_candidate(self, view: Projection, task: dict[str, Any]) -> None:
-        if not task["verification_required"] or task["state"] not in {"reviewing", "merge_ready"}:
+        if task["state"] not in {"reviewing", "merge_ready"}:
             return
         reviews_done = all(item["state"] in {"approved", "challenged"} for item in task["reviews"])
         head = str(task["head_sha"])
@@ -836,45 +934,12 @@ class WorkflowReducer:
         ):
             view.reject(record, "review decision is not bound to the owned current candidate")
             return
-        if view.drain_reviews or task["verification_required"]:
-            review["state"] = "challenged" if decision == "challenge" else "approved"
-            if decision == "challenge":
-                task["last_error"] = str(detail)[:2000]
-            approvals = sum(item["state"] == "approved" for item in task["reviews"])
-            if task["verification_required"]:
-                self._advance_candidate(view, task)
-            elif all(item["state"] in {"approved", "challenged"} for item in task["reviews"]):
-                task.update(
-                    state=(
-                        "revision"
-                        if any(item["state"] == "challenged" for item in task["reviews"])
-                        else "merge_ready"
-                    ),
-                    worker_id=None,
-                    merge_worker_id=None,
-                )
-            view.accept(record, {"saved": True, "decision": decision, "approvals": approvals})
-            return
+        review["state"] = "challenged" if decision == "challenge" else "approved"
         if decision == "challenge":
-            review["state"] = "challenged"
-            for item in task["reviews"]:
-                if item["state"] in {"pending", "claimed"}:
-                    item["state"] = "obsolete"
-            task.update(
-                state="revision",
-                worker_id=None,
-                merge_worker_id=None,
-                last_error=(
-                    _line_value(text, "reason") or "internal reviewer challenged the candidate"
-                )[:2000],
-            )
-            view.accept(record, {"saved": True, "decision": "challenge"})
-            return
-        review["state"] = "approved"
+            task["last_error"] = str(detail)[:2000]
         approvals = sum(item["state"] == "approved" for item in task["reviews"])
-        if approvals == view.required_reviews:
-            task["state"] = "merge_ready"
-        view.accept(record, {"saved": True, "decision": "approve", "approvals": approvals})
+        self._advance_candidate(view, task)
+        view.accept(record, {"saved": True, "decision": decision, "approvals": approvals})
 
     def _verification_result(
         self,
@@ -890,14 +955,27 @@ class WorkflowReducer:
         text = _record_text(record)
         detail_name = "evidence" if result == "verify-pass" else "reason"
         detail = _line_value(text, detail_name)
+        receipt = _line_value(text, "receipt") or ""
+        claim_attempt = _line_value(text, "claim-attempt") or ""
+        physical_attempt = _line_value(text, "execution-attempt") or ""
         exact_owner_result = (
             verification is not None
             and verification["worker_id"] == record["author"]
             and _line_value(text, "head") == frontier
+            and _line_value(text, "tree") == verification["tree"]
+            and _line_value(text, "base") == verification["base"]
+            and _line_value(text, "evidence-key") == verification["evidence_key"]
+            and claim_attempt == verification["execution_attempt"]
+            and physical_attempt == verification["execution_attempt"]
+            and _SHA256.fullmatch(receipt) is not None
             and _line_value(text, "verified") == "true"
             and bool(detail)
         )
-        state = "passed" if result == "verify-pass" else "failed"
+        state = {
+            "verify-pass": "passed",
+            "verify-fail": "product_failure",
+            "verify-infrastructure": "infrastructure_failure",
+        }[result]
         if exact_owner_result and verification["state"] == "obsolete":
             # The claim was valid when work began, but another independent
             # result invalidated the candidate first. Preserve this completed
@@ -911,10 +989,35 @@ class WorkflowReducer:
         if not exact_owner_result or verification["state"] != "claimed":
             view.reject(record, "verification result is not bound to the owned exact frontier")
             return
-        verification.update(state=state, result=state, detail=str(detail)[:2000])
+        verification.setdefault("attempts", []).append(
+            {
+                "execution_attempt": physical_attempt,
+                "claim_attempt": claim_attempt,
+                "state": state,
+                "worker_id": record["author"],
+                "receipt_sha256": receipt,
+            }
+        )
+        if state == "infrastructure_failure":
+            verification.update(
+                state="pending",
+                worker_id=None,
+                execution_attempt=None,
+                result=state,
+                detail=str(detail)[:2000],
+                receipt_sha256=receipt,
+            )
+            view.accept(record, {"saved": True, "verification": state, "replacement": "ready"})
+            return
+        verification.update(
+            state="passed" if state == "passed" else "failed",
+            result=state,
+            detail=str(detail)[:2000],
+            receipt_sha256=receipt,
+        )
         task = self._task(view, task_id)
-        if task is not None and task["verification_required"]:
-            if state == "failed":
+        if task is not None:
+            if state == "product_failure":
                 task["last_error"] = str(detail)[:2000]
             self._advance_candidate(view, task)
         view.accept(record, {"saved": True, "verification": state})
@@ -950,26 +1053,50 @@ class WorkflowReducer:
             view.reject(record, "merge result does not match the requested PR")
             return
         if failed:
+            infrastructure = _line_value(text, "kind") == "infrastructure"
             task.update(
-                state="revision",
+                state="merge_ready" if infrastructure else "revision",
                 worker_id=None,
                 merge_worker_id=None,
                 last_error=(
                     _line_value(text, "reason") or "mechanical merge or acceptance check failed"
                 )[:2000],
             )
-            view.accept(record, {"saved": True, "state": "revision"})
+            view.accept(
+                record,
+                {
+                    "saved": True,
+                    "state": "merge_ready" if infrastructure else "revision",
+                    "failure": "infrastructure" if infrastructure else "product",
+                },
+            )
             return
         merge = _line_value(text, "merge") or ""
         tree = _line_value(text, "tree") or ""
+        candidate_tree = _line_value(text, "candidate-tree") or ""
+        prospective_receipt = _line_value(text, "prospective-receipt") or ""
+        checker = (
+            view.workload_ref.get("checker")
+            if isinstance(view.workload_ref, dict)
+            and isinstance(view.workload_ref.get("checker"), dict)
+            else None
+        )
         if not _COMMIT.fullmatch(merge) or not _COMMIT.fullmatch(tree):
             view.reject(record, "successful merge requires exact merge and tree object IDs")
+            return
+        if candidate_tree != task["tree_sha"]:
+            view.reject(record, "successful merge does not identify the exact candidate tree")
+            return
+        if checker is not None and _SHA256.fullmatch(prospective_receipt) is None:
+            view.reject(record, "successful merge lacks an exact prospective-tree gate receipt")
             return
         task.update(
             state="complete",
             worker_id=None,
             merge_worker_id=None,
             merged_sha=merge,
+            prospective_tree=tree,
+            prospective_receipt=prospective_receipt or None,
             last_error=None,
         )
         view.frontier_sha = merge
@@ -997,6 +1124,7 @@ class WorkflowReducer:
             "branch": task["branch"],
             "base_sha": task["base_sha"],
             "head_sha": task["head_sha"],
+            "tree_sha": task["tree_sha"],
             "generation": task["generation"],
             "role": role,
             "state": state,
@@ -1055,6 +1183,7 @@ class WorkflowReducer:
                 f"branch:{value['branch']}",
                 f"base:{value['base_sha'] or ''}",
                 f"head:{value['head_sha'] or ''}",
+                f"tree:{value['tree_sha'] or ''}",
                 f"generation:{value['generation']}",
                 f"worker:{value['worker_id'] or ''}",
             )
@@ -1071,8 +1200,25 @@ class WorkflowReducer:
         )
         role = "revision" if task["generation"] else "author"
         value = self._base_work(task, state, role, f"claim: task:{task['task_id']}")
-        value["worker_id"] = task["worker_id"]
+        value.update(worker_id=task["worker_id"], checks=[])
         return self._body(self._with_progress(view, task, value))
+
+    def _acceptance_results(self, view: Projection, task: dict[str, Any]) -> list[dict[str, Any]]:
+        head = str(task["head_sha"] or "")
+        values: list[dict[str, Any]] = []
+        for ordinal in range(1, len(task["checks"]) + 1):
+            item = view.verifications.get(self._verification_key(task["task_id"], head, ordinal))
+            values.append(
+                {
+                    "identity": f"verify:{task['task_id']}:{head}:{ordinal}",
+                    "evidence_key": item.get("evidence_key") if item is not None else None,
+                    "receipt_sha256": item.get("receipt_sha256") if item is not None else None,
+                    "ordinal": ordinal,
+                    "state": str(item["state"]) if item is not None else "pending",
+                    "detail": item.get("detail") if item is not None else None,
+                }
+            )
+        return values
 
     def _review_work(
         self, view: Projection, task: dict[str, Any], review: dict[str, Any]
@@ -1085,6 +1231,8 @@ class WorkflowReducer:
             worker_id=review["worker_id"],
             review_ordinal=review["ordinal"],
             review_role=review["role"],
+            checks=[],
+            acceptance_results=self._acceptance_results(view, task),
         )
         return self._body(self._with_progress(view, task, value))
 
@@ -1092,7 +1240,12 @@ class WorkflowReducer:
         state = "working" if task["state"] == "merge_claimed" else "ready"
         claim = f"claim: merge:{task['task_id']}:{task['generation']}"
         value = self._base_work(task, state, "merge", claim)
-        value.update(task_id=f"{task['task_id']}/merge", worker_id=task["merge_worker_id"])
+        value.update(
+            task_id=f"{task['task_id']}/merge",
+            worker_id=task["merge_worker_id"],
+            checks=[],
+            acceptance_results=self._acceptance_results(view, task),
+        )
         return self._body(self._with_progress(view, task, value))
 
     def _verification_work(
@@ -1105,21 +1258,27 @@ class WorkflowReducer:
         value = self._base_work(task, state, "verification", claim)
         value.update(
             task_id=f"{task['task_id']}/verify-{ordinal}",
-            title=f"Independent verification: {task['title']}",
+            title=f"Acceptance check: {task['title']}",
             prompt="Run the assigned acceptance command read-only against the exact assigned "
             "commit and journal the result.",
-            checks=[task["checks"][ordinal - 1]],
+            checks=[task["checks"][ordinal - 1]["command"]],
+            check_id=task["checks"][ordinal - 1]["id"],
+            check_contract=dict(task["checks"][ordinal - 1]),
             base_sha=frontier,
             head_sha=frontier,
+            tree_sha=verification["tree"],
             commit_sha=frontier,
             worker_id=verification["worker_id"],
             verification_ordinal=ordinal,
             verification_frontier=frontier,
+            evidence_requirement=verification["evidence_requirement"],
+            evidence_key=verification["evidence_key"],
+            execution_attempt=verification["execution_attempt"],
         )
         return self._body(self._with_progress(view, task, value))
 
     def _verification_values(self, view: Projection) -> list[dict[str, Any]]:
-        if view.state != "running" or not view.worker_capacity:
+        if view.state != "running":
             return []
         values: list[dict[str, Any]] = []
         pending: list[dict[str, Any]] = []
@@ -1133,15 +1292,7 @@ class WorkflowReducer:
                 current_keys.add(key)
                 verification = view.verifications.get(key)
                 if verification is None:
-                    verification = {
-                        "task_id": task["task_id"],
-                        "frontier": frontier,
-                        "check_ordinal": ordinal,
-                        "state": "pending",
-                        "worker_id": None,
-                        "result": None,
-                        "detail": None,
-                    }
+                    verification = self._new_verification(view, task, ordinal)
                 if verification["state"] == "claimed":
                     values.append(self._verification_work(view, task, verification))
                 elif verification["state"] == "pending":
@@ -1152,8 +1303,7 @@ class WorkflowReducer:
             task = view.tasks.get(str(verification["task_id"]))
             if task is not None:
                 values.append(self._verification_work(view, task, verification))
-        available = max(0, view.worker_capacity - len(values))
-        values.extend(pending[:available])
+        values.extend(pending)
         return values
 
     def _summary(self, view: Projection, task: dict[str, Any]) -> dict[str, Any]:
@@ -1164,6 +1314,8 @@ class WorkflowReducer:
             author_id=task["author_id"],
             merge_worker_id=task["merge_worker_id"],
             merged_sha=task["merged_sha"],
+            prospective_tree=task["prospective_tree"],
+            prospective_receipt=task["prospective_receipt"],
             approvals=approvals,
             required_reviews=view.required_reviews,
             reviews=[dict(item) for item in task["reviews"]],
@@ -1435,6 +1587,13 @@ class WorkflowClient:
         )
 
     @staticmethod
+    def _work_family(value: dict[str, Any]) -> str:
+        role = str(value.get("role", ""))
+        if role.startswith("review:"):
+            return "review"
+        return "implementation" if role in {"author", "revision"} else role
+
+    @staticmethod
     def _scheduled_ready(view: Projection, values: list[dict[str, Any]]) -> dict[str, list]:
         scheduled: dict[str, list] = {}
         free_workers = {f"worker-{ordinal}" for ordinal in range(view.worker_capacity)} - {
@@ -1442,18 +1601,24 @@ class WorkflowClient:
             for value in values
             if value["state"] == "working" and value.get("worker_id")
         }
+        buckets: dict[str, list[dict[str, Any]]] = {
+            "implementation": [],
+            "review": [],
+            "verification": [],
+            "merge": [],
+        }
         for value in (item for item in values if item["state"] == "ready"):
-            role = str(value.get("role", ""))
-            family = (
-                "verification"
-                if role == "verification"
-                else "review"
-                if role.startswith("review:")
-                else role
-            )
+            buckets[WorkflowClient._work_family(value)].append(value)
+        ready: list[dict[str, Any]] = []
+        while any(buckets.values()):
+            for family in ("implementation", "review", "verification", "merge"):
+                if buckets[family]:
+                    ready.append(buckets[family].pop(0))
+        for value in ready:
+            family = WorkflowClient._work_family(value)
             eligible = sorted(free_workers)
             if not eligible:
-                continue
+                break
             identity = f"{value.get('root_task_id')}:{value.get('generation')}:{family}"
             digest = hashlib.sha256(identity.encode("utf-8")).digest()
             offset = int.from_bytes(digest[:8], "big")
