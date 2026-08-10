@@ -17,6 +17,9 @@ class EvidenceError(RuntimeError):
     """A persisted check receipt is malformed or does not match its requirement."""
 
 
+COMMAND_SHELL = "/bin/sh"
+
+
 def canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
@@ -76,7 +79,7 @@ def observed_environment() -> dict[str, str]:
         "release": platform.release(),
         "machine": platform.machine(),
         "python": platform.python_version(),
-        "shell": "/bin/zsh",
+        "shell": COMMAND_SHELL,
     }
 
 

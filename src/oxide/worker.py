@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .evidence import (
+    COMMAND_SHELL,
     EvidenceError,
     artifact_digest,
     begin_attempt,
@@ -402,7 +403,7 @@ class Worker:
                     )
                     process_directory = repository
                 elif check.get("driver") == "command":
-                    process_command = ["/bin/zsh", "-lc", command]
+                    process_command = [COMMAND_SHELL, "-lc", command]
                     process_directory = working_directory
                 else:
                     raise EvidenceError("acceptance check has an unsupported driver")

@@ -27,6 +27,7 @@ from pygments.util import ClassNotFound
 from .concurrency import ConcurrencyError, implementation_digest, run_campaign, validate_receipt
 from .contract import ContractError, load_contract
 from .evidence import (
+    COMMAND_SHELL,
     EvidenceError,
     begin_attempt,
     canonical_bytes,
@@ -540,7 +541,7 @@ def _run_qualified_check(
                     artifact_dir=declared / "artifacts",
                 )
             elif check.get("driver") == "command":
-                command = ["/bin/zsh", "-lc", "set -e\n" + str(check["command"])]
+                command = [COMMAND_SHELL, "-lc", "set -e\n" + str(check["command"])]
             else:
                 raise EvidenceError("qualified check has an unsupported driver")
             working_directory = (repository / str(check.get("working_directory", "."))).resolve()
