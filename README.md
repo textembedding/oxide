@@ -1,214 +1,224 @@
-# Swarm Harness
+# Oxide
 
-Swarm Harness is a local, specification-driven coding swarm for arbitrary Git
-repositories. The target repository owns product intent and verification gates;
-the harness supplies scheduling, Git/worktree management, review, shared formal
-check execution, merge, recovery, and observability.
+**Build formally verified Rust software with many Codex workers operating in
+parallel.**
 
-Workers coordinate through exactly two journal tools:
+Oxide turns a reviewed implementation contract into a live queue of independent
+coding, review, and proof work. Each assignment gets a fresh Codex context, so
+unrelated components can be implemented at the same time instead of waiting for
+one agent to finish the whole program. Merging one candidate immediately unlocks
+the next tasks whose prerequisites are now complete.
 
-- `journal_search`
-- `journal_add`
+The shared journal backend is what makes that parallelism safe. It keeps claims,
+candidates, check evidence, reviews, merges, and recovery in one durable,
+chronological history. Workers coordinate through the journal rather than a
+privileged orchestrator or a chain of prompts: atomic claims choose one owner for
+each assignment, and deterministic replay gives every worker the same state after
+a restart.
 
-The disposable Python backend in `src/swarm_harness/journal.py` is a generic
-append-only store. Workflow concepts are interpreted in
-`src/swarm_harness/workflow.py` above the fixed two-operation port in
-`src/swarm_harness/journal_backend.py`.
+Oxide is opinionated about assurance, not product design. The target Rust project
+contains the requirements, formal model, implementation, proofs, and task graph.
+Oxide supplies parallel execution, evidence reuse, independent review, Git
+integration, and recovery.
 
-## Setup
+## How it works
 
-```bash
-uv sync --extra dev
-./swarmctl verify
-```
-
-`swarmctl` is the repository-local entry point. It automatically re-executes
-under `.venv` when that environment exists, so installing a separate global CLI
-is unnecessary.
-
-## Target layout
-
-Every workload belongs to the implementation repository:
+Independent work is visible to every worker through one shared journal:
 
 ```text
-my-product/
-├── src/
-├── tests/
-└── swarm-harness/
-    ├── web-foundation.yaml
-    └── release-hardening.yaml
+ human-written specifications
+              |
+              v
+ reviewed verification contract
+              |
+              v
+ +-----------------------------------------------------------+
+ |                 shared append-only journal                |
+ | ready work | atomic claims | candidates | proof evidence  |
+ +--------+----------------+----------------+----------------+
+          |                |                |
+        claim            claim            claim
+          |                |                |
+ +--------v-------+ +------v---------+ +----v-------------+
+ | worker A       | | worker B       | | worker C         |
+ | implements API | | reviews code   | | runs exact check |
+ +--------+-------+ +------+---------+ +----+-------------+
+          \                |                /
+           \_______________|_______________/
+                           |
+                           v
+               exact prospective-tree gate
+                           |
+                           v
+                         merge
+                           |
+                           v
+                  newly unblocked work
 ```
 
-The harness only loads `<target>/swarm-harness/<workload>.yaml`, and the file
-must be committed. At run creation it freezes the repository identity, base
-commit, workload path and blob, complete `swarm-harness/` tree, and harness
-version. The bootstrap journal record stores that reference—not copied
-specification text. Candidate edits to the frozen directory fail closed and an
-intentional specification change requires a new run.
+The contract describes tasks and their real dependencies. The scheduler derives a
+single ready-work list from the journal and gives each idle worker the
+highest-value assignment it can claim. There are no fixed author, reviewer, or
+check-worker pools, so implementation, independent review, and missing proof work
+can proceed concurrently.
 
-Runtime databases, logs, sockets, assignments, and worker clones stay in this
-checkout under `.swarm/`.
+An implementation worker publishes an immutable Git candidate before its
+acceptance checks finish. That publication makes its reviews and unsatisfied
+checks independently claimable. For one exact candidate and one exact requirement,
+only the winning journal claimant runs the command. The resulting evidence is
+reused by authors, reviewers, replacement processes, and replay; changing the
+candidate tree creates a new evidence requirement.
 
-The target repository must have its GitHub-linked `user.name` and `user.email`
-configured before a run starts. The harness freezes that identity in run
-metadata and applies it to every worker and merge commit.
+Once every required review and check passes, Oxide constructs the exact tree that
+would be merged and runs the whole-tree gate against it. A successful merge
+updates the journal and may expose more independent implementation work.
 
-## Workload contract
+## Verification philosophy
 
-A workload is a committed verification-gated graph. Required top-level fields
-are `stage`, `enabled`, `goal`, `tasks`, and `stage_gate`. Every task requires a
-safe unique `id`, `title`, `prompt`, `depends_on`, and one or more exact
-`checks`; dependencies must form an acyclic graph. `stage_gate` is a list of
-additional final integration commands and may be empty when candidate-owned
-checks already cover completion.
-
-```yaml
-stage: foundation
-enabled: true
-goal: Deliver an authenticated web application slice.
-tasks:
-  - id: API
-    title: Implement the API
-    prompt: Implement the API described in docs/product.md.
-    depends_on: []
-    checks:
-      - npm test -- api
-  - id: UI
-    title: Implement the interface
-    prompt: Implement the interface described in docs/product.md.
-    depends_on: [API]
-    checks:
-      - npm test -- ui
-stage_gate:
-  - npm test
-  - npm run build
-```
-
-Checks execute from the target repository root. After an author publishes an
-immutable candidate, each exact command becomes one journal-claimed formal
-assignment. The qualified harness process executes the winning assignment once
-against that commit; authors and reviewers may run targeted development
-diagnostics, but do not mechanically rerun the formal list. The contract
-supplies product intent; the harness does not infer a language, framework,
-package manager, file layout, or deployment model. The only bundled workload is
-the model-free test fixture at `tests/fixtures/workloads/smoke.yaml`.
-
-## One bounded ADD/SEARCH journal
-
-Exact and threshold-eligible semantic records share one SEARCH response. The
-defaults reserve five exact anchors when available and cap the union at ten
-records:
+Every production logical component belongs to one refinement chain:
 
 ```text
-min_exact = 5
+ observable product behavior
+              |
+              v
+     abstract state machine
+              |
+              v
+ meaningful component contracts
+              |
+              v
+ production Rust + Verus proofs <--- declared assumptions
+              |                          from narrow,
+              v                          policy-free
+ whole-program composition proof         effect adapters
+              |
+              v
+ exact prospective-tree proof
+              |
+              v
+     formal correctness gate ---------+
+                                       +--> release-ready tree
+     empirical capacity gate --------+
+        (benchmarks and faults)
+```
+
+- All production logic is Verus-verified by default. There is no “typed but
+  unverified” or low-risk exemption.
+- Uniform coverage does not mean uniform proof size. Simple, meaningful contracts
+  may be discharged automatically; complex protocols may need substantial proof.
+- Trusted effect adapters are narrow, explicit, and contain no journal policy.
+- Deterministic policy checks reject vacuous contracts, undeclared assumptions,
+  source/proof divergence, and attempts to redefine the judge.
+- Agent review supplements proof; it cannot replace Verus or deterministic policy.
+- Formal correctness and empirical capacity are separate gates.
+
+Oxide currently executes an already reviewed verification contract. Automatically
+deriving and approving a faithful contract from prose is a later phase: a proof
+can establish that code implements a contract, but not that a generated contract
+captured the human author’s intent.
+
+## Target project
+
+A Rust project using Oxide keeps its verification inputs under `verification/`;
+it does not need an Oxide-specific directory:
+
+```text
+my-rust-product/
+├── docs/
+│   ├── ROADMAP.md
+│   └── specs/
+├── src/ or crates/
+└── verification/
+    ├── contract.toml
+    ├── manifest.toml
+    ├── toolchain.lock.toml
+    ├── contracts/
+    ├── spec/
+    ├── proofs/
+    ├── fixtures/
+    └── fuzz/
+```
+
+`verification/contract.toml` identifies the immutable specification and toolchain
+closure, classifies production and proof roots, defines an acyclic implementation
+graph, and assigns formal or supplementary checks to coherent candidates. Oxide
+constructs formal Verus commands itself, so a candidate cannot redefine the judge
+that accepts it.
+
+At run creation, Oxide freezes the target commit, contract and immutable closure,
+verification-engine digest, execution policy, journal capacity, qualification
+receipt, and Git identity. Changing the specification, toolchain, contract, or
+judge starts a new run.
+
+## The journal backend
+
+Workers see one append-only journal through exactly two operations:
+
+- `journal_add` appends records and atomically arbitrates competing claims.
+- bounded `journal_search` returns exact and threshold-eligible semantic context
+  in chronological order.
+
+The default search capacity reserves five exact results when available and returns
+at most ten total results:
+
+```text
+min_exact   = 5
 max_results = 10
 ```
 
-When capacity is exceeded, SEARCH selects recent qualifying records while
-preserving the exact floor, then returns the selected union oldest-to-newest by
-journal sequence. Semantic score controls eligibility only. Overflow returns
-useful partial evidence rather than an error, and callers follow returned task
-IDs, errors, hashes, components, decisions, or concepts with another search.
+Workflow meaning remains above this generic two-operation interface. The bundled
+Python backend is the current prototype; it can be replaced by a Rust backend only
+after that backend passes the same black-box conformance and multiprocess
+qualification suites.
 
-Workflow recovery remains complete even with `min_exact = 1`: private fixed-width
-replay identities form a deterministic partition tree, and one exact anchor is
-enough to prove that every child of a nonempty branch must be traversed. Semantic
-extras remain visible but cannot affect authoritative state unless their run,
-epoch, routing, identity, and sequence metadata validate.
-
-## Qualify a backend
-
-Every workload requires a current real-multiprocess concurrency receipt. The
-capacity pair is part of that receipt:
+## Install and verify Oxide
 
 ```bash
-./swarmctl harness validate-concurrency \
-  --workers 8 \
-  --rounds 6
+uv sync --extra dev
+./oxide verify
 ```
 
-The campaign races implementation, revision, review, verification, and merge
-claims; injects winning-worker crashes; proves losers perform no protected work;
-compares independent replay; and recovers complete history through bounded
-SEARCH.
+`oxide` is the local entry point and automatically uses `.venv` when available.
+No global installation is required.
 
-The backend-neutral suite runs against the Python MVP by default:
+Before a run, qualify the journal backend under real multiprocess contention:
 
 ```bash
-.venv/bin/pytest -q tests/test_journal_conformance.py
+./oxide harness validate-concurrency --workers 8 --rounds 6
 ```
 
-Set `SWARM_CONFORMANCE_JOURNAL_COMMAND` to run that identical suite against an
-external adapter. Exposing similarly named operations is not enough; an adapter
-is drop-in compatible only after the contract suite and concurrency campaign
-pass.
-
-## Run any workload
+Then launch against a target Rust project:
 
 ```bash
-./swarmctl harness run \
-  --workload web-foundation \
-  --target /path/to/my-product \
-  --workers 8 \
-  --reviews 3
+./oxide harness run \
+  --target /path/to/my-rust-product \
+  --workers 8
 ```
 
-Tasks use independent branches. Publishing a candidate exposes its configured
-internal reviews and one acceptance assignment per declared check concurrently.
-Acceptance requires every review and every candidate-bound check result to pass.
-A worker then requests merge; the launcher verifies the immutable branch and
-prospective tree in isolation without rerunning candidate checks, and
-fast-forwards the target to that exact object. Dependencies release after merge,
-and any additional commands in `stage_gate` run in another isolated clone before
-completion.
-
-A check mapping may set `receipt_required: true` when successful execution must
-also emit a bounded JSON-object receipt at `$SWARM_EVIDENCE_RECEIPT`. A frozen
-checker may likewise set `prospective_receipt_required: true` for its exact-tree
-gate. Missing, malformed, non-regular, or oversized required receipts are
-infrastructure failures, even when the command exits zero.
-
-To select a compatible external backend, pass the same command during
-qualification and run creation:
-
-```bash
-./swarmctl harness validate-concurrency \
-  --workers 8 \
-  --journal-command '/path/to/journal-adapter serve'
-
-./swarmctl harness run \
-  --workload web-foundation \
-  --target /path/to/my-product \
-  --workers 8 \
-  --journal-command '/path/to/journal-adapter serve'
-```
-
-The command receives `SWARM_JOURNAL_DATABASE`, `SWARM_JOURNAL_SOCKET`,
-`SWARM_JOURNAL_MIN_EXACT`, and `SWARM_JOURNAL_MAX_RESULTS`. The complete wire and
-semantic contract is in [HARNESS_CONTRACT.md](HARNESS_CONTRACT.md).
+The default contract is `verification/contract.toml`. `min_exact` and
+`max_results` use the defaults above unless configured during qualification and
+run creation. Useful parallelism is determined by the contract’s dependency graph
+and its live mix of implementation, review, and proof work, up to the current
+64-worker process limit.
 
 ## Observe and control
 
 ```bash
-./swarmctl harness observe --workload web-foundation --slot worker-0
-./swarmctl harness observe --workload web-foundation --slot orchestrator
-./swarmctl harness observe-queue --workload web-foundation
-./swarmctl harness status --workload web-foundation
+./oxide harness observe --workload verified-map --slot worker-0
+./oxide harness observe-queue --workload verified-map
+./oxide harness status --workload verified-map
 
-./swarmctl harness pause --workload web-foundation
-./swarmctl harness resume --workload web-foundation
-./swarmctl harness checkpoint --workload web-foundation --name productive
-./swarmctl harness rewind --workload web-foundation --to productive
-./swarmctl harness reset --workload web-foundation
+./oxide harness pause --workload verified-map
+./oxide harness resume --workload verified-map
+./oxide harness checkpoint --workload verified-map --name productive
+./oxide harness rewind --workload verified-map --to productive
+./oxide harness reset --workload verified-map
 ```
 
-Pause and resume preserve history. Reset archives a run and removes only its task
-branches. Destructive rewind restores the checkpoint's real journal sequence,
-Git frontier, task refs, assignments, and artifacts, then advances an external
-run epoch so discarded workers and observers cannot write into restored history.
-Persisted epoch frontiers keep older sequence intervals bound to their original
-authoritative epochs across repeated rewinds.
-It refuses to overwrite uncommitted target worktree changes; `--archive`
-optionally preserves the discarded run state.
+Runtime databases, logs, evidence, worker clones, and sockets remain under the
+ignored `.oxide/` directory. Product files remain in the target project.
 
-Run the complete model-free harness suite with `./swarmctl verify`.
+The normative system boundaries and acceptance invariants are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The rationale behind Oxide’s
+pervasive-verification model is in the non-normative
+[verification primer](docs/VERIFICATION_PRIMER.md).
