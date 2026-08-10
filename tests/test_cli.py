@@ -8,6 +8,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -1165,6 +1166,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     environment = os.environ.copy()
     environment["PATH"] = str(ROOT / "tests" / "fake-bin") + os.pathsep + environment["PATH"]
     environment["OXIDE_NO_TERMINAL"] = "1"
+    environment["OXIDE_FIXTURE_PYTHON"] = sys.executable
     environment["OXIDE_VERUS_ARCHIVE"] = str(archive)
     result = subprocess.run(
         [

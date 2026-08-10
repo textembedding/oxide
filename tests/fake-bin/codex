@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -12,9 +13,9 @@ from pathlib import Path
 
 class Mcp:
     def __init__(self) -> None:
-        harness_python = Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"
+        harness_python = os.environ.get("OXIDE_FIXTURE_PYTHON", sys.executable)
         self.process = subprocess.Popen(
-            [str(harness_python), "-m", "oxide.journal_mcp"],
+            [harness_python, "-m", "oxide.journal_mcp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
