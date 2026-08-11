@@ -449,6 +449,48 @@ def test_observer_highlights_displayed_source_without_guessing_for_other_command
     assert cli._command_output_language("npm test -- contracts/search.json") == ""
 
 
+def test_observer_highlights_verus_diagnostics_without_lexing_explanatory_prose() -> None:
+    output = (
+        "note: automatically chose triggers for this expression:\n"
+        "   --> verification/models/abstract_journal.rs:246:9\n"
+        "    |\n"
+        "246 |     forall|i: int| 0 <= i < history.len()\n"
+        "    |     ^^^^^^^^^^^^^ selected trigger\n"
+        "\n"
+        "Verus printed this explanation as ordinary prose.\n"
+        "verification results:: 31 verified, 0 errors\n"
+    )
+    rendered = cli._event_value(
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "verification/bin/verify proof",
+                "aggregated_output": output,
+            },
+        },
+        True,
+    )
+
+    assert "\x1b[1;36mnote:\x1b[0m" in rendered
+    assert "\x1b[1;34mverification/models/abstract_journal.rs\x1b[0m" in rendered
+    assert "\x1b[38;5;214m:246:9\x1b[0m" in rendered
+    assert "\x1b[1;36m    ^^^^^^^^^^^^^\x1b[0m" in rendered
+    assert "\x1b[1;32m 31 verified, 0 errors\x1b[0m" in rendered
+    assert "\x1b[38;5;250mVerus printed this explanation as ordinary prose.\x1b[0m" in rendered
+
+
+def test_observer_highlights_raw_verus_warning_lines() -> None:
+    warning = cli.highlight_stream_line(
+        "[12:34:56] warning: automatically chose a trigger", color=True
+    )
+    location = cli.highlight_stream_line("   --> verification/models/model.rs:12:7", color=True)
+
+    assert warning.startswith("\x1b[1;38;5;214mwarning:\x1b[0m")
+    assert "\x1b[1;34mverification/models/model.rs\x1b[0m" in location
+    assert "\x1b[38;5;214m:12:7\x1b[0m" in location
+
+
 def test_observer_prints_file_change_diff(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)

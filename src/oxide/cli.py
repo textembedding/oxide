@@ -1658,6 +1658,8 @@ def _code(value: object, language: str, color: bool, base: str = "") -> str:
     if not (safe := _safe(value).rstrip("\n")) or not color:
         return safe
     fallback = _style(safe, base, True) if base else safe
+    if language == "verus-diagnostic":
+        return _verus_diagnostic(safe, color, base)
     if language.startswith("yaml"):
         safe = _YAML_VALUE.sub(lambda m: m[1] + _style(m[2], "38;5;214", True), safe)
         return _YAML_KEY.sub(lambda m: m[1] + _style(m[2], "94", True) + m[3], safe)
@@ -1672,6 +1674,82 @@ def _code(value: object, language: str, color: bool, base: str = "") -> str:
         return rendered.replace("\x1b[33m", "\x1b[38;5;214m")
     except (ClassNotFound, ImportError):
         return fallback
+
+
+_VERUS_SEVERITY = re.compile(r"^(\s*)(error(?:\[[^]]+\])?|warning|note|help)(:)(.*)$")
+_VERUS_LOCATION = re.compile(r"^(\s*-->\s+)(.*?\.rs)(:\d+:\d+)(.*)$")
+_VERUS_SOURCE = re.compile(r"^(\s*(?:\d+)?\s*\|\s?)(.*)$")
+_VERUS_RESULT = re.compile(r"^(verification results::)(.*)$")
+
+
+def _looks_like_verus_diagnostic(value: object) -> bool:
+    text = str(value)
+    return bool(
+        "verification results::" in text
+        or (
+            re.search(r"(?m)^\s*(?:error(?:\[[^]]+\])?|warning|note):", text)
+            and re.search(r"(?m)^\s*-->\s+.*\.rs:\d+:\d+", text)
+        )
+    )
+
+
+def _looks_like_verus_line(value: str) -> bool:
+    return bool(
+        _VERUS_SEVERITY.match(value)
+        or _VERUS_LOCATION.match(value)
+        or _VERUS_SOURCE.match(value)
+        or _VERUS_RESULT.match(value)
+    )
+
+
+def _verus_diagnostic(value: str, color: bool, base: str = "") -> str:
+    if not color:
+        return value
+    base_code = base or "38;5;250"
+    severity_code = "1;36"
+    rendered: list[str] = []
+    for line in value.splitlines():
+        if match := _VERUS_SEVERITY.match(line):
+            indentation, label, colon, message = match.groups()
+            severity_code = {
+                "error": "1;31",
+                "warning": "1;38;5;214",
+                "note": "1;36",
+                "help": "1;32",
+            }[label.split("[", 1)[0]]
+            rendered.append(
+                _style(indentation + label + colon, severity_code, True)
+                + _style(message, base_code, True)
+            )
+            continue
+        if match := _VERUS_LOCATION.match(line):
+            arrow, path, location, suffix = match.groups()
+            rendered.append(
+                _style(arrow, "2;36", True)
+                + _style(path, "1;34", True)
+                + _style(location, "38;5;214", True)
+                + _style(suffix, base_code, True)
+            )
+            continue
+        if match := _VERUS_RESULT.match(line):
+            label, result = match.groups()
+            result_code = "1;32" if re.search(r"\b0 errors?\b", result) else "1;31"
+            rendered.append(_style(label, "1;36", True) + _style(result, result_code, True))
+            continue
+        if match := _VERUS_SOURCE.match(line):
+            gutter, source = match.groups()
+            if re.fullmatch(r"[\s_^/\\|-]*(?:[A-Za-z ].*)?", source) and "^" in source:
+                marker = re.match(r"(\s*[_^/\\|-]+)(.*)", source)
+                assert marker is not None
+                highlighted = _style(marker[1], severity_code, True) + _style(
+                    marker[2], base_code, True
+                )
+            else:
+                highlighted = _code(source, "rust", True, base_code) if source else ""
+            rendered.append(_style(gutter, "2;34", True) + highlighted)
+            continue
+        rendered.append(_style(line, base_code, True))
+    return "\n".join(rendered)
 
 
 def _indent(value: str, prefix: str = "  ") -> str:
@@ -1823,6 +1901,8 @@ def _event_value(event: Any, color: bool, repository: Path | None = None) -> str
         ]
         if output:
             language = _command_output_language(command)
+            if _looks_like_verus_diagnostic(output):
+                language = "verus-diagnostic"
             output_text = _code(output, language, color, "38;5;250")
             parts.append(f"{_style('output', '1;34', color)}:\n" + _indent(output_text))
         return "\n".join(parts)
@@ -1847,7 +1927,10 @@ def highlight_stream_line(
     try:
         rendered = _event_value(json.loads(body), color, repository)
     except json.JSONDecodeError:
-        rendered = _safe(body)
+        safe = _safe(body)
+        rendered = (
+            _verus_diagnostic(safe, color, "38;5;250") if _looks_like_verus_line(safe) else safe
+        )
     return rendered
 
 
