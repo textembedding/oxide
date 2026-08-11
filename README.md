@@ -148,10 +148,18 @@ Workers see one append-only journal through exactly two operations:
 - bounded `journal_search` returns exact and threshold-eligible semantic context
   in chronological order.
 
+The Python prototype dogfoods the planned production Exact and lexical indexes.
+Both are generic, rebuildable projections of immutable records; neither knows
+about Oxide tasks or changes the two-operation interface.
+
 Workflow meaning remains above this generic two-operation interface. The bundled
 Python backend is the current prototype; it can be replaced by a Rust backend only
 after that backend passes the same black-box conformance and multiprocess
 qualification suites.
+
+Each launcher generation performs one indexed recovery, then shares that warm,
+journal-derived projection with every worker and observer on the host. Fresh agent
+contexts therefore recover their assignment without replaying the full run.
 
 ## Install and verify Oxide
 

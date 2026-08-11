@@ -729,7 +729,7 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
     snapshots = iter((first, second))
     delays = []
     monkeypatch.setattr(cli, "_load_config", lambda _workload: {})
-    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config: next(snapshots))
+    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config, _cursor=None: next(snapshots))
     monkeypatch.setattr(cli.time, "sleep", delays.append)
     arguments = cli.argparse.Namespace(workload="web-app", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
@@ -764,7 +764,7 @@ def test_queue_observer_reconnects_and_resets_cursor_after_epoch_change(
         )
     )
     monkeypatch.setattr(cli, "_load_config", lambda _workload: next(configs))
-    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config: next(snapshots))
+    monkeypatch.setattr(cli, "_queue_snapshot", lambda _config, _cursor=None: next(snapshots))
     monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
     arguments = cli.argparse.Namespace(workload="rewind", color="never", no_follow=False)
     assert cli.command_observe_queue(arguments) == 0
@@ -1058,9 +1058,13 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
     monkeypatch.setattr(cli, "CHECKPOINTS", checkpoints)
     monkeypatch.setattr(cli, "_run_processes", lambda _config: [])
     monkeypatch.setattr(cli, "_stop_processes", lambda _config: None)
-    starts: list[int] = []
+    starts: list[tuple[int, bool]] = []
     monkeypatch.setattr(
-        cli, "_start", lambda restored, _foreground: starts.append(int(restored["epoch"])) or 0
+        cli,
+        "_start",
+        lambda restored, _foreground, **kwargs: (
+            starts.append((int(restored["epoch"]), bool(kwargs.get("resume")))) or 0
+        ),
     )
 
     runtime = start_journal(
@@ -1103,7 +1107,7 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
     assert restored["epoch"] == 1
     assert restored["history_sequence"] == 2
     assert restored["epoch_frontiers"] == [{"epoch": 0, "through": 2}]
-    assert starts == [1]
+    assert starts == [(1, True)]
     assert (assignments / "worker-0.txt").read_text(encoding="utf-8").splitlines() == [
         "implementation",
         "epoch:1",
@@ -1119,9 +1123,9 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
     try:
         current = cli._workflow_client(restored, runtime.client)
         replayed = current.replay_records(run_id)
-        assert [item["journal_sequence"] for item in replayed] == [1, 2, 3]
+        assert [item["journal_sequence"] for item in replayed] == [1, 2]
         assert "discard me" not in "\n".join(item["text"] for item in replayed)
-        assert replayed[-1]["record_id"] == 3
+        assert replayed[-1]["record_id"] == 2
         stale = WorkflowClient(
             runtime.client,
             cli._load_frozen_stage(restored),
@@ -1134,7 +1138,7 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
         for stale_text in ("claim: task:UI", "open-pr: task:API\nstale terminal result"):
             with pytest.raises(WorkflowError, match="epoch is stale"):
                 stale.add(run_id, "worker-1", stale_text)
-        assert len(current.replay_records(run_id)) == 3
+        assert len(current.replay_records(run_id)) == 2
     finally:
         runtime.close()
 

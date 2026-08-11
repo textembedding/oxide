@@ -94,7 +94,11 @@ class JournalMcpServer:
                 raise JournalError("worker run epoch is stale")
             projection_socket = os.environ.get("OXIDE_WORKFLOW_SOCKET")
             client = (
-                WorkflowProjectionClient(projection_socket)
+                WorkflowProjectionClient(
+                    projection_socket,
+                    run_id=str(config["run_id"]),
+                    epoch=int(config["epoch"]),
+                )
                 if projection_socket
                 else _workflow_client(
                     config,

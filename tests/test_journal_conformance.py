@@ -7,6 +7,7 @@ external adapter.  With no command it exercises the disposable Python MVP.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shlex
 from contextlib import contextmanager
@@ -21,6 +22,8 @@ from oxide.journal_backend import (
     start_journal,
 )
 from oxide.workflow import WorkflowClient
+
+_ORACLE_TOKEN = re.compile(r"[\w-]+", re.UNICODE)
 
 
 def _command() -> list[str] | None:
@@ -54,6 +57,35 @@ def _add_search_fixture(client, namespace: str) -> None:
         client.add(namespace, "exact", f"exact-{ordinal}: red green blue")
     for ordinal in range(1, 13):
         client.add(namespace, "semantic", f"semantic-{ordinal}: red x green y blue")
+
+
+def _bounded_oracle(
+    records: list[tuple[int, str]],
+    query: str,
+    *,
+    min_exact: int,
+    max_results: int,
+    threshold: float = 0.6,
+) -> list[tuple[int, str]]:
+    query_terms = {term.casefold() for term in _ORACLE_TOKEN.findall(query)}
+    qualifying: list[tuple[int, bool]] = []
+    for record_id, text in records:
+        exact = query in text
+        terms = {term.casefold() for term in _ORACLE_TOKEN.findall(text)}
+        semantic = bool(query_terms) and len(query_terms & terms) / len(query_terms) >= threshold
+        if exact or semantic:
+            qualifying.append((record_id, exact))
+
+    exact = [item for item in qualifying if item[1]]
+    required_exact = min(min_exact, len(exact), max_results)
+    reserved = {record_id for record_id, _ in exact[-required_exact:]}
+    selected = [item for item in qualifying if item[0] in reserved]
+    remaining = [item for item in qualifying if item[0] not in reserved]
+    open_slots = max_results - len(selected)
+    if open_slots:
+        selected.extend(remaining[-open_slots:])
+    selected.sort()
+    return [(record_id, "exact" if is_exact else "semantic") for record_id, is_exact in selected]
 
 
 def test_acknowledged_add_survives_restart_with_stable_identity_and_sequence(
@@ -194,6 +226,76 @@ def test_exact_and_semantic_union_is_deduplicated_and_metadata_is_public(
     assert {"record_id", "stable_id", "journal_sequence", "namespace"} <= set(found[0])
 
 
+def test_exact_matching_preserves_literal_bytes_across_restart(tmp_path: Path) -> None:
+    database = tmp_path / "journal.store"
+    socket = Path("/tmp") / f"oxide-contract-{secrets.token_hex(8)}.sock"
+    first = start_journal(database, socket, _command())
+    literal = first.client.add("literal", "worker", "prefix Exact é:0001 source suffix")
+    first.client.add("literal", "worker", "prefix exact é:0001 source suffix")
+    first.client.add("literal", "worker", "prefix Exact e\u0301:0001 source suffix")
+    before = first.client.search("literal", "Exact é:0001")
+    first.close()
+
+    second = start_journal(database, socket, _command())
+    try:
+        after = second.client.search("literal", "Exact é:0001")
+    finally:
+        second.close()
+
+    assert [item["record_id"] for item in before if item["match_kind"] == "exact"] == [
+        literal["record_id"]
+    ]
+    assert after == before
+
+
+def test_indexed_search_is_black_box_equivalent_to_bounded_contract(tmp_path: Path) -> None:
+    records: list[tuple[int, str]] = []
+    queries = (
+        "literal-routing-key:00000000000000000017",
+        "alpha beta gamma delta",
+        "shared component-5 failure-2",
+        "Exact é source identity 0042",
+        "missing semantic vocabulary",
+    )
+    with _backend(tmp_path, min_exact=2, max_results=7) as runtime:
+        for ordinal in range(240):
+            text = " ".join(
+                (
+                    f"entry-{ordinal:04d}",
+                    f"component-{ordinal % 11}",
+                    f"failure-{ordinal % 7}",
+                    ("alpha beta gamma" if ordinal % 3 else "alpha beta delta"),
+                    (
+                        f"literal-routing-key:{ordinal:020d}"
+                        if ordinal % 17 == 0
+                        else "ordinary-event"
+                    ),
+                    (f"Exact é source identity {ordinal:04d}" if ordinal % 42 == 0 else ""),
+                )
+            )
+            added = runtime.client.add("equivalence", "worker", text)
+            records.append((int(added["record_id"]), text))
+
+        observed = {
+            query: [
+                (int(item["record_id"]), str(item["match_kind"]))
+                for item in runtime.client.search("equivalence", query)
+            ]
+            for query in queries
+        }
+
+    expected = {
+        query: _bounded_oracle(
+            records,
+            query,
+            min_exact=2,
+            max_results=7,
+        )
+        for query in queries
+    }
+    assert observed == expected
+
+
 def test_semantic_extra_can_drive_a_follow_up_search(tmp_path: Path) -> None:
     with _backend(tmp_path) as runtime:
         client = runtime.client
@@ -288,6 +390,7 @@ def test_large_replay_uses_one_exact_anchor_per_partition_without_wildcard_or_pa
     assert [item["journal_sequence"] for item in recovered] == list(range(1, 1_026))
     assert len({item["stable_id"] for item in recovered}) == 1_025
     assert backend.queries
+    assert len(backend.queries) == len(records) + 1
     assert all(query.startswith(f"{replay_root}:") for query in backend.queries)
     assert all("*" not in query for query in backend.queries)
 

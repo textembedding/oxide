@@ -5,7 +5,7 @@ from pathlib import Path
 
 from oxide.journal import JournalClient, serve_in_thread
 from oxide.journal_mcp import PROTOCOL_VERSION, JournalMcpServer
-from oxide.workflow import WorkflowClient
+from oxide.workflow import WorkflowClient, WorkflowError
 from oxide.workflow_transport import (
     SynchronizedWorkflowClient,
     WorkflowProjectionClient,
@@ -93,7 +93,9 @@ def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
     thread.join(timeout=5)
 
 
-def test_mcp_can_reuse_worker_hosts_warm_projection(tmp_path: Path) -> None:
+def test_all_worker_hosts_reuse_one_launcher_generation_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
     journal_socket = Path("/tmp") / f"oxide-test-{secrets.token_hex(8)}.sock"
     projection_socket = Path("/tmp") / f"oxide-projection-{secrets.token_hex(8)}.sock"
     journal, journal_thread = serve_in_thread(tmp_path / "journal.sqlite3", journal_socket)
@@ -102,9 +104,18 @@ def test_mcp_can_reuse_worker_hosts_warm_projection(tmp_path: Path) -> None:
     try:
         client = WorkflowClient(JournalClient(journal_socket), STAGE)
         client.bootstrap("run")
+        monkeypatch.setattr(
+            client,
+            "_records",
+            lambda _namespace: (_ for _ in ()).throw(AssertionError("cold replay repeated")),
+        )
         shared = SynchronizedWorkflowClient(client)
-        projection, projection_thread = serve_projection_in_thread(projection_socket, shared)
-        server = JournalMcpServer(WorkflowProjectionClient(projection_socket), "run", "worker-0")
+        projection, projection_thread = serve_projection_in_thread(
+            projection_socket, shared, run_id="run", epoch=0
+        )
+        worker_zero = WorkflowProjectionClient(projection_socket, run_id="run", epoch=0)
+        worker_one = WorkflowProjectionClient(projection_socket, run_id="run", epoch=0)
+        server = JournalMcpServer(worker_zero, "run", "worker-0")
 
         searched = _request(
             server,
@@ -120,6 +131,22 @@ def test_mcp_can_reuse_worker_hosts_warm_projection(tmp_path: Path) -> None:
             {"name": "journal_add", "arguments": {"yaml": "text: claim: task:A"}},
         )
         assert 'claim: "accepted"' in added["result"]["content"][0]["text"]
+        resumed = JournalMcpServer(worker_one, "run", "worker-1")
+        owned = _request(
+            resumed,
+            3,
+            "tools/call",
+            {"name": "journal_search", "arguments": {"yaml": "query: worker:worker-0"}},
+        )
+        assert 'task_id: "A"' in owned["result"]["content"][0]["text"]
+        assert projection.generation_id
+        stale = WorkflowProjectionClient(projection_socket, run_id="run", epoch=1)
+        try:
+            stale.search("run", "run:state")
+        except WorkflowError as error:
+            assert "another run epoch" in str(error)
+        else:
+            raise AssertionError("stale projection client was accepted")
     finally:
         if projection is not None and projection_thread is not None:
             projection.shutdown()

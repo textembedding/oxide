@@ -51,6 +51,12 @@ from .journal_backend import (
 from .verification.driver import engine_digest, invocation
 from .worker import Worker, worktree_diff
 from .workflow import WorkflowClient, WorkflowError
+from .workflow_transport import (
+    ProjectionTransportError,
+    SynchronizedWorkflowClient,
+    WorkflowProjectionClient,
+    serve_projection_in_thread,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / ".oxide" / "runs"
@@ -934,15 +940,35 @@ def _launch_terminal(arguments: list[str]) -> None:
     )
 
 
-def _wait_socket(path: Path, timeout: float = 30) -> None:
+def _wait_socket(path: Path, timeout: float = 30, kind: str = "journal") -> None:
     deadline = time.monotonic() + timeout
     while not path.exists():
         if time.monotonic() >= deadline:
-            raise HarnessError(f"journal socket did not appear: {path}")
+            raise HarnessError(f"{kind} socket did not appear: {path}")
         time.sleep(0.1)
 
 
-def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]) -> Any:
+def _projection_socket(config: dict[str, Any]) -> Path:
+    run_dir = Path(config["run_dir"]) if config.get("run_dir") else Path(config["socket"]).parent
+    return run_dir / "workflow" / "projection.sock"
+
+
+def _projection_client(config: dict[str, Any]) -> WorkflowProjectionClient:
+    return WorkflowProjectionClient(
+        _projection_socket(config),
+        run_id=str(config["run_id"]),
+        epoch=int(config["epoch"]),
+    )
+
+
+def _using_journal(config: dict[str, Any], call: Callable[[Any], Any]) -> Any:
+    if _projection_socket(config).exists():
+        try:
+            return call(_projection_client(config))
+        except ProjectionTransportError:
+            # A crashed launcher may leave its disposable socket behind. The journal
+            # remains authoritative, so administrative commands may recover directly.
+            pass
     socket_path = Path(config["socket"])
     try:
         return call(_workflow_client(config, connect_journal(socket_path)))
@@ -961,6 +987,18 @@ def _using_journal(config: dict[str, Any], call: Callable[[WorkflowClient], Any]
 
 
 _OBSERVER_TASKS: dict[tuple[str, str], str] = {}
+_OBSERVER_FALLBACKS: dict[tuple[str, int], WorkflowClient] = {}
+
+
+def _observer_client(config: dict[str, Any]) -> Any:
+    if _projection_socket(config).exists():
+        return _projection_client(config)
+    key = (str(config["run_id"]), int(config["epoch"]))
+    client = _OBSERVER_FALLBACKS.get(key)
+    if client is None:
+        client = _workflow_client(config, connect_journal(config["socket"]))
+        _OBSERVER_FALLBACKS[key] = client
+    return client
 
 
 def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str, str]]:
@@ -974,15 +1012,14 @@ def _observer_context(config: dict[str, Any], slot: str) -> tuple[str, tuple[str
         assigned_role or _OBSERVER_TASKS.get(key, "-"),
     )
     try:
-        client = _workflow_client(config, connect_journal(config["socket"]))
-        view = client._view(config["run_id"])
-        matches = client.reducer.search(view, f"worker:{slot}")
+        state, active, ready = _observer_client(config).worker_snapshot(config["run_id"], slot)
+        matches = [*active, *ready]
         if matches:
-            role = str(matches[0]["role"])
+            role = str(matches[0].get("role", ""))
             role = "implementation" if role in {"author", "revision"} else role
             _OBSERVER_TASKS[key] = role
             status = (status[0], role)
-        return view.state, status
+        return str(state), status
     except (JournalError, WorkflowError, json.JSONDecodeError, OSError, IndexError, KeyError):
         return "starting", status
 
@@ -1103,10 +1140,19 @@ def _stop_processes(config: dict[str, Any]) -> None:
         raise HarnessError(f"run processes did not stop: {remaining}")
 
 
-def _start(config: dict[str, Any], foreground: bool) -> int:
+def _start(config: dict[str, Any], foreground: bool, *, resume: bool = False) -> int:
+    launch_arguments = [
+        str(ROOT / "oxide"),
+        "harness",
+        "launch",
+        "--workload",
+        str(config["workload"]),
+    ]
+    if resume:
+        launch_arguments.append("--resume")
     if foreground:
-        return command_launch(argparse.Namespace(workload=config["workload"]))
-    _launch_terminal([str(ROOT / "oxide"), "harness", "launch", "--workload", config["workload"]])
+        return command_launch(argparse.Namespace(workload=config["workload"], resume=resume))
+    _launch_terminal(launch_arguments)
     print(f"Started {config['workload']} in the background.")
     print(f"Observe: ./oxide harness observe --workload {config['workload']} --slot worker-0")
     print(f"Queue:   ./oxide harness observe-queue --workload {config['workload']}")
@@ -1264,10 +1310,38 @@ def command_launch(arguments: argparse.Namespace) -> int:
         min_exact=int(config["min_exact"]),
         max_results=int(config["max_results"]),
     )
-    client = _workflow_client(config, runtime.client)
+    projection = None
+    projection_thread = None
+    generation_path = Path(config["run_dir"]) / "workflow" / "generation.json"
     try:
-        result = client.bootstrap(config["run_id"])
+        recovered = _workflow_client(config, runtime.client)
+        result = recovered.bootstrap(config["run_id"])
         log(f"run {config['run_id']}: {'created' if result['saved'] else 'resumed'}")
+        if getattr(arguments, "resume", False) and result["state"] not in {
+            "running",
+            "complete",
+            "failed",
+        }:
+            result = recovered.add(config["run_id"], "launcher", "control: resume")
+            log(f"run {config['run_id']}: resumed by operator")
+        client = SynchronizedWorkflowClient(recovered)
+        projection, projection_thread = serve_projection_in_thread(
+            _projection_socket(config),
+            client,
+            run_id=str(config["run_id"]),
+            epoch=int(config["epoch"]),
+        )
+        _atomic_json(
+            generation_path,
+            {
+                "schema": "OxideWorkflowProjectionGenerationV1",
+                "generation_id": projection.generation_id,
+                "pid": os.getpid(),
+                "run_id": config["run_id"],
+                "epoch": int(config["epoch"]),
+            },
+        )
+        log(f"workflow projection generation {projection.generation_id[:12]} ready")
         state = str(result["state"])
         capacity_record = (
             f"control: worker-capacity\nworkers: {int(config['workers'])}\nterminal-blockers: true"
@@ -1307,21 +1381,30 @@ def command_launch(arguments: argparse.Namespace) -> int:
         log(f"launcher failed: {type(error).__name__}: {error}")
         raise
     finally:
+        if projection is not None and projection_thread is not None:
+            projection.shutdown()
+            projection.server_close()
+            projection_thread.join(timeout=5)
+        try:
+            generation = json.loads(generation_path.read_text(encoding="utf-8"))
+            if (
+                projection is not None
+                and generation.get("generation_id") == projection.generation_id
+            ):
+                generation_path.unlink(missing_ok=True)
+        except (OSError, json.JSONDecodeError):
+            pass
         runtime.close()
 
 
 def command_worker(arguments: argparse.Namespace) -> int:
-    from .workflow_transport import SynchronizedWorkflowClient, serve_projection_in_thread
-
     config = _load_config(arguments.workload)
     _validate_bound_concurrency(config)
     _wait_socket(Path(config["socket"]))
+    projection_socket = _projection_socket(config)
+    _wait_socket(projection_socket, kind="workflow projection")
     log = _Log(Path(config["run_dir"]) / "logs" / f"{arguments.slot}.log")
-    shared_client = SynchronizedWorkflowClient(
-        _workflow_client(config, connect_journal(config["socket"]))
-    )
-    projection_socket = Path(config["run_dir"]) / "workflow" / f"{arguments.slot}.sock"
-    projection, projection_thread = serve_projection_in_thread(projection_socket, shared_client)
+    shared_client = _projection_client(config)
     worker = Worker(
         shared_client,
         config["run_id"],
@@ -1347,14 +1430,9 @@ def command_worker(arguments: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, stop_worker)
     signal.signal(signal.SIGINT, stop_worker)
-    try:
-        state = worker.run()
-        log(f"slot stopped: {state}")
-        return 0 if state in {"paused", "publishing", "complete", "stopped"} else 1
-    finally:
-        projection.shutdown()
-        projection.server_close()
-        projection_thread.join(timeout=5)
+    state = worker.run()
+    log(f"slot stopped: {state}")
+    return 0 if state in {"paused", "publishing", "complete", "stopped"} else 1
 
 
 def command_pause(arguments: argparse.Namespace) -> int:
@@ -1380,11 +1458,7 @@ def command_resume(arguments: argparse.Namespace) -> int:
     _validate_bound_concurrency(config)
     if any(kind == "launcher" for _, kind in _run_processes(config)):
         raise HarnessError("workload already has a live launcher")
-    _using_journal(
-        config,
-        lambda client: client.add(config["run_id"], "launcher", "control: resume"),
-    )
-    return _start(config, arguments.foreground)
+    return _start(config, arguments.foreground, resume=True)
 
 
 def command_reset(arguments: argparse.Namespace) -> int:
@@ -1636,15 +1710,11 @@ def command_rewind(arguments: argparse.Namespace) -> int:
     restored_config = _load_config(arguments.workload)
     if int(manifest["journal_sequence"]) == 0:
         return _start(restored_config, arguments.foreground)
-    _using_journal(
-        restored_config,
-        lambda client: client.add(restored_config["run_id"], "launcher", "control: resume"),
-    )
     print(
         f"Rewound {arguments.workload} to {arguments.to}; "
         f"epoch {restored_config['epoch']}, journal sequence {manifest['journal_sequence']}"
     )
-    return _start(restored_config, arguments.foreground)
+    return _start(restored_config, arguments.foreground, resume=True)
 
 
 def _style(value: object, code: str, color: bool) -> str:
@@ -2042,25 +2112,23 @@ def _visible_journal_body(value: object) -> str:
     return "\n".join(lines)
 
 
-def _queue_snapshot(config: dict[str, Any]) -> dict[str, Any] | None:
+def _queue_snapshot(
+    config: dict[str, Any], after_record_id: int | None = 0
+) -> dict[str, Any] | None:
     try:
-        view = _workflow_client(config, connect_journal(config["socket"]))._view(config["run_id"])
+        snapshot = _observer_client(config).projection_snapshot(config["run_id"], after_record_id)
         return {
             "run_id": config["run_id"],
-            "state": view.state,
+            "state": snapshot["state"],
             "entries": [
                 {
                     "record_id": record["record_id"],
                     "author": record["author"],
                     "body": _visible_journal_body(record["text"]),
-                    "accepted": view.outcomes[int(record["record_id"])][0],
-                    "reason": (
-                        None
-                        if view.outcomes[int(record["record_id"])][0]
-                        else str(view.outcomes[int(record["record_id"])][1])
-                    ),
+                    "accepted": record["accepted"],
+                    "reason": record["reason"],
                 }
-                for record in view.records
+                for record in snapshot["entries"]
             ],
         }
     except (JournalError, WorkflowError, json.JSONDecodeError, OSError, IndexError, KeyError):
@@ -2123,7 +2191,7 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
             observed_epoch = int(config.get("epoch", 0))
             cursor = 0
             first = True
-        snapshot = _queue_snapshot(config)
+        snapshot = _queue_snapshot(config, None if first else cursor)
         if snapshot is not None:
             latest = int(snapshot["entries"][-1]["record_id"]) if snapshot["entries"] else 0
             if latest < cursor:
@@ -2153,11 +2221,13 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
 
 def command_status(arguments: argparse.Namespace) -> int:
     config = _load_config(arguments.workload)
-    client = _workflow_client(config, connect_journal(config["socket"]))
-    snapshot = {
-        "state": client.search(config["run_id"], "run:state")[0]["state"],
-        "tasks": client.search(config["run_id"], "queue:all"),
-    }
+    snapshot = _using_journal(
+        config,
+        lambda client: {
+            "state": client.search(config["run_id"], "run:state")[0]["state"],
+            "tasks": client.search(config["run_id"], "queue:all"),
+        },
+    )
     print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
 
@@ -2324,6 +2394,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.set_defaults(handler=command_resume)
     launch = commands.add_parser("launch", help=argparse.SUPPRESS)
     launch.add_argument("--workload", required=True)
+    launch.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
     launch.set_defaults(handler=command_launch)
     worker = commands.add_parser("worker", help=argparse.SUPPRESS)
     worker.add_argument("--workload", required=True)

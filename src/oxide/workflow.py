@@ -1475,41 +1475,87 @@ class WorkflowClient:
                 exact.append(record)
         return exact, returned
 
-    def _replay_records(self, namespace: str, prefix: str = "") -> list[dict[str, Any]]:
-        pending = [prefix]
-        recovered: dict[str, dict[str, Any]] = {}
+    @staticmethod
+    def _replay_ordinal(record: dict[str, Any]) -> int:
+        route = _record_route(record)
+        replay_id = str((route or {}).get("replay_id", ""))
+        if len(replay_id) != _REPLAY_WIDTH or set(replay_id) - set(_REPLAY_FANOUT):
+            raise WorkflowError("workflow record has an invalid replay index")
+        return int(replay_id, 2)
+
+    def _latest_anchor(self, namespace: str) -> tuple[int, int] | None:
+        """Return the newest exact workflow sequence and its dense replay ordinal."""
+
+        root = self._root(namespace)
+        exact, _ = self._partition_records(namespace, "")
+        anchors: list[tuple[int, int]] = []
+        for record in exact:
+            route = _record_route(record)
+            if route is None or route.get("replay_root") != root:
+                continue
+            try:
+                sequence = int(record["journal_sequence"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise WorkflowError("journal record is missing its stable sequence") from error
+            anchors.append((sequence, self._replay_ordinal(record)))
+        return max(anchors, default=None)
+
+    def _replay_leaf(self, namespace: str, ordinal: int) -> dict[str, Any]:
+        replay_id = f"{ordinal:0{_REPLAY_WIDTH}b}"
+        exact, _ = self._partition_records(namespace, replay_id)
+        by_stable: dict[str, dict[str, Any]] = {}
+        for record in exact:
+            route = _record_route(record)
+            if route is None or route.get("replay_id") != replay_id:
+                continue
+            stable = str(route["stable_id"])
+            prior = by_stable.get(stable)
+            if prior is not None and int(prior["journal_sequence"]) != int(
+                record["journal_sequence"]
+            ):
+                raise WorkflowError("stable journal identity was reused")
+            by_stable[stable] = record
+        if len(by_stable) != 1:
+            raise WorkflowError("dense replay index contains a missing or non-unique leaf")
+        return next(iter(by_stable.values()))
+
+    def _indexed_records(
+        self, namespace: str, start_ordinal: int = 0, stop_ordinal: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Recover a dense range through unique exact leaf searches.
+
+        The root exact anchor exposes the newest ordinal under bounded SEARCH. Dense
+        allocation is serialized with workflow writes, so no internal-prefix walk is
+        needed: every ordinal through that high-water mark must identify one leaf.
+        """
+
+        if stop_ordinal is None:
+            anchor = self._latest_anchor(namespace)
+            if anchor is None:
+                return []
+            _, stop_ordinal = anchor
+        if stop_ordinal < start_ordinal:
+            return []
+        ordinals = range(start_ordinal, stop_ordinal + 1)
         with ThreadPoolExecutor(max_workers=8) as pool:
-            while pending:
-                prefixes = pending
-                pending = []
-                batches = pool.map(
-                    lambda value: self._partition_records(namespace, value)[0],
-                    prefixes,
-                )
-                for value, records in zip(prefixes, batches, strict=True):
-                    if not records:
-                        # Semantic extras do not prove that this exact replay partition exists.
-                        continue
-                    for record in records:
-                        route = _record_route(record)
-                        assert route is not None
-                        stable = str(route["stable_id"])
-                        prior = recovered.get(stable)
-                        if prior is not None and int(prior["journal_sequence"]) != int(
-                            record["journal_sequence"]
-                        ):
-                            raise WorkflowError("stable journal identity was reused")
-                        recovered[stable] = record
-                    if len(value) < _REPLAY_WIDTH:
-                        pending.extend(value + suffix for suffix in _REPLAY_FANOUT)
-                    else:
-                        leaf_ids = {
-                            str((_record_route(record) or {}).get("stable_id"))
-                            for record in records
-                        }
-                        if len(leaf_ids) != 1:
-                            raise WorkflowError("replay leaf identity is not unique")
-        return list(recovered.values())
+            records = list(pool.map(lambda value: self._replay_leaf(namespace, value), ordinals))
+        prior_sequence = 0
+        for ordinal, record in zip(ordinals, records, strict=True):
+            if self._replay_ordinal(record) != ordinal:
+                raise WorkflowError("workflow replay index returned the wrong leaf")
+            try:
+                sequence = int(record["journal_sequence"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise WorkflowError("journal record is missing its stable sequence") from error
+            if sequence <= prior_sequence:
+                raise WorkflowError("workflow journal sequence is not increasing")
+            prior_sequence = sequence
+        return records
+
+    def _replay_records(self, namespace: str, prefix: str = "") -> list[dict[str, Any]]:
+        if prefix:
+            raise WorkflowError("indexed replay starts at the run replay root")
+        return self._indexed_records(namespace)
 
     def _records(self, namespace: str) -> list[dict[str, Any]]:
         replayed = self._replay_records(namespace)
@@ -1533,46 +1579,19 @@ class WorkflowClient:
         those anchors is the newest workflow record.  Semantic extras are ignored.
         """
 
-        root = self._root(namespace)
-        exact, _ = self._partition_records(namespace, "")
-        sequences = [
-            int(record["journal_sequence"])
-            for record in exact
-            if (_record_route(record) or {}).get("replay_root") == root
-        ]
-        return max(sequences, default=0)
+        anchor = self._latest_anchor(namespace)
+        return anchor[0] if anchor is not None else 0
 
-    def _tail_records(self, namespace: str, start_ordinal: int) -> list[dict[str, Any]]:
+    def _tail_records(
+        self, namespace: str, start_ordinal: int, stop_ordinal: int | None = None
+    ) -> list[dict[str, Any]]:
         """Recover the contiguous suffix after an already validated projection."""
-
-        recovered: list[dict[str, Any]] = []
-        prior_sequence = 0
-        for ordinal in range(start_ordinal, 2**_REPLAY_WIDTH):
-            replay_id = f"{ordinal:0{_REPLAY_WIDTH}b}"
-            exact, _ = self._partition_records(namespace, replay_id)
-            if not exact:
-                break
-            identities = {str((_record_route(record) or {}).get("stable_id")) for record in exact}
-            if len(identities) != 1:
-                raise WorkflowError("replay leaf identity is not unique")
-            by_sequence: dict[int, dict[str, Any]] = {}
-            for record in exact:
-                route = _record_route(record)
-                if route is None or route["replay_id"] != replay_id:
-                    continue
-                try:
-                    sequence = int(record["journal_sequence"])
-                except (KeyError, TypeError, ValueError) as error:
-                    raise WorkflowError("journal record is missing its stable sequence") from error
-                by_sequence[sequence] = record
-            if len(by_sequence) != 1:
-                raise WorkflowError("replay leaf does not identify exactly one record")
-            sequence, record = next(iter(by_sequence.items()))
-            if recovered and sequence <= prior_sequence:
-                raise WorkflowError("workflow journal sequence is not increasing")
-            recovered.append(record)
-            prior_sequence = sequence
-        return recovered
+        if stop_ordinal is None:
+            anchor = self._latest_anchor(namespace)
+            if anchor is None:
+                return []
+            _, stop_ordinal = anchor
+        return self._indexed_records(namespace, start_ordinal, stop_ordinal)
 
     def replay_records(self, namespace: str) -> list[dict[str, Any]]:
         """Return the complete ordered workflow log through journal_search only."""
@@ -1583,11 +1602,13 @@ class WorkflowClient:
         cached = self._views.get(namespace)
         if cached is not None:
             cached_sequence = int(cached.records[-1]["journal_sequence"]) if cached.records else 0
-            latest_sequence = self._latest_sequence(namespace)
+            anchor = self._latest_anchor(namespace)
+            latest_sequence = anchor[0] if anchor is not None else 0
             if latest_sequence == cached_sequence:
                 return cached
             if latest_sequence > cached_sequence:
-                tail = self._tail_records(namespace, len(cached.records))
+                latest_ordinal = anchor[1] if anchor is not None else -1
+                tail = self._tail_records(namespace, len(cached.records), latest_ordinal)
                 if tail and int(tail[-1]["journal_sequence"]) == latest_sequence:
                     for record in tail:
                         if int(record["journal_sequence"]) <= cached_sequence:
@@ -1680,6 +1701,36 @@ class WorkflowClient:
         ]
         ready = self._scheduled_ready(view, values).get(worker, [])
         return view.state, active, ready
+
+    def projection_snapshot(
+        self, namespace: str, after_record_id: int | None = 0
+    ) -> dict[str, Any]:
+        """Return an internal, disposable view for local observers."""
+
+        view = self._view(namespace)
+        records = (
+            view.records[-10:]
+            if after_record_id is None
+            else [record for record in view.records if int(record["record_id"]) > after_record_id]
+        )
+        return {
+            "run_id": namespace,
+            "state": view.state,
+            "entries": [
+                {
+                    "record_id": int(record["record_id"]),
+                    "author": str(record["author"]),
+                    "text": str(record["text"]),
+                    "accepted": bool(view.outcomes[int(record["record_id"])][0]),
+                    "reason": (
+                        None
+                        if view.outcomes[int(record["record_id"])][0]
+                        else str(view.outcomes[int(record["record_id"])][1])
+                    ),
+                }
+                for record in records
+            ],
+        }
 
     def add(self, namespace: str, author: str, text: str) -> dict[str, Any]:
         first, separator, remainder = text.partition("\n")

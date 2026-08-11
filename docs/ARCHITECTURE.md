@@ -199,6 +199,22 @@ The backend exposes exactly two operations:
 Only the backend adapter may import the disposable Python prototype. Workflow
 semantics are derived above the port by deterministic replay.
 
+The Python prototype deliberately dogfoods two planned production retrieval
+components behind this unchanged port. Its Exact index maps generic aligned byte
+fingerprints to record identities and always confirms candidates against the
+immutable source text. Its lexical index maps generic case-folded terms to record
+identities, uses the threshold predicate to derive a sufficient candidate cover,
+and confirms full eligibility before selection. Neither index stores or interprets
+workflow fields.
+
+Both indexes are versioned, rebuildable projections of the ordered record table.
+They are published in the same transaction as an acknowledged append, checked on
+restart, and rebuilt from immutable records when absent, stale, or incomplete.
+Their postings, counts, fingerprints, and candidate order are never authority;
+stable records and journal sequence remain the source of every returned result.
+Exact and lexical qualification MUST demonstrate clean-rebuild equivalence and
+may be run independently.
+
 Authoritative runs require `1 <= min_exact <= max_results`; defaults are
 `min_exact = 5` and `max_results = 10`. Capacity is frozen in run metadata and
 qualification and preserved across restart.
@@ -220,14 +236,23 @@ SEARCH has no exhaustiveness promise, cursor, pagination, relevance order,
 wildcard history mode, or per-query intent flag.
 
 Every workflow record MUST contain a run-specific replay root, run and epoch,
-stable identity, sequence, and unique fixed-width replay leaf discoverable through
-each deterministic prefix. Recovery traverses every child of every nonempty exact
-partition, deduplicates leaves, sorts by sequence, and then projects state.
+stable identity, sequence, and unique fixed-width replay ordinal. Ordinals are
+dense, monotonic, and allocated under the serialized workflow lock. Recovery uses
+one exact root anchor to discover the newest ordinal, queries every unique leaf
+from zero through that high-water mark, validates contiguity and identity, and
+projects records in journal-sequence order. It does not probe internal tree nodes.
 
-Replay MUST remain complete when `min_exact = 1`, each nonempty partition exposes
-only one exact anchor, and responses include semantic noise. Semantic results stay
-visible for iterative agent search but gain no workflow authority without valid
-run, epoch, schema, routing, identity, and sequence metadata.
+Replay MUST remain complete when `min_exact = 1`, each leaf exposes only one exact
+anchor, and responses include semantic noise. Semantic results stay visible for
+iterative agent search but gain no workflow authority without valid run, epoch,
+schema, routing, identity, and sequence metadata.
+
+The launcher MUST recover this projection once before admitting workflow writes
+for a host generation. It serves the disposable projection over a run- and
+epoch-bound local socket to every worker host, fresh Codex/MCP process, supervisor,
+and observer. Incremental exact-leaf recovery keeps that single projection current.
+A launcher restart discards and rebuilds it from the journal; no worker-local
+projection is authoritative or independently replayed.
 
 ## 8. Process authority, restart, and rewind
 

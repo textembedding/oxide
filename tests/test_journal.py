@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
+import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -255,6 +258,259 @@ def test_warm_search_observes_records_appended_by_another_client(tmp_path: Path)
     ]
 
 
+def test_prototype_builds_and_repairs_rebuildable_search_indexes(tmp_path: Path) -> None:
+    database = tmp_path / "kernel.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE records (
+              record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              namespace TEXT NOT NULL,
+              author TEXT NOT NULL,
+              text TEXT NOT NULL,
+              created_at REAL NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO records(namespace,author,text,created_at) VALUES(?,?,?,?)",
+            (
+                (
+                    "space",
+                    "alice",
+                    "prefix literal-routing:alpha:000000000001 suffix",
+                    1.0,
+                ),
+                ("space", "bob", "related routing beta", 2.0),
+            ),
+        )
+
+    migrated = Journal(database)
+    expected_exact = migrated.search("space", "literal-routing:alpha:000000000001")
+    expected_semantic = migrated.search("space", "routing beta")
+    with sqlite3.connect(database) as connection:
+        index_namespace_id, gram = connection.execute(
+            "SELECT index_namespace_id,gram FROM exact_postings LIMIT 1"
+        ).fetchone()
+        plan = connection.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT records.record_id
+            FROM exact_postings JOIN records USING(record_id)
+            WHERE exact_postings.index_namespace_id=?
+              AND exact_postings.gram=?
+              AND records.namespace=?
+            """,
+            (index_namespace_id, gram, "space"),
+        ).fetchall()
+        connection.execute("DELETE FROM exact_postings")
+
+    exact_repaired = Journal(database)
+    assert any("exact_postings" in str(row[-1]) for row in plan)
+    assert exact_repaired.search("space", "literal-routing:alpha:000000000001") == (expected_exact)
+    assert exact_repaired.search("space", "routing beta") == expected_semantic
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM lexical_postings")
+    lexical_repaired = Journal(database)
+    assert lexical_repaired.search("space", "literal-routing:alpha:000000000001") == (
+        expected_exact
+    )
+    assert lexical_repaired.search("space", "routing beta") == expected_semantic
+
+
+def test_record_acknowledgement_and_derived_index_publication_are_atomic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "kernel.sqlite3"
+    journal = Journal(database)
+    index_record = journal._index_record
+
+    def fail_index(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("injected derived-index failure")
+
+    monkeypatch.setattr(journal, "_index_record", fail_index)
+    with pytest.raises(JournalError, match="index publication failed"):
+        journal.add("space", "alice", "atomic literal-routing:000000000001")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM exact_postings").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM lexical_postings").fetchone()[0] == 0
+
+    monkeypatch.setattr(journal, "_index_record", index_record)
+    added = journal.add("space", "alice", "atomic literal-routing:000000000001")
+    found = journal.search("space", "literal-routing:000000000001")
+    assert [item["record_id"] for item in found] == [added["record_id"]]
+    assert found[0]["match_kind"] == "exact"
+
+
+def test_sparse_exact_index_covers_every_byte_alignment(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "kernel.sqlite3", min_exact=5, max_results=64)
+    query = "literal-byte-sequence:0123456789abcdef"
+    for offset in range(32):
+        journal.add("space", "worker", f"{'x' * offset}{query}:suffix-{offset}")
+    journal.add("space", "worker", "literal-byte-sequence differs")
+
+    found = journal.search("space", query)
+    assert [item["record_id"] for item in found] == list(range(1, 33))
+    assert all(item["match_kind"] == "exact" for item in found)
+
+
+def test_lexical_candidate_cover_preserves_every_threshold_eligible_record(
+    tmp_path: Path,
+) -> None:
+    journal = Journal(tmp_path / "kernel.sqlite3", min_exact=5, max_results=64)
+    terms = ("alpha", "beta", "gamma", "delta", "epsilon")
+    eligible_ids = []
+    for mask in range(1, 1 << len(terms)):
+        selected = [term for index, term in enumerate(terms) if mask & (1 << index)]
+        added = journal.add("space", "worker", " ".join((*selected, f"record-{mask}")))
+        if len(selected) >= 3:
+            eligible_ids.append(added["record_id"])
+
+    found = journal.search("space", " ".join(terms))
+    assert [item["record_id"] for item in found] == eligible_ids
+
+
+def test_derived_lexical_candidate_cannot_fabricate_semantic_authority(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "kernel.sqlite3"
+    journal = Journal(database)
+    added = journal.add("space", "worker", "unrelated immutable source")
+    with sqlite3.connect(database) as connection:
+        index_namespace_id = connection.execute(
+            "SELECT index_namespace_id FROM index_namespaces WHERE namespace='space'"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO lexical_postings(index_namespace_id,term,record_id) VALUES(?,?,?)",
+            (index_namespace_id, "fabricated", added["record_id"]),
+        )
+        connection.execute(
+            "INSERT INTO lexical_counts(index_namespace_id,term,record_count) VALUES(?,?,1)",
+            (index_namespace_id, "fabricated"),
+        )
+
+    assert journal.search("space", "fabricated") == []
+
+
+def test_derived_exact_fingerprint_cannot_fabricate_literal_authority(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "kernel.sqlite3"
+    journal = Journal(database)
+    added = journal.add("space", "worker", "unrelated immutable source material")
+    query = "fabricated-exact-byte-sequence-0123456789abcdef"
+    gram = journal._exact_fingerprint(query.encode()[:16])
+    with sqlite3.connect(database) as connection:
+        index_namespace_id = connection.execute(
+            "SELECT index_namespace_id FROM index_namespaces WHERE namespace='space'"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO exact_postings(index_namespace_id,gram,record_id) VALUES(?,?,?)",
+            (index_namespace_id, gram, added["record_id"]),
+        )
+        connection.execute(
+            "INSERT INTO exact_counts(index_namespace_id,gram,record_count) VALUES(?,?,1)",
+            (index_namespace_id, gram),
+        )
+
+    assert journal.search("space", query) == []
+
+
+def test_exact_and_lexical_indexes_scale_better_than_authority_scan(tmp_path: Path) -> None:
+    database = tmp_path / "scaled.sqlite3"
+
+    def route(ordinal: int) -> str:
+        digest = hashlib.sha256(str(ordinal).encode()).hexdigest()
+        return f"routing:{digest}:{ordinal:064b}"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE records (
+              record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              namespace TEXT NOT NULL,
+              author TEXT NOT NULL,
+              text TEXT NOT NULL,
+              created_at REAL NOT NULL
+            )
+            """
+        )
+        rows = []
+        for namespace, size in (("small", 300), ("large", 3_000)):
+            rows.extend(
+                (
+                    namespace,
+                    "worker",
+                    " ".join(
+                        (
+                            route(ordinal),
+                            "shared-token",
+                            f"component-specific-{ordinal:06d}",
+                            "alpha beta",
+                        )
+                    ),
+                    float(ordinal),
+                )
+                for ordinal in range(size)
+            )
+        connection.executemany(
+            "INSERT INTO records(namespace,author,text,created_at) VALUES(?,?,?,?)",
+            rows,
+        )
+
+    journal = Journal(database)
+    exact_query = route(0)
+    lexical_query = "component-specific-000000 shared-token absent-token"
+    token = re.compile(r"[\w-]+", re.UNICODE)
+
+    def authority_scan(namespace: str, query: str) -> list[int]:
+        query_terms = {item.casefold() for item in token.findall(query)}
+        with sqlite3.connect(database) as connection:
+            records = connection.execute(
+                "SELECT record_id,text FROM records WHERE namespace=? ORDER BY record_id",
+                (namespace,),
+            ).fetchall()
+        qualifying = []
+        for record_id, text in records:
+            terms = {item.casefold() for item in token.findall(text)}
+            if query in text or len(query_terms & terms) / len(query_terms) >= 0.6:
+                qualifying.append(int(record_id))
+        return qualifying[-10:]
+
+    for namespace in ("small", "large"):
+        assert [
+            item["record_id"] for item in journal.search(namespace, exact_query)
+        ] == authority_scan(namespace, exact_query)
+        assert [
+            item["record_id"] for item in journal.search(namespace, lexical_query)
+        ] == authority_scan(namespace, lexical_query)
+
+    def elapsed(operation) -> float:
+        operation()
+        samples = []
+        for _ in range(3):
+            started = time.perf_counter()
+            for _ in range(20):
+                operation()
+            samples.append(time.perf_counter() - started)
+        return min(samples)
+
+    small_exact = elapsed(lambda: journal.search("small", exact_query))
+    large_exact = elapsed(lambda: journal.search("large", exact_query))
+    large_exact_scan = elapsed(lambda: authority_scan("large", exact_query))
+    small_lexical = elapsed(lambda: journal.search("small", lexical_query))
+    large_lexical = elapsed(lambda: journal.search("large", lexical_query))
+    large_lexical_scan = elapsed(lambda: authority_scan("large", lexical_query))
+
+    assert large_exact < large_exact_scan / 2
+    assert large_lexical < large_lexical_scan / 2
+    assert large_exact < small_exact * 3
+    assert large_lexical < small_lexical * 3
+
+
 def test_bootstrap_cites_frozen_workload_without_journalizing_specification(
     workflow,
 ) -> None:
@@ -352,21 +608,27 @@ def test_workflow_replay_recovers_every_record_beyond_search_result_caps() -> No
     }
 
     class CappedPort:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
         def add(self, _namespace: str, _author: str, _text: str) -> dict:
             raise AssertionError("replay is read-only")
 
         def search(self, namespace: str, query: str) -> list[dict]:
             assert namespace == "product"
             assert query != "*"
+            self.queries.append(query)
             exact = [record for record in records if query in record["text"]][-1:]
             return [*exact, semantic_noise]
 
+    backend = CappedPort()
     assert (
         len(
-            WorkflowClient(CappedPort(), replay_root=replay_root).replay_records("product")  # type: ignore[arg-type]
+            WorkflowClient(backend, replay_root=replay_root).replay_records("product")  # type: ignore[arg-type]
         )
         == 1_500
     )
+    assert len(backend.queries) == len(records) + 1
 
 
 def test_semantic_noise_does_not_make_an_empty_replay_partition_nonempty() -> None:
