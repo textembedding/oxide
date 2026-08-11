@@ -32,11 +32,51 @@ Repository files remain the authoritative specification. Journal records may cit
 paths and Git identities, but copied specification prose cannot become authority.
 
 Machine proof establishes implementation-to-contract refinement. It does not
-establish that a human or generated contract faithfully captures prose. Creating
-or materially changing a formal contract is a separately reviewed specification
-event.
+establish that a generated contract faithfully captures prose. Contract alignment
+is therefore a separate, explicit admission gate.
 
-## 2. Target contract and frozen run identity
+## 2. Contract alignment and admission
+
+The target's declared natural-language specification set is the sole
+human-readable semantic authority for program behavior and success. The generated
+contract is a machine-executable derivation, not a second source of product intent.
+
+Before a contract can be admitted, its generation agent MUST inspect the complete
+declared specification set and classify it as aligned or not aligned. Ambiguity,
+missing acceptance criteria, unsupported assumptions, and other semantic gaps MUST
+remain explicit. The agent MUST propose concrete prose revisions instead of
+silently choosing an interpretation. A revision becomes authoritative only after
+the user approves it and it is committed as a new specification version. The
+contract MUST then be regenerated from that exact committed version.
+
+Every generated goal, task, and acceptance check MUST cite text present in the
+declared specification set. Its semantic trace MUST contain both those citations
+and the exact generated goal, task, and check content. Mechanical derivations MAY
+add enforcement details, including dependency edges, source classifications,
+proof obligations, evidence identity, and recovery checks. They MUST NOT add or
+change product behavior, failure behavior, or success semantics.
+
+Admission requires one committed, machine-readable receipt binding:
+
+- the exact approved specification commit, files, blobs, and closure digest;
+- the exact regenerated contract path, blob, and semantic trace;
+- an agent attestation that the specification is contractible, all gaps are
+  resolved, and the derivation is faithful;
+- explicit approval by the target repository's configured user identity;
+- the alignment-policy identity.
+
+The receipt is mechanical evidence of the exact approval event, not an additional
+semantic specification. Deterministic validation proves identity, completeness of
+the trace, and absence of unresolved fields; the agent and user remain responsible
+for the natural-language entailment judgment.
+
+Oxide MUST validate alignment before backend qualification. It MUST then complete
+contract and toolchain qualification in disposable admission state before creating
+a run directory, journal, worker, observer, or paid workload process. A changed
+specification, contract, trace, or alignment policy invalidates the receipt and
+requires regeneration and approval. No live specification migration exists.
+
+## 3. Target contract and frozen run identity
 
 The default entry point is `<target>/verification/contract.toml`. Another
 target-relative path under `verification/` MAY be selected explicitly.
@@ -49,7 +89,9 @@ The contract MUST identify:
   non-authoritative roots;
 - production features, target, entry point, and composition theorem;
 - one acyclic implementation DAG with at least one evidence requirement per task;
-- bounded execution, artifact, and receipt policies.
+- bounded execution, artifact, and receipt policies;
+- the complete natural-language specification set, alignment receipt, and one or
+  more source citations for every generated semantic unit.
 
 Formal checks select an Oxide-supported Verus operation and target proof root.
 They MUST NOT supply an alternate verifier command. Explicit command checks are
@@ -69,7 +111,7 @@ candidate that changes a frozen input fails closed. Specification, contract,
 toolchain, judge, or policy changes require a new independently qualified run;
 there is no live contract migration.
 
-## 3. Verification authority
+## 4. Verification authority
 
 Oxide, not the target candidate, constructs and executes authoritative Verus
 commands. The bundled judge MUST:
@@ -101,7 +143,7 @@ Agent review, fixtures, fuzzing, crash campaigns, and benchmarks supplement proo
 but cannot replace it. Formal correctness and empirical capacity are independent
 release gates.
 
-## 4. Candidate and integration lifecycle
+## 5. Candidate and integration lifecycle
 
 The authoritative lifecycle is:
 
@@ -156,7 +198,7 @@ the complete composition theorem against that exact tree, import the exact verif
 Git object, and advance the target only to that object. Dependencies release only
 after this integration succeeds.
 
-## 5. Exact shared evidence
+## 6. Exact shared evidence
 
 > Acceptance is check-granular, evidence is shared through the journal, and
 > execution occurs only for an unsatisfied evidence slot.
@@ -187,7 +229,7 @@ Logs and artifacts MUST be bounded and stored outside routing metadata using
 content digests. A required machine-readable receipt is bounded, regular, and
 validated against the frozen judge.
 
-## 6. Global productive frontier
+## 7. Global productive frontier
 
 Workers MUST NOT be partitioned into fixed implementation, review, or verification
 pools. The scheduler derives one global frontier containing:
@@ -206,7 +248,7 @@ exists or manufacture redundant checks to inflate utilization.
 The process limit is currently 64 workers. The target DAG and live review/evidence
 frontier determine useful width.
 
-## 7. Journal port, bounded search, and replay
+## 8. Journal port, bounded search, and replay
 
 The backend exposes exactly two operations:
 
@@ -273,7 +315,7 @@ and observer. Incremental exact-leaf recovery keeps that single projection curre
 A launcher restart discards and rebuilds it from the journal; no worker-local
 projection is authoritative or independently replayed.
 
-## 8. Process authority, restart, and rewind
+## 9. Process authority, restart, and rewind
 
 On one host, the supervisor directly observes process liveness. Oxide MUST NOT use
 wall-clock leases as ownership authority. A crashed assignment is reclaimed only
@@ -298,7 +340,7 @@ Destructive rewind is explicit administration. It MUST:
 Rewind MUST refuse to overwrite uncommitted target changes. It MUST NOT preserve
 synthetic monotonic journal numbers across restored history.
 
-## 9. Qualification and backend compatibility
+## 10. Qualification and backend compatibility
 
 Every run binds a current real-multiprocess qualification receipt for the exact
 Oxide implementation, judge digest, backend, worker count, and capacity pair. The
@@ -311,13 +353,14 @@ Python MVP and any future adapter. A Rust backend is not drop-in compatible unti
 it passes that suite and the multiprocess qualification campaign with the same
 configuration.
 
-## 10. Current scope and honest claims
+## 11. Current scope and honest claims
 
-Oxide executes reviewed target contracts. It does not yet synthesize and approve a
-formal contract from natural-language specifications, provide distributed failure
-detection, contain hostile target code, deploy products, or prove prose fidelity,
-hardware capacity, operating-system fairness, device behavior, or human semantic
-relevance.
+Oxide enforces exact admission for agent-generated contracts, but it does not prove
+natural-language entailment. That semantic judgment is explicitly shared by the
+contract-generation agent and approving user. Oxide also does not provide
+distributed failure detection, contain hostile target code, deploy products, or
+prove hardware capacity, operating-system fairness, device behavior, or human
+semantic relevance.
 
 The complete model-free harness suite is `./oxide verify`. Incompatible historical
 run metadata fails closed rather than receiving a compatibility layer.

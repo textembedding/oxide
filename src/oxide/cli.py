@@ -1,4 +1,5 @@
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -24,6 +25,11 @@ from pygments.formatters import TerminalFormatter
 from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
+from .alignment import (
+    AlignmentError,
+    validate_alignment_receipt,
+    write_alignment_receipt,
+)
 from .concurrency import ConcurrencyError, implementation_digest, run_campaign, validate_receipt
 from .contract import ContractError, load_contract
 from .evidence import (
@@ -140,6 +146,7 @@ def _frozen_workload_ref(
     base_commit: str,
     contract_path: Path,
     stage: dict[str, Any],
+    alignment_receipt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     relative = contract_path.relative_to(target).as_posix()
     blob = _git(target, "rev-parse", f"{base_commit}:{relative}")
@@ -149,7 +156,7 @@ def _frozen_workload_ref(
         raise HarnessError("contract.immutable_paths must include the contract itself")
     entries = _immutable_entries(target, base_commit, immutable_paths)
     result: dict[str, Any] = {
-        "schema": "OxideVerificationContractRefV1",
+        "schema": "OxideVerificationContractRefV2",
         "target_repository": _repository_identity(target),
         "base_commit": base_commit,
         "contract_path": relative,
@@ -169,6 +176,10 @@ def _frozen_workload_ref(
             "prospective_receipt_required": bool(verification["prospective_receipt_required"]),
         },
     }
+    if alignment_receipt is not None:
+        if alignment_receipt.get("receipt_path") not in immutable_paths:
+            raise HarnessError("contract.immutable_paths must include the alignment receipt")
+        result["alignment"] = alignment_receipt
     return result
 
 
@@ -239,9 +250,21 @@ def _load_frozen_stage(config: dict[str, Any]) -> dict[str, Any]:
         raise HarnessError("immutable verification contract changed; start a new run")
     frozen_path = Path(config["contract_root"]) / path
     try:
-        return load_contract(frozen_path)
+        stage = load_contract(frozen_path)
     except ContractError as error:
         raise HarnessError(str(error)) from error
+    try:
+        alignment = validate_alignment_receipt(
+            target,
+            str(config["base_commit"]),
+            _contract_path(target, path),
+            stage,
+        )
+    except AlignmentError as error:
+        raise HarnessError(str(error)) from error
+    if alignment != reference.get("alignment"):
+        raise HarnessError("frozen contract alignment identity changed")
+    return stage
 
 
 def _workflow_client(config: dict[str, Any], journal: JournalPort) -> WorkflowClient:
@@ -304,7 +327,7 @@ def _load_config(workload: str) -> dict[str, Any]:
     run_id = config.get("run_id")
     expected_prefix = f"codex/oxide-{_slug(str(run_id))}"
     if (
-        config.get("schema_version") != 10
+        config.get("schema_version") != 11
         or config.get("workload") != workload
         or not isinstance(run_id, str)
         or re.fullmatch(re.escape(workload) + r"-\d{8}-\d{6}", run_id) is None
@@ -321,6 +344,8 @@ def _load_config(workload: str) -> dict[str, Any]:
         or not all(isinstance(value, str) for value in config["journal_command"])
         or not isinstance(config.get("concurrency_validation"), dict)
         or not isinstance(config.get("workload_ref"), dict)
+        or config.get("workload_ref", {}).get("schema") != "OxideVerificationContractRefV2"
+        or not isinstance(config.get("workload_ref", {}).get("alignment"), dict)
         or not isinstance(config.get("workload_ref", {}).get("verification"), dict)
         or config["workload_ref"]["verification"].get("candidate_operation") != "policy"
         or not isinstance(config.get("evidence_root"), str)
@@ -555,8 +580,14 @@ def _run_qualified_check(
                 command = [COMMAND_SHELL, "-lc", "set -e\n" + str(check["command"])]
             else:
                 raise EvidenceError("qualified check has an unsupported driver")
-            working_directory = (repository / str(check.get("working_directory", "."))).resolve()
-            if not working_directory.is_relative_to(repository) or not working_directory.is_dir():
+            repository_root = repository.resolve()
+            working_directory = (
+                repository_root / str(check.get("working_directory", "."))
+            ).resolve()
+            if (
+                not working_directory.is_relative_to(repository_root)
+                or not working_directory.is_dir()
+            ):
                 raise EvidenceError("qualified check working directory is unavailable")
             with stdout.open("wb") as out, stderr.open("wb") as err:
                 completed = subprocess.run(
@@ -654,8 +685,11 @@ def _qualify_contract(config: dict[str, Any], stage: dict[str, Any]) -> None:
                 receipt_required=False,
             )
             if receipt["result"] != "passed":
+                diagnostic = artifact_excerpt(Path(config["evidence_root"]), receipt, "stderr")
+                detail = f": {diagnostic}" if diagnostic else ""
                 raise HarnessError(
-                    f"frozen contract qualification failed ({operation}): {receipt['result']}"
+                    f"frozen contract qualification failed ({operation}): "
+                    f"{receipt['result']}{detail}"
                 )
             digests.append(digest)
     policy_ref["qualification_receipt_sha256"] = sha256_bytes(canonical_bytes(digests))
@@ -1289,6 +1323,50 @@ def _validate_bound_concurrency(config: dict[str, Any]) -> None:
         raise ConcurrencyError("workload run does not match its concurrency receipt")
 
 
+def command_approve_contract(arguments: argparse.Namespace) -> int:
+    """Bind explicit user approval to one agent-confirmed spec/contract generation."""
+    if arguments.approve is not True:
+        raise HarnessError("contract approval requires the explicit --approve flag")
+    target = Path(arguments.target).expanduser().resolve()
+    if (
+        not target.is_dir()
+        or _git(target, "rev-parse", "--is-inside-work-tree", check=False) != "true"
+        or Path(_git(target, "rev-parse", "--show-toplevel")).resolve() != target
+    ):
+        raise HarnessError("target must be the Git worktree root")
+    if _git(target, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise HarnessError(
+            "approve the committed specification version: commit, stash, or remove changes first"
+        )
+    contract_path = _contract_path(target, arguments.contract)
+    try:
+        stage = load_contract(contract_path)
+    except ContractError as error:
+        raise HarnessError(str(error)) from error
+    paths = [
+        contract_path.relative_to(target).as_posix(),
+        *stage["alignment"]["specifications"],
+    ]
+    for path in paths:
+        if not _git_succeeds(target, "ls-files", "--error-unmatch", "--", path):
+            raise HarnessError(f"alignment input must be committed before approval: {path}")
+    source_commit = _git(target, "rev-parse", "HEAD")
+    try:
+        receipt = write_alignment_receipt(
+            target,
+            contract_path,
+            stage,
+            source_commit=source_commit,
+            agent_identity=arguments.agent,
+            user_identity=_target_git_identity(target),
+        )
+    except AlignmentError as error:
+        raise HarnessError(str(error)) from error
+    print(f"Aligned contract receipt: {receipt}")
+    print("Commit the receipt before starting the run.")
+    return 0
+
+
 def command_run(arguments: argparse.Namespace) -> int:
     target = Path(arguments.target).expanduser().resolve()
     if arguments.workers < 1:
@@ -1328,6 +1406,22 @@ def command_run(arguments: argparse.Namespace) -> int:
         raise HarnessError(
             f"verification contract must be committed under verification/: {contract_relative}"
         )
+    target_branch = _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if not target_branch:
+        raise HarnessError("target must have a checked-out branch")
+    if _git(target, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise HarnessError("target has changes; commit, stash, or remove them first")
+    base_commit = _git(target, "rev-parse", "HEAD")
+    try:
+        alignment_receipt = validate_alignment_receipt(
+            target,
+            base_commit,
+            contract_path,
+            stage,
+        )
+    except AlignmentError as error:
+        raise HarnessError(f"contract admission denied: {error}") from error
+    git_identity = _target_git_identity(target)
     journal_command = shlex.split(getattr(arguments, "journal_command", "") or "")
     receipt_path = Path(
         getattr(arguments, "concurrency_receipt", None)
@@ -1341,17 +1435,16 @@ def command_run(arguments: argparse.Namespace) -> int:
         min_exact=min_exact,
         max_results=max_results,
     )
-    target_branch = _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if not target_branch:
-        raise HarnessError("target must have a checked-out branch")
-    if _git(target, "status", "--porcelain=v1", "--untracked-files=all"):
-        raise HarnessError("target has changes; commit, stash, or remove them first")
-    base_commit = _git(target, "rev-parse", "HEAD")
-    git_identity = _target_git_identity(target)
     run_id = f"{workload}-{time.strftime('%Y%m%d-%H%M%S')}"
-    workload_ref = _frozen_workload_ref(target, base_commit, contract_path, stage)
+    workload_ref = _frozen_workload_ref(
+        target,
+        base_commit,
+        contract_path,
+        stage,
+        alignment_receipt,
+    )
     config = {
-        "schema_version": 10,
+        "schema_version": 11,
         "run_id": run_id,
         "workload": workload,
         "contract_path": str(contract_path),
@@ -1389,16 +1482,25 @@ def command_run(arguments: argparse.Namespace) -> int:
         "max_results": concurrency_receipt["max_results"],
         "report_path": concurrency_receipt["report_path"],
     }
-    try:
-        run_dir.mkdir(parents=True, exist_ok=False)
-        Path(config["evidence_root"]).mkdir(parents=True)
-        _materialize_contract(config)
-        _qualify_contract(config, stage)
-        _atomic_json(_config_path(workload), config)
-        _snapshot_checkpoint(config, "initial")
-    except Exception:
-        shutil.rmtree(run_dir, ignore_errors=True)
-        raise
+    with tempfile.TemporaryDirectory(prefix="oxide-contract-admission-") as raw:
+        admission_root = Path(raw)
+        admission = copy.deepcopy(config)
+        admission["run_dir"] = str(admission_root)
+        admission["evidence_root"] = str(admission_root / "evidence" / "checks")
+        admission["contract_root"] = str(admission_root / "frozen-contract")
+        Path(admission["evidence_root"]).mkdir(parents=True)
+        _materialize_contract(admission)
+        _qualify_contract(admission, stage)
+        config["workload_ref"] = admission["workload_ref"]
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            shutil.copytree(admission["contract_root"], config["contract_root"])
+            shutil.copytree(admission["evidence_root"], config["evidence_root"])
+            _atomic_json(_config_path(workload), config)
+            _snapshot_checkpoint(config, "initial")
+        except Exception:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise
     return _start(config, arguments.foreground)
 
 
@@ -2457,6 +2559,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--foreground", action="store_true")
     run.set_defaults(handler=command_run)
+    approval = commands.add_parser(
+        "approve-contract",
+        help="approve one agent-confirmed natural-language specification and generated contract",
+    )
+    approval.add_argument("--target", default=str(Path.cwd()))
+    approval.add_argument("--contract", default="verification/contract.toml")
+    approval.add_argument(
+        "--agent",
+        required=True,
+        help="identity of the contract-generation agent attesting semantic fidelity",
+    )
+    approval.add_argument(
+        "--approve",
+        action="store_true",
+        help="explicitly approve the current committed specification version",
+    )
+    approval.set_defaults(handler=command_approve_contract)
     concurrency = commands.add_parser("validate-concurrency")
     concurrency.add_argument("--workers", type=int, default=7)
     concurrency.add_argument("--rounds", type=int, default=6)

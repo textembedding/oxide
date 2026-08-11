@@ -12,14 +12,23 @@ Oxide is a meta-harness for coordinating Codex agents in parallel. It compiles
 natural-language specifications into executable contracts for implementation,
 review, and formal verification.
 
+Before admission, a contract-generation agent must trace every generated goal,
+task, and acceptance check to the specification. It may not guess through an
+ambiguity or invent missing success criteria. Instead, it proposes concrete prose
+changes; only user-approved changes are committed as a new specification version,
+and the contract is regenerated from that exact version.
+
 ```text
- human-written specifications
+ human-written specification <---- approved revisions ----+
+              |                                           |
+              v                                           |
+ contract-generation agent ---- ambiguity or gap ---------+
               |
               v
-       Oxide contract generation
+ traced executable contract
               |
               v
- executable verification contract
+ agent attestation + user approval + mechanical qualification
               |
               v
  +-----------------------------------------------------------+
@@ -46,9 +55,18 @@ review, and formal verification.
                   newly unblocked work
 ```
 
-The contract defines tasks and their dependencies. The scheduler gives each idle
-worker the highest-value ready assignment. With no fixed role pools,
-implementation, review, and proof work can proceed concurrently.
+The alignment receipt binds the approved specification commit, its exact files,
+the regenerated contract, every semantic citation, the contract-generation
+agent’s contractibility attestation, and the user’s approval. Any specification
+or contract change invalidates it. Mechanical derivations may add dependency,
+classification, evidence, and recovery constraints, but may not change program
+behavior or success semantics.
+
+Only after alignment and isolated mechanical qualification does Oxide create run
+state or start the journal and workers. The contract defines tasks and their
+dependencies. The scheduler gives each idle worker the highest-value ready
+assignment. With no fixed role pools, implementation, review, and proof work can
+proceed concurrently.
 
 Publishing freezes an immutable Git candidate, but does not expose it to the
 swarm immediately. Oxide first runs its deterministic policy against that exact
@@ -121,6 +139,7 @@ my-rust-product/
 ├── src/ or crates/
 └── verification/
     ├── contract.toml
+    ├── alignment.json
     ├── manifest.toml
     ├── toolchain.lock.toml
     ├── contracts/
@@ -135,6 +154,10 @@ closure, classifies production and proof roots, defines an acyclic implementatio
 graph, and assigns formal or supplementary checks to coherent candidates. Oxide
 constructs formal Verus commands itself, so a candidate cannot redefine the judge
 that accepts it.
+
+`verification/alignment.json` is a generated, machine-readable approval receipt;
+it is not another semantic specification. The Markdown files cited by the
+contract remain the sole human-readable authority for product behavior.
 
 At run creation, Oxide freezes the target commit, contract and immutable closure,
 verification-engine digest, execution policy, journal capacity, qualification
@@ -181,6 +204,18 @@ Before a run, qualify the journal backend under real multiprocess contention:
 
 ```bash
 ./oxide harness validate-concurrency --workers 8 --rounds 6
+```
+
+After the contract-generation agent and user agree on the committed specification
+and generated contract, record that exact approval and commit its receipt:
+
+```bash
+./oxide harness approve-contract \
+  --target /path/to/my-rust-product \
+  --agent "contract-generation agent" \
+  --approve
+git -C /path/to/my-rust-product add verification/alignment.json
+git -C /path/to/my-rust-product commit -m "Approve generated verification contract"
 ```
 
 Then launch against a target Rust project:

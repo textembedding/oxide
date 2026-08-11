@@ -15,6 +15,12 @@ class ContractError(RuntimeError):
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _VERUS_OPERATIONS = {"proof", "gate", "composition"}
+_ALIGNMENT_GAPS = (
+    "ambiguities",
+    "missing_acceptance_criteria",
+    "unsupported_assumptions",
+    "semantic_gaps",
+)
 
 
 def _relative_path(value: object, field: str) -> str:
@@ -36,7 +42,43 @@ def _string_list(value: object, field: str, *, nonempty: bool = False) -> list[s
     return list(value)
 
 
-def _check(value: object, ordinal: int, task_id: str) -> dict[str, Any]:
+def _source_refs(
+    value: object,
+    field: str,
+    specifications: set[str],
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ContractError(f"{field} must be a nonempty list of specification citations")
+    normalized: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for ordinal, raw in enumerate(value, 1):
+        if not isinstance(raw, dict) or set(raw) != {"specification", "anchor"}:
+            raise ContractError(f"{field}[{ordinal}] must contain exactly specification and anchor")
+        specification = _relative_path(raw.get("specification"), f"{field}[{ordinal}]")
+        anchor = raw.get("anchor")
+        if specification not in specifications:
+            raise ContractError(f"{field}[{ordinal}] cites an undeclared specification")
+        if (
+            not isinstance(anchor, str)
+            or not anchor.strip()
+            or len(anchor.encode("utf-8")) > 512
+            or any(character in anchor for character in "\x00\r")
+        ):
+            raise ContractError(f"{field}[{ordinal}].anchor is malformed")
+        identity = (specification, anchor)
+        if identity in identities:
+            raise ContractError(f"{field} contains duplicate citations")
+        identities.add(identity)
+        normalized.append({"specification": specification, "anchor": anchor})
+    return normalized
+
+
+def _check(
+    value: object,
+    ordinal: int,
+    task_id: str,
+    specifications: set[str],
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError(f"task {task_id} check {ordinal} must be a table")
     check = dict(value)
@@ -53,6 +95,7 @@ def _check(value: object, ordinal: int, task_id: str) -> dict[str, Any]:
         "environment",
         "artifacts",
         "evidence_slot",
+        "sources",
     }
     allowed = common | (
         {"command", "receipt_required"} if driver == "command" else {"operation", "root"}
@@ -90,6 +133,11 @@ def _check(value: object, ordinal: int, task_id: str) -> dict[str, Any]:
             _relative_path(item, f"task {task_id} check {check_id}.artifacts") for item in artifacts
         ],
         "evidence_slot": evidence_slot,
+        "sources": _source_refs(
+            check.get("sources"),
+            f"task {task_id} check {check_id}.sources",
+            specifications,
+        ),
     }
     if driver == "command":
         command = check.get("command")
@@ -124,7 +172,7 @@ def validate_contract(
     if not isinstance(value, dict):
         raise ContractError("verification contract must be a TOML table")
     contract = dict(value)
-    if contract.get("schema") != 2:
+    if contract.get("schema") != 3:
         raise ContractError("unsupported verification contract schema")
     identifier = contract.get("id")
     if not isinstance(identifier, str) or not _SAFE_ID.fullmatch(identifier):
@@ -147,6 +195,64 @@ def validate_contract(
             contract.get("immutable_paths"), "contract.immutable_paths", nonempty=True
         )
     ]
+    alignment = contract.get("alignment")
+    if not isinstance(alignment, dict):
+        raise ContractError("contract.alignment must be a table")
+    allowed_alignment = {
+        "specifications",
+        "receipt",
+        "contractible",
+        "goal_sources",
+        "proposed_revisions",
+        *_ALIGNMENT_GAPS,
+    }
+    unexpected_alignment = set(alignment) - allowed_alignment
+    if unexpected_alignment:
+        raise ContractError(
+            f"contract.alignment has unsupported fields: {sorted(unexpected_alignment)}"
+        )
+    specifications = [
+        _relative_path(item, "contract.alignment.specifications")
+        for item in _string_list(
+            alignment.get("specifications"),
+            "contract.alignment.specifications",
+            nonempty=True,
+        )
+    ]
+    if any(Path(path).suffix.lower() != ".md" for path in specifications):
+        raise ContractError("contract.alignment specifications must be Markdown files")
+    specification_set = set(specifications)
+    receipt = _relative_path(alignment.get("receipt"), "contract.alignment.receipt")
+    if not receipt.startswith("verification/") or not receipt.endswith(".json"):
+        raise ContractError("contract.alignment.receipt must be a JSON file under verification/")
+    contractible = alignment.get("contractible")
+    if not isinstance(contractible, bool):
+        raise ContractError("contract.alignment.contractible must be boolean")
+    gaps = {
+        field: _string_list(alignment.get(field, []), f"contract.alignment.{field}")
+        for field in _ALIGNMENT_GAPS
+    }
+    proposed_revisions = _string_list(
+        alignment.get("proposed_revisions", []),
+        "contract.alignment.proposed_revisions",
+    )
+    if any(gaps.values()) and not proposed_revisions:
+        raise ContractError("unresolved alignment gaps require concrete proposed revisions")
+    goal_sources = _source_refs(
+        alignment.get("goal_sources"),
+        "contract.alignment.goal_sources",
+        specification_set,
+    )
+
+    def covered(path: str) -> bool:
+        return any(
+            path == configured.rstrip("/") or path.startswith(configured.rstrip("/") + "/")
+            for configured in immutable_paths
+        )
+
+    for path in [*specifications, receipt]:
+        if not covered(path):
+            raise ContractError(f"contract.immutable_paths must freeze alignment input {path}")
     execution = contract.get("execution")
     if not isinstance(execution, dict):
         raise ContractError("contract.execution must be a table")
@@ -203,7 +309,15 @@ def validate_contract(
             or not raw_checks
         ):
             raise ContractError(f"task {task_id} is incomplete")
-        checks = [_check(item, index, task_id) for index, item in enumerate(raw_checks, 1)]
+        task_sources = _source_refs(
+            task.get("sources"),
+            f"task {task_id}.sources",
+            specification_set,
+        )
+        checks = [
+            _check(item, index, task_id, specification_set)
+            for index, item in enumerate(raw_checks, 1)
+        ]
         if len({item["id"] for item in checks}) != len(checks):
             raise ContractError(f"task {task_id} has duplicate check ids")
         normalized_tasks.append(
@@ -213,6 +327,7 @@ def validate_contract(
                 "prompt": prompt,
                 "depends_on": list(dependencies),
                 "checks": checks,
+                "sources": task_sources,
             }
         )
     dependencies = {task["id"]: set(task["depends_on"]) for task in normalized_tasks}
@@ -241,6 +356,55 @@ def validate_contract(
             "timeout_seconds": timeout,
             "infrastructure_exit_codes": list(infrastructure),
             "max_artifact_bytes": maximum,
+        },
+        "alignment": {
+            "specifications": specifications,
+            "receipt": receipt,
+            "contractible": contractible,
+            "gaps": gaps,
+            "proposed_revisions": proposed_revisions,
+            "semantic_units": [
+                {
+                    "id": "goal",
+                    "content": {"goal": goal},
+                    "sources": goal_sources,
+                },
+                *[
+                    {
+                        "id": f"task:{task['id']}",
+                        "content": {
+                            "title": task["title"],
+                            "prompt": task["prompt"],
+                            "depends_on": task["depends_on"],
+                        },
+                        "sources": task["sources"],
+                    }
+                    for task in normalized_tasks
+                ],
+                *[
+                    {
+                        "id": f"check:{task['id']}:{check['id']}",
+                        "content": {
+                            key: check[key]
+                            for key in (
+                                "driver",
+                                "command",
+                                "operation",
+                                "root",
+                                "working_directory",
+                                "environment",
+                                "artifacts",
+                                "evidence_slot",
+                                "receipt_required",
+                            )
+                            if key in check
+                        },
+                        "sources": check["sources"],
+                    }
+                    for task in normalized_tasks
+                    for check in task["checks"]
+                ],
+            ],
         },
         "contract": contract,
     }

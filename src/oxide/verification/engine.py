@@ -709,7 +709,7 @@ def validate_policy(
     contract_path: str = _DEFAULT_CONTRACT_PATH,
 ) -> tuple[dict[str, Any], dict[str, Any], list[Path]]:
     policy = read_toml(inside(contract_root, contract_path))
-    if policy.get("schema") != 2:
+    if policy.get("schema") != 3:
         raise VerificationError("unsupported verification policy schema")
     if policy.get("hash_algorithm") != "sha256":
         raise VerificationError("verification policy must use sha256 identities")

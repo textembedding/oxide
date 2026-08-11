@@ -16,7 +16,7 @@ from oxide.verification.engine import (
 
 def _contract() -> str:
     return """\
-schema = 2
+schema = 3
 id = "formal-rust"
 stage = "foundation"
 enabled = true
@@ -27,7 +27,7 @@ manifest = "verification/manifest.toml"
 toolchain_lock = "verification/toolchain.lock.toml"
 verification_spec = "docs/VERIFICATION.md"
 product_spec = "docs/PRODUCT.md"
-immutable_paths = ["verification/contract.toml", "verification/toolchain.lock.toml", "docs"]
+immutable_paths = ["verification/contract.toml", "verification/alignment.json", "verification/toolchain.lock.toml", "docs"]
 production_roots = ["src"]
 contract_roots = ["verification/contracts"]
 abstract_model_roots = ["verification/models"]
@@ -42,6 +42,17 @@ composition_module = "composition"
 composition_theorem = "composition"
 solver_rlimit = 10
 additional_forbidden_patterns = []
+
+[alignment]
+specifications = ["docs/PRODUCT.md", "docs/VERIFICATION.md"]
+receipt = "verification/alignment.json"
+contractible = true
+goal_sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+ambiguities = []
+missing_acceptance_criteria = []
+unsupported_assumptions = []
+semantic_gaps = []
+proposed_revisions = []
 
 [execution]
 evidence_policy = "exact-verus-context-v1"
@@ -59,12 +70,14 @@ id = "COMPONENT"
 title = "Implement one verified component"
 prompt = "Implement executable Rust, meaningful contracts, and its refinement proof."
 depends_on = []
+sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
 
 [[tasks.checks]]
 id = "component-proof"
 driver = "verus"
 operation = "proof"
 root = "verification/proofs/component.rs"
+sources = [{ specification = "docs/VERIFICATION.md", anchor = "Verification" }]
 """
 
 
@@ -101,11 +114,13 @@ tooling = []
 """,
         encoding="utf-8",
     )
+    (repository / "verification" / "alignment.json").write_text("{}\n", encoding="utf-8")
     (repository / "docs" / "PRODUCT.md").write_text("# Product\n", encoding="utf-8")
     (repository / "docs" / "VERIFICATION.md").write_text("# Verification\n", encoding="utf-8")
     frozen = root / "frozen"
     for relative in (
         "verification/contract.toml",
+        "verification/alignment.json",
         "verification/toolchain.lock.toml",
         "docs",
     ):
