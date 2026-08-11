@@ -107,6 +107,7 @@ class Worker:
         target_repo: str | Path,
         *,
         journal_socket: str | Path,
+        workflow_socket: str | Path | None = None,
         codex_argv: Sequence[str] = ("codex", "exec"),
         model: str | None = None,
         assignment_path: str | Path | None = None,
@@ -124,6 +125,7 @@ class Worker:
         self.target_branch = target_branch
         self.target_repo = Path(target_repo)
         self.journal_socket = str(journal_socket)
+        self.workflow_socket = str(workflow_socket) if workflow_socket else None
         self.codex_argv = list(codex_argv)
         self.model = model
         self.assignment_path = Path(assignment_path) if assignment_path else None
@@ -185,6 +187,8 @@ class Worker:
             "OXIDE_RUN_CONFIG",
             "OXIDE_RUN_EPOCH",
         ]
+        if self.workflow_socket:
+            forwarded.append("OXIDE_WORKFLOW_SOCKET")
         writable = [
             str((self.repository / ".git").resolve()),
             str((self.target_repo / ".git").resolve()),
@@ -554,6 +558,8 @@ class Worker:
                 "OXIDE_RUN_EPOCH": str(self.epoch),
             }
         )
+        if self.workflow_socket:
+            environment["OXIDE_WORKFLOW_SOCKET"] = self.workflow_socket
         process = subprocess.Popen(
             argv,
             cwd=self.repository,

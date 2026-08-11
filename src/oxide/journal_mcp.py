@@ -6,6 +6,7 @@ from typing import Any, TextIO
 
 from .journal_backend import JournalError, connect_journal
 from .workflow import WorkflowClient, WorkflowError
+from .workflow_transport import WorkflowProjectionClient
 from .yaml_payload import YamlPayloadError, dump_yaml, load_single_string_field
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -91,9 +92,14 @@ class JournalMcpServer:
             config = _load_config(json.loads(config_path.read_text(encoding="utf-8"))["workload"])
             if int(_environment("OXIDE_RUN_EPOCH")) != int(config["epoch"]):
                 raise JournalError("worker run epoch is stale")
-            client = _workflow_client(
-                config,
-                connect_journal(Path(_environment("OXIDE_JOURNAL_SOCKET"))),
+            projection_socket = os.environ.get("OXIDE_WORKFLOW_SOCKET")
+            client = (
+                WorkflowProjectionClient(projection_socket)
+                if projection_socket
+                else _workflow_client(
+                    config,
+                    connect_journal(Path(_environment("OXIDE_JOURNAL_SOCKET"))),
+                )
             )
         self.client = client
         self.run_id = run_id or _environment("OXIDE_RUN_ID")

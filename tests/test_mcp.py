@@ -6,6 +6,11 @@ from pathlib import Path
 from oxide.journal import JournalClient, serve_in_thread
 from oxide.journal_mcp import PROTOCOL_VERSION, JournalMcpServer
 from oxide.workflow import WorkflowClient
+from oxide.workflow_transport import (
+    SynchronizedWorkflowClient,
+    WorkflowProjectionClient,
+    serve_projection_in_thread,
+)
 
 STAGE = {
     "required_reviews": 3,
@@ -86,6 +91,43 @@ def test_mcp_exposes_only_add_and_search(monkeypatch, tmp_path: Path) -> None:
     service.shutdown()
     service.server_close()
     thread.join(timeout=5)
+
+
+def test_mcp_can_reuse_worker_hosts_warm_projection(tmp_path: Path) -> None:
+    journal_socket = Path("/tmp") / f"oxide-test-{secrets.token_hex(8)}.sock"
+    projection_socket = Path("/tmp") / f"oxide-projection-{secrets.token_hex(8)}.sock"
+    journal, journal_thread = serve_in_thread(tmp_path / "journal.sqlite3", journal_socket)
+    projection = None
+    projection_thread = None
+    try:
+        client = WorkflowClient(JournalClient(journal_socket), STAGE)
+        client.bootstrap("run")
+        shared = SynchronizedWorkflowClient(client)
+        projection, projection_thread = serve_projection_in_thread(projection_socket, shared)
+        server = JournalMcpServer(WorkflowProjectionClient(projection_socket), "run", "worker-0")
+
+        searched = _request(
+            server,
+            1,
+            "tools/call",
+            {"name": "journal_search", "arguments": {"yaml": "query: queue:ready"}},
+        )
+        assert 'task_id: "A"' in searched["result"]["content"][0]["text"]
+        added = _request(
+            server,
+            2,
+            "tools/call",
+            {"name": "journal_add", "arguments": {"yaml": "text: claim: task:A"}},
+        )
+        assert 'claim: "accepted"' in added["result"]["content"][0]["text"]
+    finally:
+        if projection is not None and projection_thread is not None:
+            projection.shutdown()
+            projection.server_close()
+            projection_thread.join(timeout=5)
+        journal.shutdown()
+        journal.server_close()
+        journal_thread.join(timeout=5)
 
 
 def test_mcp_keeps_semantic_extras_visible_for_multi_hop_search(tmp_path: Path) -> None:

@@ -1311,18 +1311,26 @@ def command_launch(arguments: argparse.Namespace) -> int:
 
 
 def command_worker(arguments: argparse.Namespace) -> int:
+    from .workflow_transport import SynchronizedWorkflowClient, serve_projection_in_thread
+
     config = _load_config(arguments.workload)
     _validate_bound_concurrency(config)
     _wait_socket(Path(config["socket"]))
     log = _Log(Path(config["run_dir"]) / "logs" / f"{arguments.slot}.log")
+    shared_client = SynchronizedWorkflowClient(
+        _workflow_client(config, connect_journal(config["socket"]))
+    )
+    projection_socket = Path(config["run_dir"]) / "workflow" / f"{arguments.slot}.sock"
+    projection, projection_thread = serve_projection_in_thread(projection_socket, shared_client)
     worker = Worker(
-        _workflow_client(config, connect_journal(config["socket"])),
+        shared_client,
         config["run_id"],
         arguments.slot,
         Path(config["run_dir"]) / "workers" / arguments.slot,
         config["target_branch"],
         config["target_repo"],
         journal_socket=config["socket"],
+        workflow_socket=projection_socket,
         model=config.get("model"),
         assignment_path=Path(config["run_dir"]) / "assignments" / f"{arguments.slot}.txt",
         run_config=_config_path(arguments.workload),
@@ -1339,9 +1347,14 @@ def command_worker(arguments: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, stop_worker)
     signal.signal(signal.SIGINT, stop_worker)
-    state = worker.run()
-    log(f"slot stopped: {state}")
-    return 0 if state in {"paused", "publishing", "complete", "stopped"} else 1
+    try:
+        state = worker.run()
+        log(f"slot stopped: {state}")
+        return 0 if state in {"paused", "publishing", "complete", "stopped"} else 1
+    finally:
+        projection.shutdown()
+        projection.server_close()
+        projection_thread.join(timeout=5)
 
 
 def command_pause(arguments: argparse.Namespace) -> int:

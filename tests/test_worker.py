@@ -95,6 +95,7 @@ print(json.dumps({'type':'turn.completed'}))
         "main",
         tmp_path,
         journal_socket=tmp_path / "journal.sock",
+        workflow_socket=tmp_path / "workflow.sock",
         codex_argv=(sys.executable, str(fake)),
         log=logs.append,
     )
@@ -113,6 +114,7 @@ print(json.dumps({'type':'turn.completed'}))
         "OXIDE_RUN_EPOCH",
         "OXIDE_RUN_ID",
         "OXIDE_WORKER_ID",
+        "OXIDE_WORKFLOW_SOCKET",
     }
     prompt = record["argv"][-1]
     assert "queue:ready" in prompt
