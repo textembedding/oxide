@@ -50,9 +50,15 @@ The contract defines tasks and their dependencies. The scheduler gives each idle
 worker the highest-value ready assignment. With no fixed role pools,
 implementation, review, and proof work can proceed concurrently.
 
-Publishing an immutable Git candidate makes its reviews and unsatisfied checks
-independently claimable. Evidence is bound to the exact candidate and check, then
-reused across roles. Changing the candidate tree creates a new requirement.
+Publishing freezes an immutable Git candidate, but does not expose it to the
+swarm immediately. Oxide first runs its deterministic policy against that exact
+tree. This rejects unclassified files, proof escapes, stale manifests, changed
+judge inputs, and other structurally incomplete candidates before reviews or
+acceptance checks can be claimed.
+
+After admission, reviews and unsatisfied checks become independently claimable.
+Evidence is bound to the exact candidate and check, then reused across roles.
+Changing the candidate tree creates a new requirement.
 
 Once every required review and check passes, Oxide constructs the exact tree that
 would be merged and runs the whole-tree gate against it. A successful merge

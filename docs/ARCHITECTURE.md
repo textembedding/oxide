@@ -108,6 +108,7 @@ The authoritative lifecycle is:
 ```text
 implementation and proof development
     → immutable candidate commit and tree
+    → exact-tree deterministic policy qualification
     → concurrent proof execution and independent review
     → accepted candidate
     → exact prospective authoritative tree
@@ -115,9 +116,27 @@ implementation and proof development
     → authoritative Git frontier
 ```
 
-Candidate publication MUST make every independent review slot and every
-unsatisfied evidence slot claimable at the same time. The author is not required
-to serially execute the acceptance list before publication.
+Candidate publication MUST first enter a non-claimable qualification state. Oxide
+MUST run the frozen deterministic policy against that exact candidate commit and
+tree. The resulting integrity-protected receipt MUST bind the run, epoch, frozen
+contract and judge, task, generation, candidate base/commit/tree, operation, and
+qualified execution environment. Only a passing receipt may make independent
+review slots and unsatisfied evidence slots claimable. A product-policy failure
+returns the task to revision with a bounded diagnostic; an infrastructure failure
+blocks it for explicit recovery. Neither outcome may fan out review or check work.
+
+Policy qualification MUST cover every governed production, contract,
+abstract-model, proof, trusted-adapter, fixture, fuzz, and tooling path through
+the applicable classification or closure rule. Every production or adapter
+source and every file under a non-authoritative fixture, fuzz, or tooling root
+MUST have exactly one valid coverage-manifest owner. Models and proof sources MUST
+satisfy the declared proof-closure rules. Merely placing a file below a configured
+root satisfies none of these obligations. These invariants apply to every
+candidate, including an otherwise honest partial implementation.
+
+After qualification, candidate publication makes every independent review slot
+and every unsatisfied evidence slot claimable at the same time. The author is not
+required to serially execute the acceptance list before publication.
 
 Review and proof execution answer different questions. Review evaluates
 product-model fidelity, implementation-proof connection, non-vacuity,

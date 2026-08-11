@@ -462,6 +462,9 @@ def test_worker_prompt_allows_task_tools_but_only_two_journal_operations(tmp_pat
     assert "do not run the returned acceptance list" in prompt
     assert "do not mechanically rerun the declared command list" in prompt
     assert "executed directly by the qualified harness process" in prompt
+    assert "placement under a configured root is not itself classification" in prompt
+    assert "declared proof-closure rules" in prompt
+    assert "deterministic policy against that exact tree" in prompt
     assert "`specification` asks whether the product model" in prompt
     assert "`adversarial` asks whether the production implementation" in prompt
     assert "`integration` asks whether concurrency, persistence, recovery" in prompt

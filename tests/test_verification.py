@@ -153,6 +153,35 @@ def test_harness_policy_accepts_an_honest_empty_program_and_rejects_proof_escape
         validate_policy(repository, frozen)
 
 
+def test_policy_requires_exact_manifest_ownership_for_every_fixture(tmp_path: Path) -> None:
+    repository, frozen = _repository(tmp_path)
+    fixture = repository / "verification" / "fixtures" / "proof-policy" / "case.toml"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text('case = "forbidden escape"\n', encoding="utf-8")
+
+    with pytest.raises(
+        VerificationError,
+        match=r"unclassified non-authoritative tooling: verification/fixtures/proof-policy/case.toml",
+    ):
+        validate_policy(repository, frozen)
+
+    manifest = repository / "verification" / "manifest.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "tooling = []",
+            """\
+[[tooling]]
+id = "proof-policy-fixtures"
+authority = "none"
+paths = ["verification/fixtures/proof-policy"]
+""",
+        ),
+        encoding="utf-8",
+    )
+    _policy, state, _closure = validate_policy(repository, frozen)
+    assert state["manifest"]["tooling"][0]["id"] == "proof-policy-fixtures"
+
+
 def test_frozen_product_and_verification_specs_are_judge_inputs(tmp_path: Path) -> None:
     repository, frozen = _repository(tmp_path)
     (repository / "docs" / "PRODUCT.md").write_text("# Weaker product\n", encoding="utf-8")

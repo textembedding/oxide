@@ -33,6 +33,8 @@ _VERIFY_RESULT = re.compile(
 )
 _BLOCKED = re.compile(r"^(blocked|blocker): task:([^\s:]+)$")
 _RECLAIM = re.compile(r"^control: reclaim worker:([^\s:]+)$")
+_RETRY_BLOCKED = re.compile(r"^control: retry task:([^\s:]+)$")
+_CANDIDATE_QUALIFICATION = re.compile(r"^control: candidate-(qualified|rejected)$")
 _REVIEW_ROLES = ("specification", "adversarial", "integration")
 _REPLAY_FANOUT = "01"
 _REPLAY_WIDTH = 64
@@ -262,6 +264,30 @@ class WorkflowReducer:
                 )
                 view.accept(record, {"saved": True, "state": view.state})
             return
+        if match := _RETRY_BLOCKED.fullmatch(first):
+            task = self._task(view, match.group(1))
+            if author != "launcher" or view.state != "paused":
+                view.reject(record, "only the paused launcher may retry a blocked task")
+            elif task is None or task["state"] != "blocked":
+                view.reject(record, "task is not blocked")
+            else:
+                state = "revision" if task["generation"] else "pending"
+                task.update(
+                    state=state,
+                    worker_id=None,
+                    merge_worker_id=None,
+                    checkpoint=False,
+                    handoff=False,
+                    last_error=None,
+                )
+                view.accept(
+                    record,
+                    {"saved": True, "retried": task["task_id"], "state": state},
+                )
+            return
+        if match := _CANDIDATE_QUALIFICATION.fullmatch(first):
+            self._candidate_qualification(view, record, match.group(1))
+            return
         if first == "control: merged":
             self._merge_result(view, record, failed=False)
             return
@@ -462,6 +488,7 @@ class WorkflowReducer:
                     "merged_sha": None,
                     "prospective_tree": None,
                     "prospective_receipt": None,
+                    "qualification_receipt": None,
                     "last_error": None,
                     "checkpoint": False,
                     "handoff": False,
@@ -827,9 +854,81 @@ class WorkflowReducer:
             )
             return
         generation = int(task["generation"]) + 1
+        task.update(
+            state="qualifying",
+            worker_id=None,
+            base_sha=base,
+            head_sha=head,
+            tree_sha=tree,
+            generation=generation,
+            merge_worker_id=None,
+            last_error=None,
+            qualification_receipt=None,
+            reviews=[],
+        )
+        view.accept(
+            record,
+            {
+                "saved": True,
+                "candidate": "proposed",
+                "task_id": task["task_id"],
+                "generation": generation,
+                "head": head,
+            },
+        )
+
+    def _candidate_qualification(
+        self,
+        view: Projection,
+        record: dict[str, Any],
+        decision: str,
+    ) -> None:
+        text = _record_text(record)
+        task = self._task(view, _line_value(text, "task") or "")
+        generation = _line_value(text, "generation") or ""
+        head = _line_value(text, "head") or ""
+        tree = _line_value(text, "tree") or ""
+        receipt = _line_value(text, "receipt") or ""
+        exact = (
+            task is not None
+            and task["state"] == "qualifying"
+            and generation == str(task["generation"])
+            and head == task["head_sha"]
+            and tree == task["tree_sha"]
+            and _SHA256.fullmatch(receipt) is not None
+        )
+        if record["author"] != "launcher" or not exact:
+            view.reject(record, "candidate qualification is not bound to the exact proposal")
+            return
+        assert task is not None
+        if decision == "rejected":
+            reason = _line_value(text, "reason")
+            kind = _line_value(text, "kind")
+            if kind not in {"product", "infrastructure"} or not reason:
+                view.reject(record, "candidate rejection requires a classified reason")
+                return
+            task.update(
+                state="revision" if kind == "product" else "blocked",
+                worker_id=None,
+                merge_worker_id=None,
+                last_error=str(reason)[:2000],
+                qualification_receipt=receipt,
+                reviews=[],
+            )
+            view.accept(
+                record,
+                {
+                    "saved": True,
+                    "candidate": "rejected",
+                    "task_id": task["task_id"],
+                    "generation": task["generation"],
+                    "kind": kind,
+                },
+            )
+            return
         task["reviews"] = [
             {
-                "generation": generation,
+                "generation": task["generation"],
                 "ordinal": ordinal,
                 "role": (
                     _REVIEW_ROLES[ordinal - 1]
@@ -844,21 +943,16 @@ class WorkflowReducer:
         ]
         task.update(
             state="reviewing",
-            worker_id=None,
-            base_sha=base,
-            head_sha=head,
-            tree_sha=tree,
-            generation=generation,
-            merge_worker_id=None,
             last_error=None,
+            qualification_receipt=receipt,
         )
         view.accept(
             record,
             {
                 "saved": True,
-                "pr": "opened",
+                "candidate": "qualified",
                 "task_id": task["task_id"],
-                "generation": generation,
+                "generation": task["generation"],
                 "head": head,
                 "required_reviews": view.required_reviews,
             },
@@ -1325,6 +1419,7 @@ class WorkflowReducer:
             merged_sha=task["merged_sha"],
             prospective_tree=task["prospective_tree"],
             prospective_receipt=task["prospective_receipt"],
+            qualification_receipt=task["qualification_receipt"],
             approvals=approvals,
             required_reviews=view.required_reviews,
             reviews=[dict(item) for item in task["reviews"]],

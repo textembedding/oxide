@@ -741,6 +741,38 @@ def test_following_queue_appends_new_records_without_redrawing(monkeypatch, caps
     assert sum(delays[1:]) == pytest.approx(1.0)
 
 
+def test_following_queue_keeps_cursor_across_empty_incremental_poll(monkeypatch, capsys) -> None:
+    first = {
+        "state": "running",
+        "run_id": "web-app-test",
+        "entries": [{"record_id": 1, "author": "worker-0", "accepted": True, "body": "one"}],
+    }
+    quiet = {"state": "running", "run_id": "web-app-test", "entries": []}
+    final = {
+        "state": "complete",
+        "run_id": "web-app-test",
+        "entries": [{"record_id": 2, "author": "launcher", "accepted": True, "body": "two"}],
+    }
+    snapshots = iter((first, quiet, final))
+    cursors: list[int | None] = []
+
+    def snapshot(_config, cursor=None):
+        cursors.append(cursor)
+        return next(snapshots)
+
+    monkeypatch.setattr(cli, "_load_config", lambda _workload: {})
+    monkeypatch.setattr(cli, "_queue_snapshot", snapshot)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+    arguments = cli.argparse.Namespace(workload="web-app", color="never", no_follow=False)
+
+    assert cli.command_observe_queue(arguments) == 0
+    output = capsys.readouterr().out
+    assert cursors == [None, 1, 1]
+    assert output.count("Oxide JOURNAL") == 1
+    assert output.count("JOURNAL #1") == 1
+    assert output.count("JOURNAL #2") == 1
+
+
 def test_queue_observer_reconnects_and_resets_cursor_after_epoch_change(
     monkeypatch, capsys
 ) -> None:
@@ -864,10 +896,12 @@ def test_macos_commands_and_controls_remain_available() -> None:
     )
     assert local.handler is cli.command_verify_contract
     assert local.operation == "proof"
-    for command in ("pause", "resume", "reset", "observe", "observe-queue", "status"):
+    for command in ("pause", "resume", "reset", "retry", "observe", "observe-queue", "status"):
         arguments = ["harness", command, "--workload", "web-app"]
         if command == "observe":
             arguments += ["--slot", "worker-0"]
+        elif command == "retry":
+            arguments += ["--task", "SEARCH-API"]
         parsed = parser.parse_args(arguments)
         assert parsed.workload == "web-app"
     checkpoint = parser.parse_args(
@@ -886,7 +920,7 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
     (run_dir / "run.json").write_text(
         json.dumps(
             {
-                "schema_version": 9,
+                "schema_version": 10,
                 "run_id": "web-app-20260808-120000",
                 "workload": "web-app",
                 "run_dir": "/old/checkout/.oxide/runs/web-app",
@@ -906,6 +940,7 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
                 "workload_ref": {
                     "schema": "OxideVerificationContractRefV1",
                     "contract_path": "verification/contract.toml",
+                    "verification": {"candidate_operation": "policy"},
                 },
                 "replay_root": "2" * 32,
                 "epoch": 0,
@@ -981,6 +1016,120 @@ def test_frozen_repository_workload_rejects_later_specification_commit(tmp_path:
         cli._load_frozen_stage(config)
 
 
+def test_exact_candidate_policy_failure_returns_one_diagnostic_revision(
+    monkeypatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(target), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (target / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    (target / "verification" / "fixtures").mkdir(parents=True)
+    (target / "verification" / "fixtures" / "case.toml").write_text(
+        'case = "unclassified"\n', encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(target), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "candidate"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD^{tree}"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    branch = subprocess.run(
+        ["git", "-C", str(target), "symbolic-ref", "--short", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    observed: dict[str, object] = {}
+
+    def qualified_check(_config, repository, check, requirement, **identity):
+        observed["head"] = cli._git(repository, "rev-parse", "HEAD")
+        observed["tree"] = cli._git(repository, "rev-parse", "HEAD^{tree}")
+        observed["operation"] = check["operation"]
+        observed["requirement"] = requirement
+        observed["identity"] = identity
+        return {"result": "product_failure"}, f"sha256:{'e' * 64}"
+
+    monkeypatch.setattr(cli, "_run_qualified_check", qualified_check)
+    monkeypatch.setattr(
+        cli,
+        "artifact_excerpt",
+        lambda *_args, **_kwargs: (
+            "verification policy failure: unclassified non-authoritative tooling: "
+            "verification/fixtures/case.toml"
+        ),
+    )
+
+    class Client:
+        text = ""
+
+        def add(self, namespace, author, text):
+            assert namespace == "stage0-20260810-120000"
+            assert author == "launcher"
+            self.text = text
+            return {"candidate": "rejected"}
+
+    client = Client()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    config = {
+        "target_repo": str(target),
+        "run_dir": str(run_dir),
+        "run_id": "stage0-20260810-120000",
+        "epoch": 0,
+        "evidence_root": str(run_dir / "evidence"),
+        "workload_ref": {
+            "base_commit": base,
+            "contract_path": "verification/contract.toml",
+            "contract_blob": "a" * 40,
+            "contract_closure_sha256": f"sha256:{'b' * 64}",
+            "verification_engine_sha256": f"sha256:{'c' * 64}",
+            "verification": {
+                "candidate_operation": "policy",
+                "qualification_receipt_sha256": f"sha256:{'d' * 64}",
+                "execution_environment": {"host": "test"},
+            },
+        },
+    }
+    task = {
+        "root_task_id": "PROOF-CONVENTIONS",
+        "branch": branch,
+        "generation": 1,
+        "base_sha": base,
+        "head_sha": head,
+        "tree_sha": tree,
+    }
+
+    cli._qualify_candidate(config, client, task, lambda _line: None)  # type: ignore[arg-type]
+
+    assert observed["head"] == head
+    assert observed["tree"] == tree
+    assert observed["operation"] == "policy"
+    assert "control: candidate-rejected" in client.text
+    assert "kind: product" in client.text
+    assert "unclassified non-authoritative tooling" in client.text
+
+
 def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
     monkeypatch, request, tmp_path: Path
 ) -> None:
@@ -1021,7 +1170,7 @@ def test_destructive_rewind_restores_sequence_and_frontier_then_advances_epoch(
     reference = cli._frozen_workload_ref(target, base, contract, stage)
     run_id = "rewind-20260809-120000"
     config = {
-        "schema_version": 9,
+        "schema_version": 10,
         "run_id": run_id,
         "workload": "rewind",
         "target_repo": str(target),
@@ -1236,7 +1385,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    assert config["schema_version"] == 9
+    assert config["schema_version"] == 10
     assert (config["min_exact"], config["max_results"]) == (5, 10)
     assert config["epoch"] == 0
     workload_ref = config["workload_ref"]
@@ -1266,6 +1415,7 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     ]
     assert workload_ref["contract_closure_sha256"].startswith("sha256:")
     assert workload_ref["verification_engine_sha256"].startswith("sha256:")
+    assert workload_ref["verification"]["candidate_operation"] == "policy"
     assert workload_ref["harness_version"] == config["harness_version"]
     assert config["required_reviews"] == 3
     assert "integration_branch" not in config

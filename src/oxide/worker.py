@@ -13,6 +13,7 @@ from .evidence import (
     COMMAND_SHELL,
     EvidenceError,
     artifact_digest,
+    artifact_excerpt,
     begin_attempt,
     evidence_key,
     finish_attempt,
@@ -170,7 +171,7 @@ class Worker:
             "SEARCH returns one bounded union of exact and threshold-eligible semantic records. The configured exact floor preserves exact anchors when available, but one response is not necessarily exhaustive. Results are ordered only by journal sequence; semantic score never controls position. Use match_kind and stored routing metadata to distinguish exact records, and use returned task IDs, errors, hashes, decisions, components, or concepts for iterative follow-up searches. Absence from an ordinary natural-language search is not proof that no record exists.\n"
             f"1. Search `worker:{self.worker_id}`; the host normally preclaims. If empty, search `queue:ready`, rotate the complete ready list left by {ordinal} modulo its length, and journal_add exact claims until accepted.\n2. Orient only with records bound to the assignment: REVISION searches `review:<root_task_id>:<generation>` and `verify:<root_task_id>:<head_sha>`; INTERNAL REVIEW searches the exact assigned `head_sha` and any returned acceptance-result identities; MERGE searches `review:<root_task_id>:<generation>`. Never assume one bounded response exhausts assignment history; follow useful returned identifiers with more specific searches.\n"
             "3. Keep the shared truth current with substantive work records. Immediately after orientation or a new finding, before and after a material command or diagnostic, and after each durable edit, add `work-log: <claim identity after claim: >`, `phase: <oriented|diagnosed|editing|checking|check-result|ready>`, and one concise concrete `evidence:` fact. Never add timer, heartbeat, elapsed-time, or empty progress records. Re-search the exact claim after each work-log.\n4. Follow the assigned role. A fresh session may receive any role. Acceptance-check assignments are executed directly by the qualified harness process against the immutable candidate; they never require a model session.\n"
-            f"AUTHOR or REVISION\n- Inspect the repository specification directly with rg, file reads, and Git. Journal citations, discoveries, decisions, and evidence, never copied specification content.\n- Fetch origin. For a new candidate, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.\n- Diagnose, implement only the objective, and use targeted development diagnostics when useful, but do not run the returned acceptance list: publication creates shared candidate-bound check assignments. After each coherent durable edit, add `checkpoint: task:<root_task_id>` and a work-log. Commit and push the exact branch.\n- Re-search the claim, add `handoff: task:<root_task_id>` with candidate evidence, then add `open-pr: task:<root_task_id>` with exact `branch:`, `base:`, `head:`, `tree:` (from `git rev-parse HEAD^{{tree}}`), and `verified: true`. That flag attests immutable candidate publication, not acceptance-check success.\n- The deterministic judge and receipt schema are harness-owned. The target owns the frozen semantic contract, toolchain lock, formal artifacts, and coverage manifest. A candidate cannot change an immutable contract input or redefine the engine that judges it.\n- If an external capability is unavailable, journal `blocked: task:<root_task_id>` with the returned role, branch, generation, head, `verified: false`, and reason.\n"
+            f"AUTHOR or REVISION\n- Inspect the repository specification directly with rg, file reads, and Git. Journal citations, discoveries, decisions, and evidence, never copied specification content.\n- Fetch origin. For a new candidate, create the assigned branch at the returned base. For a revision, check it out and merge current `origin/{self.target_branch}` before editing. There is no integration branch.\n- Diagnose, implement only the objective, and use targeted development diagnostics when useful, but do not run the returned acceptance list: publication creates shared candidate-bound check assignments. When adding production, trusted-adapter, fixture, fuzz, or tooling files, update the coverage manifest exactly as required by the frozen policy; placement under a configured root is not itself classification. Models and proofs must satisfy the policy's declared proof-closure rules. After each coherent durable edit, add `checkpoint: task:<root_task_id>` and a work-log. Commit and push the exact branch.\n- Re-search the claim, add `handoff: task:<root_task_id>` with candidate evidence, then add `open-pr: task:<root_task_id>` with exact `branch:`, `base:`, `head:`, `tree:` (from `git rev-parse HEAD^{{tree}}`), and `verified: true`. This proposes an immutable candidate. The launcher runs the harness-owned deterministic policy against that exact tree before any review or acceptance check becomes ready.\n- The deterministic judge and receipt schema are harness-owned. The target owns the frozen semantic contract, toolchain lock, formal artifacts, and coverage manifest. A candidate cannot change an immutable contract input or redefine the engine that judges it.\n- If an external capability is unavailable, journal `blocked: task:<root_task_id>` with the returned role, branch, generation, head, `verified: false`, and reason.\n"
             "INTERNAL REVIEW\n- An accepted claim is final eligibility for that generation. Worker slots are reusable and every role starts a fresh context, so current or prior authorship does not exclude a slot. Work read-only at exact `head_sha`; inspect the diff and repository specification for correctness, completeness, maintainability, tests, architectural fit, omissions, weak assertions, unsafe shortcuts, and integration hazards.\n- Apply the returned `review_role` as your primary independent question: `specification` asks whether the product model covers intended success, failure, boundary, and reachable-state behavior; `adversarial` asks whether the production implementation is actually connected to meaningful, non-vacuous proof obligations; `integration` asks whether concurrency, persistence, recovery, unsafe code, source closure, assumptions, scalability, and the trusted boundary are sound. Do not substitute one question for another.\n- Consume terminal acceptance results listed or found through exact `verify:<root_task_id>:<head_sha>:<ordinal>` searches. Review is independent of check execution: do not mechanically rerun the declared command list. Targeted diagnostics may investigate a concern; claim an unsatisfied acceptance check only as a separate fresh assignment after review. Passing review cannot replace a required check result, and passing checks cannot replace review.\n- Re-search the review identity. On pass add `approve: review:<root_task_id>:<generation>:<review_ordinal>` with exact head, `verified: true`, and criterion-level evidence for the assigned review question. On defect use `challenge:` with the same identity, exact head, `verified: true`, and reason. Do not edit, commit, or push.\n"
             f"MERGE\n- Confirm the exact head, configured approval count, and shared acceptance results. Re-search the merge identity, then add `merge: task:<root_task_id>` with exact generation and head. The launcher verifies repository and prospective-tree invariants before merging to `{self.target_branch}`.\nDo not claim a second item. Both tools take one `yaml` argument containing exactly one string field: `query` for journal_search or `text` for journal_add.\n"
         )
@@ -234,8 +235,8 @@ class Worker:
             return 2
         return 0
 
-    @staticmethod
     def _verification_terminal(
+        self,
         item: dict,
         receipt: dict,
         receipt_digest: str,
@@ -255,10 +256,16 @@ class Worker:
                 f"{artifact_digest(receipt, 'stderr')}"
             )
         else:
+            diagnostic = (
+                artifact_excerpt(self.evidence_root, receipt, "stderr")
+                if self.evidence_root is not None
+                else ""
+            )
             detail = (
                 f"qualified command classified {result} with exit "
                 f"{receipt.get('exit_code')}; stdout {artifact_digest(receipt, 'stdout')}; "
                 f"stderr {artifact_digest(receipt, 'stderr')}"
+                + (f"; diagnostic: {diagnostic}" if diagnostic else "")
             )
         return "\n".join(
             (

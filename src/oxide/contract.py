@@ -234,6 +234,7 @@ def validate_contract(
         "verification": {
             "immutable_paths": immutable_paths,
             "qualification": ["toolchain", "policy"],
+            "candidate_operation": "policy",
             "prospective_operation": "gate",
             "prospective_receipt_required": True,
             "evidence_policy": evidence_policy,

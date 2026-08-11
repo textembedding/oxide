@@ -282,3 +282,32 @@ def artifact_digest(receipt: dict[str, Any], kind: str) -> str:
         if isinstance(artifact, dict) and artifact.get("kind") == kind:
             return str(artifact.get("sha256", ""))
     raise EvidenceError(f"receipt lacks {kind} artifact")
+
+
+def artifact_excerpt(
+    root: Path,
+    receipt: dict[str, Any],
+    kind: str,
+    *,
+    maximum_characters: int = 1600,
+) -> str:
+    """Return a bounded single-line excerpt from an integrity-checked stored artifact."""
+    if maximum_characters < 1:
+        raise EvidenceError("artifact excerpt limit must be positive")
+    for artifact in receipt.get("artifacts", []):
+        if not isinstance(artifact, dict) or artifact.get("kind") != kind:
+            continue
+        relative = artifact.get("path")
+        expected = artifact.get("sha256")
+        if artifact.get("stored") is not True or not isinstance(relative, str):
+            return ""
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root.resolve()) or not path.is_file():
+            raise EvidenceError(f"stored {kind} artifact is unavailable")
+        if not isinstance(expected, str) or sha256_file(path) != expected:
+            raise EvidenceError(f"stored {kind} artifact failed integrity validation")
+        rendered = " ".join(path.read_text(encoding="utf-8", errors="replace").split())
+        if len(rendered) <= maximum_characters:
+            return rendered
+        return "…" + rendered[-(maximum_characters - 1) :]
+    raise EvidenceError(f"receipt lacks {kind} artifact")

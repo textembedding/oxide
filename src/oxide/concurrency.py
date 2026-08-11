@@ -125,7 +125,7 @@ def _open_pr(client: WorkflowClient, namespace: str) -> None:
     work = client.add(namespace, "setup-author", "claim: task:A")["work"]
     client.add(namespace, "setup-author", "checkpoint: task:A\nsetup edit")
     client.add(namespace, "setup-author", "handoff: task:A\nsetup checks passed")
-    client.add(
+    proposed = client.add(
         namespace,
         "setup-author",
         "\n".join(
@@ -136,6 +136,20 @@ def _open_pr(client: WorkflowClient, namespace: str) -> None:
                 f"head: {2:040x}",
                 f"tree: {2:040x}",
                 "verified: true",
+            )
+        ),
+    )
+    client.add(
+        namespace,
+        "launcher",
+        "\n".join(
+            (
+                "control: candidate-qualified",
+                "task: A",
+                f"generation: {proposed['generation']}",
+                f"head: {2:040x}",
+                f"tree: {2:040x}",
+                f"receipt: sha256:{'a' * 64}",
             )
         ),
     )

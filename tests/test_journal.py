@@ -90,7 +90,7 @@ def _open_pr(
     claimed = client.add(run_id, worker, f"claim: task:{task_id}")["work"]
     client.add(run_id, worker, f"checkpoint: task:{task_id}\nimplementation saved")
     client.add(run_id, worker, f"handoff: task:{task_id}\nchecks passed")
-    return client.add(
+    proposed = client.add(
         run_id,
         worker,
         "\n".join(
@@ -101,6 +101,20 @@ def _open_pr(
                 f"head: {head:040x}",
                 f"tree: {head:040x}",
                 "verified: true",
+            )
+        ),
+    )
+    return client.add(
+        run_id,
+        "launcher",
+        "\n".join(
+            (
+                "control: candidate-qualified",
+                f"task: {task_id}",
+                f"generation: {proposed['generation']}",
+                f"head: {head:040x}",
+                f"tree: {head:040x}",
+                f"receipt: sha256:{'a' * 64}",
             )
         ),
     )
@@ -904,6 +918,19 @@ def test_terminal_blocker_activation_is_forward_only_and_parks_exact_revision(wo
     retried = client.add("run", "launcher", "control: resume")
     assert retried["state"] == "running"
     assert client.search("run", "task:A")[0]["state"] == "blocked"
+    with pytest.raises(WorkflowError, match="paused launcher"):
+        client.add("run", "worker-0", "control: retry task:A")
+    client.add("run", "launcher", "control: pause")
+    retried = client.add("run", "launcher", "control: retry task:A")
+    assert retried == {
+        "saved": True,
+        "retried": "A",
+        "state": "revision",
+        "record_id": retried["record_id"],
+    }
+    assert client.search("run", "task:A")[0]["state"] == "revision"
+    assert client.add("run", "launcher", "control: resume")["state"] == "running"
+    assert client.search("run", "queue:ready")[0]["root_task_id"] == "A"
     assert _exact_count(database, "run", "blocked: task:A") == 3
 
 
@@ -1021,7 +1048,7 @@ def test_published_candidate_exposes_shared_checks_and_reviews_concurrently(
         assert author["checks"] == []
         client.add("shared", "worker-0", "checkpoint: task:A\ncandidate committed")
         client.add("shared", "worker-0", "handoff: task:A\ncandidate pushed")
-        client.add(
+        proposed = client.add(
             "shared",
             "worker-0",
             "\n".join(
@@ -1036,6 +1063,23 @@ def test_published_candidate_exposes_shared_checks_and_reviews_concurrently(
             ),
         )
 
+        assert client.search("shared", "task:A")[0]["state"] == "qualifying"
+        ready = client.search("shared", "queue:ready")
+        assert not any(item["root_task_id"] == "A" for item in ready)
+        client.add(
+            "shared",
+            "launcher",
+            "\n".join(
+                (
+                    "control: candidate-qualified",
+                    "task: A",
+                    f"generation: {proposed['generation']}",
+                    f"head: {2:040x}",
+                    f"tree: {2:040x}",
+                    f"receipt: sha256:{'b' * 64}",
+                )
+            ),
+        )
         ready = client.search("shared", "queue:ready")
         assert sum(str(item["role"]).startswith("review:") for item in ready) == 3
         assert sum(item["role"] == "verification" for item in ready) == 2
@@ -1090,6 +1134,55 @@ def test_published_candidate_exposes_shared_checks_and_reviews_concurrently(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_candidate_policy_rejection_never_exposes_reviews_or_checks(workflow) -> None:
+    client, _, _ = workflow
+    work = client.add("run", "worker-0", "claim: task:A")["work"]
+    client.add("run", "worker-0", "checkpoint: task:A\nfiles written")
+    client.add("run", "worker-0", "handoff: task:A\ncandidate pushed")
+    proposed = client.add(
+        "run",
+        "worker-0",
+        "\n".join(
+            (
+                "open-pr: task:A",
+                f"branch: {work['branch']}",
+                f"base: {1:040x}",
+                f"head: {2:040x}",
+                f"tree: {2:040x}",
+                "verified: true",
+            )
+        ),
+    )
+
+    assert client.search("run", "task:A")[0]["state"] == "qualifying"
+    assert not any(item["root_task_id"] == "A" for item in client.search("run", "queue:ready"))
+    rejected = client.add(
+        "run",
+        "launcher",
+        "\n".join(
+            (
+                "control: candidate-rejected",
+                "task: A",
+                f"generation: {proposed['generation']}",
+                f"head: {2:040x}",
+                f"tree: {2:040x}",
+                f"receipt: sha256:{'d' * 64}",
+                "kind: product",
+                "reason: unclassified non-authoritative tooling: verification/fixtures/case.toml",
+            )
+        ),
+    )
+
+    assert rejected["candidate"] == "rejected"
+    task = client.search("run", "task:A")[0]
+    assert task["state"] == "revision"
+    assert task["reviews"] == []
+    assert task["qualification_receipt"] == f"sha256:{'d' * 64}"
+    assert "unclassified non-authoritative tooling" in task["last_error"]
+    ready = client.search("run", "queue:ready")
+    assert [(item["root_task_id"], item["role"]) for item in ready] == [("A", "revision")]
 
 
 def test_failed_check_is_terminal_for_candidate_and_revision_gets_new_checks(workflow) -> None:
@@ -1216,7 +1309,7 @@ def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_
             counter += 3
             client.add("product", worker, f"checkpoint: task:{task_id}\nsaved")
             client.add("product", worker, f"handoff: task:{task_id}\nchecked")
-            client.add(
+            proposed = client.add(
                 "product",
                 worker,
                 "\n".join(
@@ -1227,6 +1320,20 @@ def test_wide_product_graph_uses_seven_workers_across_implementation_review_and_
                         f"head: {head:040x}",
                         f"tree: {head:040x}",
                         "verified: true",
+                    )
+                ),
+            )
+            client.add(
+                "product",
+                "launcher",
+                "\n".join(
+                    (
+                        "control: candidate-qualified",
+                        f"task: {task_id}",
+                        f"generation: {proposed['generation']}",
+                        f"head: {head:040x}",
+                        f"tree: {head:040x}",
+                        f"receipt: sha256:{'c' * 64}",
                     )
                 ),
             )

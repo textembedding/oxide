@@ -29,6 +29,7 @@ from .contract import ContractError, load_contract
 from .evidence import (
     COMMAND_SHELL,
     EvidenceError,
+    artifact_excerpt,
     begin_attempt,
     canonical_bytes,
     evidence_key,
@@ -164,6 +165,7 @@ def _frozen_workload_ref(
             "timeout_seconds": int(verification["timeout_seconds"]),
             "infrastructure_exit_codes": list(verification["infrastructure_exit_codes"]),
             "max_artifact_bytes": int(verification["max_artifact_bytes"]),
+            "candidate_operation": str(verification["candidate_operation"]),
             "prospective_receipt_required": bool(verification["prospective_receipt_required"]),
         },
     }
@@ -302,7 +304,7 @@ def _load_config(workload: str) -> dict[str, Any]:
     run_id = config.get("run_id")
     expected_prefix = f"codex/oxide-{_slug(str(run_id))}"
     if (
-        config.get("schema_version") != 9
+        config.get("schema_version") != 10
         or config.get("workload") != workload
         or not isinstance(run_id, str)
         or re.fullmatch(re.escape(workload) + r"-\d{8}-\d{6}", run_id) is None
@@ -319,6 +321,8 @@ def _load_config(workload: str) -> dict[str, Any]:
         or not all(isinstance(value, str) for value in config["journal_command"])
         or not isinstance(config.get("concurrency_validation"), dict)
         or not isinstance(config.get("workload_ref"), dict)
+        or not isinstance(config.get("workload_ref", {}).get("verification"), dict)
+        or config["workload_ref"]["verification"].get("candidate_operation") != "policy"
         or not isinstance(config.get("evidence_root"), str)
         or not isinstance(config.get("contract_root"), str)
         or re.fullmatch(r"[0-9a-f]{32}", str(config.get("replay_root", ""))) is None
@@ -658,6 +662,102 @@ def _qualify_contract(config: dict[str, Any], stage: dict[str, Any]) -> None:
     policy_ref["execution_environment"] = observed_environment()
 
 
+def _qualify_candidate(
+    config: dict[str, Any],
+    client: WorkflowClient,
+    task: dict[str, Any],
+    log: Callable[[str], None],
+) -> None:
+    target = Path(config["target_repo"])
+    branch = str(task["branch"])
+    head = str(task["head_sha"])
+    tree = str(task["tree_sha"])
+    generation = int(task["generation"])
+    if _git(target, "rev-parse", "--verify", f"refs/heads/{branch}", check=False) != head:
+        raise HarnessError("candidate qualification cannot resolve the proposed branch head")
+    if _git(target, "rev-parse", f"{head}^{{tree}}", check=False) != tree:
+        raise HarnessError("candidate qualification cannot resolve the proposed tree")
+    requirement = {
+        "schema": "OxideCandidateQualificationV1",
+        "run_id": config["run_id"],
+        "epoch": int(config["epoch"]),
+        "workload": {
+            "base_commit": config["workload_ref"]["base_commit"],
+            "contract_path": config["workload_ref"]["contract_path"],
+            "contract_blob": config["workload_ref"]["contract_blob"],
+            "contract_closure": config["workload_ref"]["contract_closure_sha256"],
+            "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+        },
+        "task": task["root_task_id"],
+        "generation": generation,
+        "candidate": {
+            "base": task["base_sha"],
+            "commit": head,
+            "tree": tree,
+        },
+        "operation": config["workload_ref"]["verification"]["candidate_operation"],
+        "qualification": {
+            "receipt": config["workload_ref"]["verification"]["qualification_receipt_sha256"],
+            "environment": config["workload_ref"]["verification"]["execution_environment"],
+        },
+    }
+    with tempfile.TemporaryDirectory(
+        prefix="candidate-qualification-", dir=config["run_dir"]
+    ) as raw:
+        repository = Path(raw) / "repository"
+        cloned = subprocess.run(
+            ["git", "clone", "--no-hardlinks", str(target), str(repository)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if cloned.returncode:
+            raise HarnessError(
+                cloned.stderr.strip() or "could not create candidate qualification clone"
+            )
+        _git(repository, "checkout", "--detach", head)
+        if _git(repository, "rev-parse", "HEAD^{tree}") != tree:
+            raise HarnessError("candidate qualification clone resolved a different tree")
+        receipt, digest = _run_qualified_check(
+            config,
+            repository,
+            {
+                "driver": "verus",
+                "operation": config["workload_ref"]["verification"]["candidate_operation"],
+                "working_directory": ".",
+            },
+            requirement,
+            candidate_commit=head,
+            candidate_tree=tree,
+            prospective_commit=head,
+            prospective_tree=tree,
+            receipt_required=False,
+        )
+    result = str(receipt["result"])
+    lines = [
+        "control: candidate-qualified" if result == "passed" else "control: candidate-rejected",
+        f"task: {task['root_task_id']}",
+        f"generation: {generation}",
+        f"head: {head}",
+        f"tree: {tree}",
+        f"receipt: {digest}",
+    ]
+    if result != "passed":
+        diagnostic = artifact_excerpt(Path(config["evidence_root"]), receipt, "stderr")
+        kind = "product" if result == "product_failure" else "infrastructure"
+        reason = " ".join((diagnostic or f"candidate policy classified {result}").splitlines())[
+            :1800
+        ]
+        lines.extend((f"kind: {kind}", f"reason: {reason}"))
+    outcome = client.add(config["run_id"], "launcher", "\n".join(lines))
+    if outcome.get("candidate") not in {"qualified", "rejected"}:
+        raise HarnessError("workflow did not accept candidate qualification")
+    log(
+        f"candidate {task['root_task_id']} generation {generation} "
+        f"{outcome['candidate']} by exact-tree policy"
+    )
+
+
 def _merge_failed(
     config: dict[str, Any],
     client: WorkflowClient,
@@ -692,6 +792,9 @@ def _merge_task(
     target_branch = str(config["target_branch"])
     branch = str(task["branch"])
     head = str(task["head_sha"])
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", str(task.get("qualification_receipt", ""))) is None:
+        _merge_failed(config, client, task, "candidate lacks exact-tree policy qualification")
+        return
     if _git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False) != target_branch:
         raise HarnessError("cannot merge: target is not on its staged branch")
     if _git(target, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -1248,7 +1351,7 @@ def command_run(arguments: argparse.Namespace) -> int:
     run_id = f"{workload}-{time.strftime('%Y%m%d-%H%M%S')}"
     workload_ref = _frozen_workload_ref(target, base_commit, contract_path, stage)
     config = {
-        "schema_version": 9,
+        "schema_version": 10,
         "run_id": run_id,
         "workload": workload,
         "contract_path": str(contract_path),
@@ -1370,6 +1473,9 @@ def command_launch(arguments: argparse.Namespace) -> int:
                     log(f"run {config['run_id']}: {state.upper()}")
                     return 0 if state in {"paused", "complete", "stopped"} else 1
                 assert supervisor is not None
+                for task in client.search(config["run_id"], "queue:all"):
+                    if task.get("state") == "qualifying":
+                        _qualify_candidate(config, client, task, log)
                 for task in client.search(config["run_id"], "merge:requested"):
                     _merge_task(config, client, task, log)
                 supervisor.tick()
@@ -1458,6 +1564,20 @@ def command_resume(arguments: argparse.Namespace) -> int:
     _validate_bound_concurrency(config)
     if any(kind == "launcher" for _, kind in _run_processes(config)):
         raise HarnessError("workload already has a live launcher")
+    return _start(config, arguments.foreground, resume=True)
+
+
+def command_retry(arguments: argparse.Namespace) -> int:
+    command_pause(argparse.Namespace(workload=arguments.workload))
+    config = _load_config(arguments.workload)
+    result = _using_journal(
+        config,
+        lambda client: client.add(
+            config["run_id"], "launcher", f"control: retry task:{arguments.task}"
+        ),
+    )
+    print(f"Retried {result['retried']} as {result['state']}.")
+    _validate_bound_concurrency(config)
     return _start(config, arguments.foreground, resume=True)
 
 
@@ -2193,10 +2313,6 @@ def command_observe_queue(arguments: argparse.Namespace) -> int:
             first = True
         snapshot = _queue_snapshot(config, None if first else cursor)
         if snapshot is not None:
-            latest = int(snapshot["entries"][-1]["record_id"]) if snapshot["entries"] else 0
-            if latest < cursor:
-                cursor = 0
-                first = True
             entries = [item for item in snapshot["entries"] if int(item["record_id"]) > cursor]
             if first and not arguments.no_follow:
                 entries = entries[-10:]
@@ -2392,6 +2508,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--workload", required=True)
     resume.add_argument("--foreground", action="store_true")
     resume.set_defaults(handler=command_resume)
+    retry = commands.add_parser("retry")
+    retry.add_argument("--workload", required=True)
+    retry.add_argument("--task", required=True)
+    retry.add_argument("--foreground", action="store_true")
+    retry.set_defaults(handler=command_retry)
     launch = commands.add_parser("launch", help=argparse.SUPPRESS)
     launch.add_argument("--workload", required=True)
     launch.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
