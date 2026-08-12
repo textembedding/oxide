@@ -8,13 +8,12 @@
 
 ## How it works
 
-Oxide is a meta-harness for coordinating Codex agents in parallel. Its planning
-agent turns human-written specifications into a staged roadmap. For one approved
-stage, its contract agent then derives executable implementation, review, proof,
-and acceptance work.
+Oxide is a meta-harness for coordinating Codex agents in parallel. It compiles
+natural-language specifications into executable contracts for implementation,
+review, and formal verification.
 
 ```text
- specification directory
+ specification
               |
               v
  planning agent <-------- user feedback
@@ -60,35 +59,15 @@ and acceptance work.
                   newly unblocked work
 ```
 
-The user can challenge stage ordering, scope, tasks, or verification goals during
-either session. An ambiguity is never silently resolved. The contract agent must
-propose a concrete source change, obtain approval, write it back to the
-human-readable specification and roadmap, and regenerate the contract.
-
-The generated receipts separately record planning approval, the contract agent’s
-contractibility attestation, the user’s approval, and mechanical qualification.
-They bind the selected stage, applicable global invariants, exact cited source
-sections, semantic trace, and generated contract. A relevant change invalidates
-admission; an unrelated edit confined to a deferred future stage does not.
-
-Only after approval and isolated mechanical qualification does Oxide create run
-state or start the journal and workers. The contract defines tasks and their
-dependencies. With no fixed role pools, implementation, review, and proof work
-can proceed concurrently.
-
-Publishing freezes an immutable Git candidate, but does not expose it to the
-swarm immediately. Oxide first runs its deterministic policy against that exact
-tree. This rejects unclassified files, proof escapes, stale manifests, changed
-judge inputs, and other structurally incomplete candidates before reviews or
-acceptance checks can be claimed.
-
-After admission, reviews and unsatisfied checks become independently claimable.
-Evidence is bound to the exact candidate and check, then reused across roles.
-Changing the candidate tree creates a new requirement.
-
-Once every required review and check passes, Oxide constructs the exact tree that
-would be merged and runs the whole-tree gate against it. A successful merge
-unlocks dependent work.
+1. Run `./oxide harness plan` to turn a specification into an approved roadmap.
+2. Run `./oxide harness generate-contract` to turn one roadmap phase into an
+   executable contract. If anything is unclear, the agent asks before proceeding.
+3. Approve the generated contract after the agent attests it and Oxide
+   mechanically qualifies it.
+4. Run `./oxide harness run` to start Codex workers. They claim implementation,
+   review, and verification work from the shared journal and run in parallel.
+5. Oxide merges each candidate after its reviews, checks, and whole-tree proof
+   pass, then assigns the work that merge unlocks.
 
 ## Verification philosophy
 
@@ -203,32 +182,27 @@ contexts therefore recover their assignment without replaying the full run.
 
 ## Install and verify Oxide
 
+1. Install the development dependencies and verify the checkout:
+
 ```bash
 uv sync --extra dev
 ./oxide verify
 ```
 
-`oxide` is the local entry point and automatically uses `.venv` when available.
-No global installation is required.
+`./oxide` automatically uses the local `.venv`; no global install is required.
 
-Create the approved roadmap in an interactive planning session:
+2. Plan the project:
 
 ```bash
 ./oxide harness plan --target /path/to/my-rust-product/docs/specs/
 ```
 
-The planning agent reads the complete specification corpus, derives as many or as
-few implementation phases as the work requires, and revises `ROADMAP.md` until
-the user enters `/approve`. An approved roadmap may retain future work as
-`planned`, `deferred`, or `blocked`; only a `ready` phase can generate a contract.
+The planning agent reads all specifications and revises a standardized
+`ROADMAP.md` with you. Enter `/approve` to write it. The roadmap may include
+`planned`, `deferred`, or `blocked` phases, but only a `ready` phase can become a
+contract.
 
-Every roadmap uses the same validated schema, regardless of the source material.
-The root `ROADMAP.md` presents that data as an overview table and concise phase
-sections for human readers. Its exact TOML representation is kept in a collapsed
-section for Oxide. The readable view is generated from the TOML, so there is only
-one plan to approve and no second representation that can drift.
-
-Maintain an approved roadmap without reopening the whole plan:
+3. To maintain an approved phase, run:
 
 ```bash
 ./oxide harness plan \
@@ -236,51 +210,39 @@ Maintain an approved roadmap without reopening the whole plan:
   --update stage-1
 ```
 
-Oxide asks for the intended change, locks every unselected phase and all stable
-phase IDs, then shows the exact diff and approval impact. Repeat `--update` to
-permit a coordinated multi-phase change. A readiness-only change preserves
-dependent approvals; a semantic change invalidates approvals for dependent phases.
-Nothing is written until `/approve`.
+Maintenance mode preserves unselected phases and stable IDs, previews the diff
+and approval impact, and writes only after `/approve`. Use it for readiness,
+dependencies, or allocating existing requirements. Edit the specification first
+when behavior or success semantics change. Repeat `--update` for each phase in a
+coordinated multi-phase change. Readiness-only updates preserve dependent
+approvals; semantic changes invalidate affected approvals.
 
-Use maintenance mode for readiness, dependencies, and allocation of
-requirements already present in the specifications. If program behavior or
-success semantics change, update the specification first and then maintain the
-roadmap; the roadmap cannot introduce that behavior by itself.
-
-Generate one stage contract in a second interactive session:
+4. Generate the contract for one ready phase:
 
 ```bash
 ./oxide harness generate-contract /path/to/my-rust-product/ROADMAP.md stage-0
 ```
 
-The contract agent resolves the selected stage’s cited requirements and global
-invariants, explains its tasks and verification goals, and accepts free-form user
-feedback. `/approve` writes any approved upstream refinements, regenerates
-`verification/contract.toml`, records the agent attestation and user approval,
-and mechanically qualifies the exact artifact set. Commit the modified target
-files before execution.
+The contract agent resolves the cited requirements and invariants, then revises
+the tasks and verification goals with you. Enter `/approve` to persist approved
+source changes, generate `verification/contract.toml`, record the attestation and
+approval, and qualify the exact artifacts. Commit the target repository changes
+before execution.
 
-Before a run, qualify the journal backend under real multiprocess contention:
+5. Qualify the journal backend, then launch against the committed target:
 
 ```bash
 ./oxide harness validate-concurrency --workers 8 --rounds 6
-```
-
-Then launch against the committed target:
-
-```bash
 ./oxide harness run \
   --target /path/to/my-rust-product \
   --workers 8
 ```
 
-The default contract is `verification/contract.toml`. Useful parallelism is
-determined by the contract’s dependency graph and its live mix of implementation,
-review, and proof work, up to the current 64-worker process limit.
-
-Neither interactive command creates a run, journal, worker, or observer. `run`
-fails before any of those exist when the roadmap approval, attestation, user
-approval, qualification, trace, or selected-stage binding is missing or stale.
+`run` uses `verification/contract.toml` by default and supports up to 64 workers;
+the contract graph determines how many can work productively. Planning and
+contract generation never start runtime processes. Launch fails before creating
+run state if any approval, attestation, qualification, trace, or phase binding is
+missing or stale.
 
 ## Observe and control
 
