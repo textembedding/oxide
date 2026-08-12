@@ -1,11 +1,269 @@
 # One toolchain, one meaning of correctness
 
-## A primer on pervasive formal verification for long-horizon Rust development by agent swarms
+## Oxide's normative policy for pervasive formal verification
 
-> **Reference status:** This is a non-normative architectural primer. It explains
-> the problem, research, debate, and reasoning behind Oxide’s verification
-> philosophy. Each target repository owns its normative verification specification;
-> when that specification differs from this primer, the target specification governs.
+> **Normative status:** The **Normative policy** section of this document is
+> Oxide's verification policy. Planning, contract generation, admission, proof
+> execution, and authoritative merge must enforce it for every target. Target
+> specifications define the program's behavior, constraints, and success
+> semantics; they do not need to repeat these universal assurance rules. A target
+> may strengthen this policy but may not weaken it. The later engineering rationale
+> explains the policy and adds no requirements.
+
+Within the **Normative policy** section, the terms **MUST**, **MUST NOT**,
+**REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are normative.
+
+## Normative policy
+
+### Scope and assurance claim
+
+Oxide MUST establish this refinement chain for the exact production program under
+consideration:
+
+```text
+approved observable requirements
+        ↓
+public abstract program model
+        ↓
+component contracts and mathematical views
+        ↓
+executable Rust component refinement
+        ↓
+program-wide composition theorem
+        ↓
+explicit trusted effects and environmental assumptions
+```
+
+The assurance claim applies only to the exact immutable source tree, target,
+features, specifications, contracts, proof closure, trusted boundary, Verus
+toolchain, solver policy, and judge identified by its evidence. It does not transfer
+to a similar tree or configuration.
+
+The public abstract model MUST define a valid initial state, reachable success and
+failure behavior, relevant fault and progress behavior, and the observations named
+by the approved requirements. It MUST remain independent of incidental layouts,
+private formats, algorithms, caches, thread counts, system-call interfaces, and
+other optimizations unless one of those details is itself approved observable
+behavior. Representation changes MUST refine the same abstract program.
+
+Verus is the sole authoritative source-level formal-verification frontend. The
+pinned verifier, solver, Rust compilation chain, standard libraries, hardware, and
+declared environmental assumptions remain in the trusted computing base. Verus
+does not prove external semantic relevance, throughput, latency, storage-device
+behavior, operating-system fairness, or any property absent from the abstract
+model.
+
+A program MUST NOT be described as formally verified until every production
+logical component and public entry point is covered, every applicable component
+theorem and the exact-tree composition theorem pass, every trusted boundary and
+assumption is declared, and the production and verified closures agree.
+
+### Uniform production coverage
+
+Every executable path MUST be classified as exactly one of:
+
+1. verified production logic;
+2. a trusted effect adapter; or
+3. non-authoritative tooling.
+
+All production logic is verified by default. There is no typed-but-unverified,
+low-risk, low-complexity, business-logic, helper, legacy, or trivial-logic
+exemption. Private leaf helpers MAY be covered by an enclosing component proof
+when their complete behavior is visible to it. Cross-component, exported,
+stateful, or semantically reusable logic MUST expose a stable meaningful contract.
+
+Uniform coverage does not require uniform proof size. Automatically discharged
+contracts are valid when they state the component's real responsibility. Proof
+volume and ghost-code ratios are not assurance metrics.
+
+Trusted effect adapters are the only production-code exemption. Each MUST expose
+a narrow explicit contract, report observations rather than decide program policy,
+name every assumption on which it depends, and remain inside the declared trusted
+boundary. Moving logic into a trusted adapter is an assurance-boundary change and
+MUST NOT be justified merely by proof difficulty. Non-authoritative tooling MUST
+have no unchecked path to production authority.
+
+Unsafe Rust, generated code, procedural macros, build scripts, foreign code,
+linked components, conditional compilation, and fallbacks MUST be included in the
+verified production closure or explicitly classified inside the trusted boundary.
+The production and verified feature, source, generated-code, target, and entry-point
+paths MUST agree.
+
+A machine-readable coverage declaration MUST connect each production logical
+component to its production source closure, public entry points, approved target
+requirements, abstract specification, implementation contracts, proof roots,
+component refinement theorem, composition participation, trusted assumptions,
+features, and target. Coverage MUST fail closed for unclassified production code,
+missing or unreachable roots, undeclared trust, omitted public paths, or material
+production/proof divergence.
+
+### Meaningful refinement and composition
+
+Every production logical component MUST identify its executable inputs and state,
+mathematical view, preconditions, success and failure postconditions, preserved
+invariants, abstract operation, trusted assumptions, and refinement theorem. Each
+component MUST participate transitively in the program-wide composition theorem,
+and every public production entry point MUST be reachable from that theorem.
+
+`ensures true`, impossible or artificially restrictive preconditions, empty or
+trivialized state spaces, disconnected theorems, proof-only substitute
+implementations, assumptions that imply the desired result, and equivalent vacuous
+obligations do not count as verification. Important initial, success, failure,
+boundary, and recovery states MUST have constructive reachability or non-vacuity
+evidence appropriate to the model.
+
+Every claimed progress or liveness property MUST identify the transition, fairness
+and environmental assumptions, and whether it is machine-proved, delegated to a
+trusted effect contract, empirically supported, or intentionally unsupported. A
+safety theorem MUST NOT be presented as proving eventual completion.
+
+Incremental programs MAY prove only currently exposed behavior. Unimplemented
+behavior MUST remain absent or return an explicitly specified unsupported result.
+Placeholder axioms, trusted proof stubs, fabricated postconditions, and dormant
+public paths MUST NOT stand in for unimplemented behavior.
+
+Component contracts and mathematical views SHOULD state stable semantic behavior,
+not solver-facing or representation-specific detail. Cross-component proofs MUST
+depend on exported contracts and the smallest necessary lemmas rather than an
+accidental global solver context. Proof roots SHOULD remain independently
+checkable with bounded relevant context. Pinned solver options and declared
+resource limits are authoritative; repeated unrelated breakage or global rewrites
+for contract-preserving local changes indicate a proof-abstraction defect.
+
+### Proof and specification change control
+
+Implementation, implementation-attached contracts, abstract specifications,
+component proofs, coverage declarations, trusted-boundary declarations, and
+composition MUST evolve together. Local and candidate commits MAY be temporarily
+unverified while implementation and proof repair proceed.
+
+Proof repair and specification change are different operations. A repair MUST NOT
+silently strengthen a precondition, weaken a postcondition or invariant, narrow an
+abstract operation or reachable state space, alter a fault assumption, broaden a
+trusted assumption, disconnect composition, or move policy into trusted code.
+Product-semantic changes require an approved human-readable source change before a
+downstream roadmap or contract may rely on them. Verification-contract or abstract-
+model changes require explicit review as judge-facing changes even when observable
+product prose does not change.
+
+Every trusted assumption MUST be precise, named, localized to the smallest
+practical boundary, connected to every dependent theorem, justified by a contract
+or concrete evidence, reviewed, and bound into proof identity. An assumption MUST
+NOT merely assert the product property being proved. When digests identify source,
+specifications, proofs, evidence, or tools, the digest algorithm and collision-
+resistance assumption belong to the trusted context; digest equality is not
+unconditional mathematical identity.
+
+Every normative target behavior MUST remain visibly classified as formally proved,
+dependent on an explicit trusted assumption, supported only by supplementary
+evidence, or intentionally unsupported. Omitting a requirement from a proof plan
+MUST NOT silently turn it into a non-requirement.
+
+### Planning and contract generation
+
+Planning MUST ingest this exact policy independently of the target specification
+corpus. A roadmap MUST introduce verification foundations before implementation
+proliferates and MUST plan implementation, meaningful contracts, proofs, coverage,
+and composition together rather than defer proof to a cleanup phase. It MUST keep
+formal correctness and empirical capacity as separate gates.
+
+Before broad implementation proliferates, the roadmap MUST establish the pinned
+verification context, the public abstract model and proof conventions, and real
+representative proofs for applicable pure authoritative logic and the hardest
+ownership, concurrency, effect, persistence, or recovery transitions. It MUST then
+develop each production component together with its contracts, proofs, coverage,
+trusted-boundary connection, and composition path. A placeholder proof or toy
+component cannot satisfy this foundation rule.
+
+Contract generation MUST ingest the same exact policy. Generated contracts MUST
+bind its digest, preserve the target's approved behavior and success semantics,
+and include the proof and deterministic-policy work needed to enforce both the
+target requirements and this policy. Oxide-supplied proof classification,
+traceability, evidence, dependency, recovery, and execution constraints are
+mechanical assurance requirements; they are not new product behavior and need not
+be quoted from target specifications.
+
+A target requirement, task, or acceptance check that claims product behavior MUST
+still trace to the approved target semantic closure. The policy MUST NOT be used as
+authority to invent product behavior, acceptance semantics, external guarantees,
+or missing domain requirements.
+
+### Authoritative gates and exact evidence
+
+The authoritative gate MUST run against an immutable candidate. Before merge, the
+complete composition proof MUST pass against the exact prospective authoritative
+tree. A collection of component proofs, a proof of a reference implementation, or
+a successful proof-only build does not establish the production-program claim.
+
+Proof evidence MUST bind every input capable of changing the result, including the
+candidate and prospective trees, applicable target requirements, this policy,
+abstract specifications, contracts, proof closure, coverage declaration, target,
+features, toolchain, solver/resource policy, theorem roots, trusted assumptions,
+judge implementation, result, and content-addressed logs or artifacts.
+
+Evidence MAY be reused only when all relevant identity inputs are exactly equal.
+A changed source, specification, contract, proof, feature, target, trusted boundary,
+toolchain, judge, or prospective tree invalidates every dependent result. Textual or
+semantic similarity is insufficient. A logical proof failure is a product result;
+repeating the same immutable subject to seek a pass is prohibited. An
+infrastructure-failed attempt MAY be replaced only after the old attempt can no
+longer produce authoritative evidence.
+
+### Deterministic integrity enforcement
+
+The authoritative checker MUST be deterministic and fail closed. It MUST reject
+undeclared `assume`, `admit`, axioms, external bodies or specifications, unchecked
+executable/specification bridges, proof-only implementations, production/proof
+divergence, unclassified production code, unreachable proof roots, missing public-
+API composition, stale or malformed evidence, and candidate-defined judge changes.
+
+A timeout, resource exhaustion, unknown result, skipped or missing obligation, or
+cached result without exact identity is an infrastructure failure, never proof
+success. Every permitted trusted construct MUST be uniquely declared, narrowly
+scoped, included in the evidence identity, and reviewed.
+
+Changes to the verifier, solver policy, toolchain, checker closure, coverage or
+receipt schema, trusted-boundary policy, or evidence validator change the judge.
+The new judge MUST be established independently and freshly qualified before it
+can evaluate product candidates; it cannot approve itself in the same change.
+
+### Review and supplementary evidence
+
+Review MUST independently assess product-to-model fidelity, implementation-to-
+proof fidelity and non-vacuity, and the systems/trust boundary. Reviews MAY proceed
+concurrently with independent proof execution, but all required gates must pass
+before authoritative merge. Agent or LLM review is supplementary evidence and
+MUST NOT substitute for Verus or deterministic policy checks.
+
+Fixtures, ordinary tests, deterministic fuzzing, bounded exploration, real crash
+campaigns, and benchmarks remain necessary for concrete executions, trusted
+boundaries, counterexample discovery, and performance. They MUST be accurately
+classified and MUST NOT satisfy a Verus proof obligation.
+
+Supplementary evidence MUST identify its exact subject and environment and remain
+reproducible where the method permits it. Fuzzing and bounded exploration SHOULD
+use stable seeds and retain minimized regressions; crash and benchmark evidence
+MUST state its fault, workload, and machine scope without generalizing finite
+observations into a theorem.
+
+Critical invariants SHOULD have deterministic proof-sensitivity checks or
+controlled negative mutations demonstrating that removal or inversion of the
+protection breaks verification. These checks support integrity assessment; they
+do not replace the theorem.
+
+Formal correctness and empirical capacity are independent release gates. Formal
+proof establishes logical refinement under declared assumptions. Benchmarks and
+fault campaigns establish throughput, latency, memory, storage, retention,
+recovery time, and environmental behavior for an exact binary and workload.
+Neither gate substitutes for the other.
+
+Where a target makes structural resource or scalability guarantees, Verus MUST
+establish the applicable finite bounds, safe exhaustion behavior, bounded recovery
+work, and authority-preserving representation changes. Wall-clock throughput,
+latency, hardware capacity, and external fairness remain empirical claims unless a
+separately approved formal cost model makes them logical requirements.
+
+## Engineering rationale
 
 Software teams usually discuss formal verification as a trade: more assurance in exchange for more engineering effort. That framing is incomplete for a codebase expected to evolve for years through large, semi-autonomous agent swarms.
 

@@ -18,6 +18,9 @@ oxide = "oxide.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/oxide"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"docs/VERIFICATION_PRIMER.md" = "oxide/VERIFICATION_PRIMER.md"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
