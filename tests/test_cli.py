@@ -25,26 +25,28 @@ from oxide.concurrency import (
 )
 from oxide.contract import ContractError, load_contract
 from oxide.journal_backend import start_journal
+from oxide.verification_policy import verification_policy_digest
 from oxide.workflow import WorkflowClient, WorkflowError
 
 ROOT = Path(__file__).parents[1]
 
 
 def _contract_text() -> str:
-    return """\
+    return f"""\
 schema = 3
 id = "web-app"
 stage = "foundation"
 enabled = true
 minimum_reviews = 3
 goal = "Build and verify a small Rust web application."
+verification_policy_sha256 = "{verification_policy_digest()}"
 immutable_paths = ["verification/contract.toml", "verification/alignment.json", "verification/toolchain.lock.toml", "docs"]
 
 [alignment]
-specifications = ["docs/PRODUCT.md", "docs/VERIFICATION.md"]
+specifications = ["docs/PRODUCT.md"]
 receipt = "verification/alignment.json"
 contractible = true
-goal_sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+goal_sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 ambiguities = []
 missing_acceptance_criteria = []
 unsupported_assumptions = []
@@ -62,26 +64,26 @@ id = "API"
 title = "Build the API"
 prompt = "Implement the HTTP API."
 depends_on = []
-sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 
 [[tasks.checks]]
 id = "api-test"
 driver = "command"
 command = "cargo test -- api"
-sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 
 [[tasks]]
 id = "UI"
 title = "Build the UI"
 prompt = "Implement the browser UI."
 depends_on = ["API"]
-sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 
 [[tasks.checks]]
 id = "ui-test"
 driver = "command"
 command = "cargo test -- ui"
-sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 """
 
 
@@ -98,7 +100,6 @@ def _write_contract_files(target: Path, contract_text: str | None = None) -> Pat
     )
     (verification / "alignment.json").write_text("{}\n", encoding="utf-8")
     (docs / "PRODUCT.md").write_text("# Product\n", encoding="utf-8")
-    (docs / "VERIFICATION.md").write_text("# Verification\n", encoding="utf-8")
     return contract
 
 
@@ -190,10 +191,10 @@ stage = "smoke"
 enabled = true
 minimum_reviews = 3
 goal = "Prove the generic contract, native two-tool worker, journal, and Git path."
+verification_policy_sha256 = "{verification_policy_digest()}"
 hash_algorithm = "sha256"
 manifest = "verification/manifest.toml"
 toolchain_lock = "verification/toolchain.lock.toml"
-verification_spec = "docs/VERIFICATION.md"
 product_spec = "docs/PRODUCT.md"
 immutable_paths = ["verification/contract.toml", "verification/alignment.json", "verification/toolchain.lock.toml", "docs"]
 production_roots = ["src"]
@@ -212,7 +213,7 @@ solver_rlimit = 10
 additional_forbidden_patterns = []
 
 [alignment]
-specifications = ["docs/PRODUCT.md", "docs/VERIFICATION.md"]
+specifications = ["docs/PRODUCT.md"]
 receipt = "verification/alignment.json"
 contractible = true
 goal_sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
@@ -939,19 +940,39 @@ def test_macos_commands_and_controls_remain_available() -> None:
     )
     assert configured.reviews == 4
     assert configured.contract == "verification/release.toml"
-    approval = parser.parse_args(
+    planning = parser.parse_args(
         [
             "harness",
-            "approve-contract",
+            "plan",
             "--target",
-            "/tmp/product",
-            "--agent",
-            "contract-agent/test",
-            "--approve",
+            "/tmp/product/docs/specs",
         ]
     )
-    assert approval.handler is cli.command_approve_contract
-    assert approval.approve is True
+    assert planning.handler is cli.command_plan
+    assert planning.model == "gpt-5.6-sol"
+    assert planning.reasoning_effort == "max"
+    assert planning.agent_timeout == 900.0
+    assert planning.update == []
+    maintenance = parser.parse_args(
+        [
+            "harness",
+            "plan",
+            "--target",
+            "/tmp/product/docs/specs",
+            "--update",
+            "storage",
+            "--update",
+            "search",
+        ]
+    )
+    assert maintenance.update == ["storage", "search"]
+    generation = parser.parse_args(
+        ["harness", "generate-contract", "/tmp/product/ROADMAP.md", "stage-0"]
+    )
+    assert generation.handler is cli.command_generate_contract
+    assert generation.model == "gpt-5.6-sol"
+    assert generation.reasoning_effort == "max"
+    assert generation.agent_timeout == 900.0
     concurrency = parser.parse_args(["harness", "validate-concurrency"])
     assert concurrency.handler is cli.command_validate_concurrency
     assert concurrency.workers == 7
@@ -1012,10 +1033,15 @@ def test_load_config_relocates_run_local_paths(monkeypatch, tmp_path: Path) -> N
                 "journal_command": [],
                 "concurrency_validation": {},
                 "workload_ref": {
-                    "schema": "OxideVerificationContractRefV2",
+                    "schema": "OxideVerificationContractRefV3",
                     "contract_path": "verification/contract.toml",
                     "alignment": {},
-                    "verification": {"candidate_operation": "policy"},
+                    "verification_policy_sha256": verification_policy_digest(),
+                    "verification": {
+                        "schema": "OxideFrozenVerificationPolicyV2",
+                        "candidate_operation": "policy",
+                        "verification_policy_sha256": verification_policy_digest(),
+                    },
                 },
                 "replay_root": "2" * 32,
                 "epoch": 0,
@@ -1180,6 +1206,7 @@ def test_exact_candidate_policy_failure_returns_one_diagnostic_revision(
             "contract_blob": "a" * 40,
             "contract_closure_sha256": f"sha256:{'b' * 64}",
             "verification_engine_sha256": f"sha256:{'c' * 64}",
+            "verification_policy_sha256": verification_policy_digest(),
             "verification": {
                 "candidate_operation": "policy",
                 "qualification_receipt_sha256": f"sha256:{'d' * 64}",
@@ -1553,7 +1580,8 @@ def test_native_launcher_worker_mcp_and_git_complete_generic_workload(tmp_path: 
     workload_ref = config["workload_ref"]
     assert workload_ref["target_repository"] == str(target.resolve())
     assert workload_ref["base_commit"] == config["base_commit"]
-    assert workload_ref["schema"] == "OxideVerificationContractRefV2"
+    assert workload_ref["schema"] == "OxideVerificationContractRefV3"
+    assert workload_ref["verification_policy_sha256"] == verification_policy_digest()
     assert workload_ref["contract_path"] == "verification/contract.toml"
     assert (
         workload_ref["contract_blob"]

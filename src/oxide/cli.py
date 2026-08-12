@@ -28,7 +28,6 @@ from pygments.util import ClassNotFound
 from .alignment import (
     AlignmentError,
     validate_alignment_receipt,
-    write_alignment_receipt,
 )
 from .concurrency import ConcurrencyError, implementation_digest, run_campaign, validate_receipt
 from .contract import ContractError, load_contract
@@ -55,7 +54,17 @@ from .journal_backend import (
     start_journal,
     validate_search_capacity,
 )
+from .planning import (
+    DEFAULT_SESSION_MODEL,
+    DEFAULT_SESSION_REASONING_EFFORT,
+    CodexSessionAgent,
+    PlanningError,
+    TerminalUser,
+    run_generate_contract_session,
+    run_plan_session,
+)
 from .verification.driver import engine_digest, invocation
+from .verification_policy import verification_policy_digest
 from .worker import Worker, worktree_diff
 from .workflow import WorkflowClient, WorkflowError
 from .workflow_transport import (
@@ -156,7 +165,7 @@ def _frozen_workload_ref(
         raise HarnessError("contract.immutable_paths must include the contract itself")
     entries = _immutable_entries(target, base_commit, immutable_paths)
     result: dict[str, Any] = {
-        "schema": "OxideVerificationContractRefV2",
+        "schema": "OxideVerificationContractRefV3",
         "target_repository": _repository_identity(target),
         "base_commit": base_commit,
         "contract_path": relative,
@@ -165,20 +174,25 @@ def _frozen_workload_ref(
         "immutable_entries": entries,
         "contract_closure_sha256": sha256_bytes(canonical_bytes(entries)),
         "verification_engine_sha256": engine_digest(),
+        "verification_policy_sha256": verification_policy_digest(),
         "harness_version": implementation_digest(ROOT),
         "verification": {
-            "schema": "OxideFrozenVerificationPolicyV1",
+            "schema": "OxideFrozenVerificationPolicyV2",
             "evidence_policy": str(verification["evidence_policy"]),
             "timeout_seconds": int(verification["timeout_seconds"]),
             "infrastructure_exit_codes": list(verification["infrastructure_exit_codes"]),
             "max_artifact_bytes": int(verification["max_artifact_bytes"]),
+            "verification_policy_sha256": str(verification["verification_policy_sha256"]),
             "candidate_operation": str(verification["candidate_operation"]),
             "prospective_receipt_required": bool(verification["prospective_receipt_required"]),
         },
     }
     if alignment_receipt is not None:
-        if alignment_receipt.get("receipt_path") not in immutable_paths:
-            raise HarnessError("contract.immutable_paths must include the alignment receipt")
+        receipt_paths = alignment_receipt.get("receipt_paths")
+        if not isinstance(receipt_paths, list):
+            receipt_paths = [alignment_receipt.get("receipt_path")]
+        if any(path not in immutable_paths for path in receipt_paths):
+            raise HarnessError("contract.immutable_paths must include every alignment receipt")
         result["alignment"] = alignment_receipt
     return result
 
@@ -344,9 +358,13 @@ def _load_config(workload: str) -> dict[str, Any]:
         or not all(isinstance(value, str) for value in config["journal_command"])
         or not isinstance(config.get("concurrency_validation"), dict)
         or not isinstance(config.get("workload_ref"), dict)
-        or config.get("workload_ref", {}).get("schema") != "OxideVerificationContractRefV2"
+        or config.get("workload_ref", {}).get("schema") != "OxideVerificationContractRefV3"
         or not isinstance(config.get("workload_ref", {}).get("alignment"), dict)
         or not isinstance(config.get("workload_ref", {}).get("verification"), dict)
+        or config["workload_ref"].get("verification_policy_sha256") != verification_policy_digest()
+        or config["workload_ref"]["verification"].get("schema") != "OxideFrozenVerificationPolicyV2"
+        or config["workload_ref"]["verification"].get("verification_policy_sha256")
+        != verification_policy_digest()
         or config["workload_ref"]["verification"].get("candidate_operation") != "policy"
         or not isinstance(config.get("evidence_root"), str)
         or not isinstance(config.get("contract_root"), str)
@@ -532,6 +550,8 @@ def _run_qualified_check(
         raise HarnessError("qualified check requires a frozen verification contract")
     if config["workload_ref"].get("verification_engine_sha256") != engine_digest():
         raise HarnessError("verification engine changed after run qualification; start a new run")
+    if config["workload_ref"].get("verification_policy_sha256") != verification_policy_digest():
+        raise HarnessError("verification policy changed after run qualification; start a new run")
     attempt = hashlib.sha256(
         f"{evidence_key(requirement)}:{secrets.token_hex(16)}".encode()
     ).hexdigest()
@@ -667,6 +687,7 @@ def _qualify_contract(config: dict[str, Any], stage: dict[str, Any]) -> None:
             "contract_blob": config["workload_ref"]["contract_blob"],
             "contract_closure": config["workload_ref"]["contract_closure_sha256"],
             "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+            "verification_policy": config["workload_ref"]["verification_policy_sha256"],
             "operations": list(verification["qualification"]),
             "environment": observed_environment(),
         }
@@ -721,6 +742,7 @@ def _qualify_candidate(
             "contract_blob": config["workload_ref"]["contract_blob"],
             "contract_closure": config["workload_ref"]["contract_closure_sha256"],
             "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+            "verification_policy": config["workload_ref"]["verification_policy_sha256"],
         },
         "task": task["root_task_id"],
         "generation": generation,
@@ -912,6 +934,7 @@ def _merge_task(
                     "contract_blob": config["workload_ref"]["contract_blob"],
                     "contract_closure": config["workload_ref"]["contract_closure_sha256"],
                     "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+                    "verification_policy": config["workload_ref"]["verification_policy_sha256"],
                 },
                 "candidate": {
                     "task": task["root_task_id"],
@@ -935,6 +958,7 @@ def _merge_task(
                 "qualification": {
                     "contract_closure": config["workload_ref"]["contract_closure_sha256"],
                     "verification_engine": config["workload_ref"]["verification_engine_sha256"],
+                    "verification_policy": config["workload_ref"]["verification_policy_sha256"],
                     "receipt": verification_ref["qualification_receipt_sha256"],
                     "environment": verification_ref["execution_environment"],
                     "policy": verification_ref["evidence_policy"],
@@ -1323,47 +1347,64 @@ def _validate_bound_concurrency(config: dict[str, Any]) -> None:
         raise ConcurrencyError("workload run does not match its concurrency receipt")
 
 
-def command_approve_contract(arguments: argparse.Namespace) -> int:
-    """Bind explicit user approval to one agent-confirmed spec/contract generation."""
-    if arguments.approve is not True:
-        raise HarnessError("contract approval requires the explicit --approve flag")
-    target = Path(arguments.target).expanduser().resolve()
-    if (
-        not target.is_dir()
-        or _git(target, "rev-parse", "--is-inside-work-tree", check=False) != "true"
-        or Path(_git(target, "rev-parse", "--show-toplevel")).resolve() != target
-    ):
-        raise HarnessError("target must be the Git worktree root")
-    if _git(target, "status", "--porcelain=v1", "--untracked-files=all"):
-        raise HarnessError(
-            "approve the committed specification version: commit, stash, or remove changes first"
-        )
-    contract_path = _contract_path(target, arguments.contract)
+def command_plan(arguments: argparse.Namespace) -> int:
+    specifications = Path(arguments.target).expanduser().resolve()
+    if not specifications.is_dir():
+        raise HarnessError("plan target must be a specification directory")
     try:
-        stage = load_contract(contract_path)
-    except ContractError as error:
-        raise HarnessError(str(error)) from error
-    paths = [
-        contract_path.relative_to(target).as_posix(),
-        *stage["alignment"]["specifications"],
-    ]
-    for path in paths:
-        if not _git_succeeds(target, "ls-files", "--error-unmatch", "--", path):
-            raise HarnessError(f"alignment input must be committed before approval: {path}")
-    source_commit = _git(target, "rev-parse", "HEAD")
-    try:
-        receipt = write_alignment_receipt(
-            target,
-            contract_path,
-            stage,
-            source_commit=source_commit,
-            agent_identity=arguments.agent,
-            user_identity=_target_git_identity(target),
+        result = run_plan_session(
+            specifications,
+            agent=CodexSessionAgent(
+                _git_root_for_cli(specifications),
+                model=arguments.model,
+                reasoning_effort=arguments.reasoning_effort,
+                timeout_seconds=arguments.agent_timeout,
+            ),
+            user=TerminalUser(),
+            update_stage_ids=arguments.update,
         )
-    except AlignmentError as error:
+    except PlanningError as error:
         raise HarnessError(str(error)) from error
-    print(f"Aligned contract receipt: {receipt}")
-    print("Commit the receipt before starting the run.")
+    operation = "Roadmap maintenance" if arguments.update else "Planning"
+    print(f"{operation} complete: {result}")
+    print("Commit ROADMAP.md and verification/roadmap-approval.json before contract generation.")
+    return 0
+
+
+def _git_root_for_cli(path: Path) -> Path:
+    location = path.parent if path.is_file() else path
+    result = subprocess.run(
+        ["git", "-C", str(location), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise HarnessError("target must be inside a Git worktree")
+    return Path(result.stdout.strip()).resolve()
+
+
+def command_generate_contract(arguments: argparse.Namespace) -> int:
+    roadmap = Path(arguments.roadmap).expanduser().resolve()
+    if not roadmap.is_file():
+        raise HarnessError("generate-contract requires an approved ROADMAP.md")
+    repository = _git_root_for_cli(roadmap)
+    try:
+        result = run_generate_contract_session(
+            roadmap,
+            arguments.stage,
+            agent=CodexSessionAgent(
+                repository,
+                model=arguments.model,
+                reasoning_effort=arguments.reasoning_effort,
+                timeout_seconds=arguments.agent_timeout,
+            ),
+            user=TerminalUser(),
+        )
+    except PlanningError as error:
+        raise HarnessError(str(error)) from error
+    print(f"Contract generation complete: {result}")
+    print("Commit the approved sources, roadmap, contract, and generated receipts before run.")
     return 0
 
 
@@ -2527,6 +2568,65 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=command_verify)
     harness = root.add_parser("harness")
     commands = harness.add_subparsers(dest="command", required=True)
+    plan = commands.add_parser(
+        "plan",
+        help="collaboratively turn a specification directory into an approved ROADMAP.md",
+    )
+    plan.add_argument(
+        "--target", required=True, help="path to the Markdown specification directory"
+    )
+    plan.add_argument(
+        "--update",
+        action="append",
+        default=[],
+        metavar="PHASE_ID",
+        help=("maintain an existing approved phase; repeat to permit a multi-phase update"),
+    )
+    plan.add_argument(
+        "--model",
+        default=DEFAULT_SESSION_MODEL,
+        help=f"Codex model for planning (default: {DEFAULT_SESSION_MODEL})",
+    )
+    plan.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "xhigh", "max"),
+        default=DEFAULT_SESSION_REASONING_EFFORT,
+        help=(f"Codex reasoning effort for planning (default: {DEFAULT_SESSION_REASONING_EFFORT})"),
+    )
+    plan.add_argument(
+        "--agent-timeout",
+        type=float,
+        default=900.0,
+        help="maximum seconds without a Codex planning event (default: 900)",
+    )
+    plan.set_defaults(handler=command_plan)
+    generate = commands.add_parser(
+        "generate-contract",
+        help="collaboratively generate and approve one roadmap-stage contract",
+    )
+    generate.add_argument("roadmap", help="path to the approved ROADMAP.md")
+    generate.add_argument("stage", help="stable roadmap stage ID")
+    generate.add_argument(
+        "--model",
+        default=DEFAULT_SESSION_MODEL,
+        help=f"Codex model for contract generation (default: {DEFAULT_SESSION_MODEL})",
+    )
+    generate.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "xhigh", "max"),
+        default=DEFAULT_SESSION_REASONING_EFFORT,
+        help=(
+            "Codex reasoning effort for contract generation "
+            f"(default: {DEFAULT_SESSION_REASONING_EFFORT})"
+        ),
+    )
+    generate.add_argument(
+        "--agent-timeout",
+        type=float,
+        default=900.0,
+        help="maximum seconds without a Codex contract event (default: 900)",
+    )
+    generate.set_defaults(handler=command_generate_contract)
     run = commands.add_parser("run")
     run.add_argument(
         "--contract",
@@ -2559,23 +2659,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--foreground", action="store_true")
     run.set_defaults(handler=command_run)
-    approval = commands.add_parser(
-        "approve-contract",
-        help="approve one agent-confirmed natural-language specification and generated contract",
-    )
-    approval.add_argument("--target", default=str(Path.cwd()))
-    approval.add_argument("--contract", default="verification/contract.toml")
-    approval.add_argument(
-        "--agent",
-        required=True,
-        help="identity of the contract-generation agent attesting semantic fidelity",
-    )
-    approval.add_argument(
-        "--approve",
-        action="store_true",
-        help="explicitly approve the current committed specification version",
-    )
-    approval.set_defaults(handler=command_approve_contract)
     concurrency = commands.add_parser("validate-concurrency")
     concurrency.add_argument("--workers", type=int, default=7)
     concurrency.add_argument("--rounds", type=int, default=6)

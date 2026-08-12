@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://oxide.dev/verification/evidence-v1.schema.json",
+  "$id": "https://oxide.dev/verification/evidence-v2.schema.json",
   "title": "Oxide Verus proof receipt",
   "type": "object",
   "additionalProperties": false,
@@ -10,6 +10,7 @@
     "candidate_tree",
     "prospective_tree",
     "specifications",
+    "verification_policy_sha256",
     "proof_closure_sha256",
     "manifest_sha256",
     "contract_sha256",
@@ -29,15 +30,16 @@
     "artifacts"
   ],
   "properties": {
-    "schema": { "const": "OxideVerusEvidenceV1" },
+    "schema": { "const": "OxideVerusEvidenceV2" },
     "result": { "enum": ["passed", "product_failure", "infrastructure_failure"] },
     "candidate_tree": { "$ref": "#/$defs/git_tree" },
     "prospective_tree": { "$ref": "#/$defs/git_tree" },
     "specifications": {
       "type": "object",
-      "minProperties": 2,
+      "minProperties": 1,
       "additionalProperties": { "$ref": "#/$defs/sha256" }
     },
+    "verification_policy_sha256": { "$ref": "#/$defs/sha256" },
     "proof_closure_sha256": { "$ref": "#/$defs/sha256" },
     "manifest_sha256": { "$ref": "#/$defs/sha256" },
     "contract_sha256": { "$ref": "#/$defs/sha256" },

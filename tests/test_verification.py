@@ -8,24 +8,28 @@ import pytest
 from oxide.contract import ContractError, load_contract
 from oxide.verification.driver import invocation
 from oxide.verification.engine import (
+    InfrastructureError,
     VerificationError,
     engine_digest,
+    proof_receipt,
+    validate_generated_receipt,
     validate_policy,
 )
+from oxide.verification_policy import verification_policy_digest
 
 
 def _contract() -> str:
-    return """\
+    return f"""\
 schema = 3
 id = "formal-rust"
 stage = "foundation"
 enabled = true
 minimum_reviews = 3
 goal = "Implement a generically specified, pervasively verified Rust program."
+verification_policy_sha256 = "{verification_policy_digest()}"
 hash_algorithm = "sha256"
 manifest = "verification/manifest.toml"
 toolchain_lock = "verification/toolchain.lock.toml"
-verification_spec = "docs/VERIFICATION.md"
 product_spec = "docs/PRODUCT.md"
 immutable_paths = ["verification/contract.toml", "verification/alignment.json", "verification/toolchain.lock.toml", "docs"]
 production_roots = ["src"]
@@ -44,10 +48,10 @@ solver_rlimit = 10
 additional_forbidden_patterns = []
 
 [alignment]
-specifications = ["docs/PRODUCT.md", "docs/VERIFICATION.md"]
+specifications = ["docs/PRODUCT.md"]
 receipt = "verification/alignment.json"
 contractible = true
-goal_sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+goal_sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 ambiguities = []
 missing_acceptance_criteria = []
 unsupported_assumptions = []
@@ -70,14 +74,14 @@ id = "COMPONENT"
 title = "Implement one verified component"
 prompt = "Implement executable Rust, meaningful contracts, and its refinement proof."
 depends_on = []
-sources = [{ specification = "docs/PRODUCT.md", anchor = "Product" }]
+sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 
 [[tasks.checks]]
 id = "component-proof"
 driver = "verus"
 operation = "proof"
 root = "verification/proofs/component.rs"
-sources = [{ specification = "docs/VERIFICATION.md", anchor = "Verification" }]
+sources = [{{ specification = "docs/PRODUCT.md", anchor = "Product" }}]
 """
 
 
@@ -116,7 +120,6 @@ tooling = []
     )
     (repository / "verification" / "alignment.json").write_text("{}\n", encoding="utf-8")
     (repository / "docs" / "PRODUCT.md").write_text("# Product\n", encoding="utf-8")
-    (repository / "docs" / "VERIFICATION.md").write_text("# Verification\n", encoding="utf-8")
     frozen = root / "frozen"
     for relative in (
         "verification/contract.toml",
@@ -197,10 +200,27 @@ paths = ["verification/fixtures/proof-policy"]
     assert state["manifest"]["tooling"][0]["id"] == "proof-policy-fixtures"
 
 
-def test_frozen_product_and_verification_specs_are_judge_inputs(tmp_path: Path) -> None:
+def test_frozen_product_spec_is_a_judge_input_without_a_target_verification_spec(
+    tmp_path: Path,
+) -> None:
     repository, frozen = _repository(tmp_path)
+    assert not (repository / "docs" / "VERIFICATION.md").exists()
     (repository / "docs" / "PRODUCT.md").write_text("# Weaker product\n", encoding="utf-8")
     with pytest.raises(VerificationError, match="immutable verification-contract input"):
+        validate_policy(repository, frozen)
+
+
+def test_contract_must_bind_the_current_oxide_verification_policy(tmp_path: Path) -> None:
+    repository, frozen = _repository(tmp_path)
+    for root in (repository, frozen):
+        contract = root / "verification" / "contract.toml"
+        contract.write_text(
+            contract.read_text(encoding="utf-8").replace(
+                verification_policy_digest(), "sha256:" + "0" * 64
+            ),
+            encoding="utf-8",
+        )
+    with pytest.raises(VerificationError, match="current Oxide verification policy"):
         validate_policy(repository, frozen)
 
 
@@ -208,6 +228,35 @@ def test_verification_engine_digest_includes_the_evidence_schema() -> None:
     digest = engine_digest()
     assert digest.startswith("sha256:")
     assert len(digest) == 71
+
+
+def test_generated_proof_receipt_rejects_a_stale_oxide_policy(tmp_path: Path) -> None:
+    repository, frozen = _repository(tmp_path)
+    policy, state, _ = validate_policy(repository, frozen)
+    receipt = proof_receipt(
+        repository,
+        frozen,
+        policy,
+        state,
+        "0" * 40,
+        "1" * 40,
+        ["verus"],
+        0,
+        "passed",
+        {"sha256": "sha256:" + "2" * 64, "bytes": 0, "media_type": "text/plain"},
+        {
+            "host": policy["target"],
+            "asset": "verus",
+            "asset_sha256": "sha256:" + "3" * 64,
+            "verus_version": "test",
+            "verus_revision": state["toolchain"]["verus"]["revision"],
+            "rust_toolchain": "test-rust",
+        },
+    )
+    receipt["verification_policy_sha256"] = "sha256:" + "4" * 64
+
+    with pytest.raises(InfrastructureError, match="stale verification policy"):
+        validate_generated_receipt(receipt, policy, state)
 
 
 def test_nondefault_contract_path_is_an_explicit_engine_input(tmp_path: Path) -> None:

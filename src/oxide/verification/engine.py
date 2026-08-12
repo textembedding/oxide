@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from oxide.verification_policy import POLICY_PATH, verification_policy_digest
+
 
 class VerificationError(Exception):
     """A deterministic subject or policy failure."""
@@ -37,6 +39,7 @@ _HOST_ASSETS = {
 }
 _DEFAULT_CONTRACT_PATH = "verification/contract.toml"
 _EVIDENCE_SCHEMA = Path(__file__).with_name("evidence.schema.json")
+_VERIFICATION_POLICY_MODULE = Path(__file__).resolve().parents[1] / "verification_policy.py"
 _MANDATORY_FORBIDDEN_PATTERNS = (
     r"\bassume\s*\(",
     r"\badmit\s*\(",
@@ -55,9 +58,14 @@ _MANDATORY_FORBIDDEN_PATTERNS = (
 
 def engine_digest() -> str:
     digest = hashlib.sha256()
-    for path in (Path(__file__), _EVIDENCE_SCHEMA):
+    for label, path in (
+        ("verification/engine.py", Path(__file__)),
+        ("verification/evidence.schema.json", _EVIDENCE_SCHEMA),
+        ("verification_policy.py", _VERIFICATION_POLICY_MODULE),
+        ("docs/VERIFICATION_PRIMER.md", POLICY_PATH),
+    ):
         data = path.read_bytes()
-        digest.update(path.name.encode("utf-8"))
+        digest.update(label.encode("utf-8"))
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
     return "sha256:" + digest.hexdigest()
@@ -709,14 +717,13 @@ def validate_policy(
     contract_path: str = _DEFAULT_CONTRACT_PATH,
 ) -> tuple[dict[str, Any], dict[str, Any], list[Path]]:
     policy = read_toml(inside(contract_root, contract_path))
-    if policy.get("schema") != 3:
+    if policy.get("schema") not in {3, 4}:
         raise VerificationError("unsupported verification policy schema")
     if policy.get("hash_algorithm") != "sha256":
         raise VerificationError("verification policy must use sha256 identities")
     for field in (
         "manifest",
         "toolchain_lock",
-        "verification_spec",
         "product_spec",
         "target",
         "production_entry",
@@ -726,6 +733,8 @@ def validate_policy(
     ):
         if not isinstance(policy.get(field), str) or not policy[field]:
             raise VerificationError(f"policy.{field} must be nonempty")
+    if policy.get("verification_policy_sha256") != verification_policy_digest():
+        raise VerificationError("contract does not bind the current Oxide verification policy")
     policy["production_features"] = string_list(
         policy.get("production_features"), "policy.production_features", nonempty=True
     )
@@ -757,7 +766,6 @@ def validate_policy(
     required_immutable = (
         contract_path,
         str(policy["toolchain_lock"]),
-        str(policy["verification_spec"]),
         str(policy["product_spec"]),
     )
     for required in required_immutable:
@@ -1118,9 +1126,6 @@ def validate_policy(
         inside(repository, policy["product_spec"]),
         *closure,
     ]
-    verification_subject = inside(contract_root, policy["verification_spec"])
-    if verification_subject.exists():
-        subject_files.append(verification_subject)
     for field in ("contract_roots", "abstract_model_roots", "proof_roots"):
         roots = [
             inside(repository, value)
@@ -1165,9 +1170,6 @@ def proof_receipt(
     toolchain = state["toolchain"]
     specifications = {
         policy["product_spec"]: sha256_file(inside(contract_root, policy["product_spec"])),
-        policy["verification_spec"]: sha256_file(
-            inside(contract_root, policy["verification_spec"])
-        ),
     }
     for component in manifest["components"]:
         abstract_spec = str(component["abstract_spec"])
@@ -1180,11 +1182,12 @@ def proof_receipt(
     theorem_roots = [component["refinement_theorem"] for component in manifest["components"]]
     theorem_roots.append(manifest["composition_theorem"])
     return {
-        "schema": "OxideVerusEvidenceV1",
+        "schema": "OxideVerusEvidenceV2",
         "result": result,
         "candidate_tree": candidate_tree,
         "prospective_tree": prospective_tree,
         "specifications": specifications,
+        "verification_policy_sha256": verification_policy_digest(),
         "proof_closure_sha256": manifest["_closure_digest"],
         "manifest_sha256": sha256_file(inside(repository, policy["manifest"])),
         "contract_sha256": sha256_file(inside(contract_root, contract_path)),
@@ -1226,6 +1229,7 @@ def validate_generated_receipt(
         "candidate_tree",
         "prospective_tree",
         "specifications",
+        "verification_policy_sha256",
         "proof_closure_sha256",
         "manifest_sha256",
         "contract_sha256",
@@ -1244,7 +1248,7 @@ def validate_generated_receipt(
         "log",
         "artifacts",
     }
-    if set(receipt) != expected or receipt.get("schema") != "OxideVerusEvidenceV1":
+    if set(receipt) != expected or receipt.get("schema") != "OxideVerusEvidenceV2":
         raise InfrastructureError("generated proof receipt has the wrong schema closure")
     if receipt.get("result") not in {"passed", "product_failure", "infrastructure_failure"}:
         raise InfrastructureError("generated proof receipt has an invalid result")
@@ -1255,6 +1259,7 @@ def validate_generated_receipt(
         "manifest_sha256",
         "contract_sha256",
         "engine_sha256",
+        "verification_policy_sha256",
         "toolchain_lock_sha256",
     )
     if any(
@@ -1262,10 +1267,14 @@ def validate_generated_receipt(
         for field in sha_fields
     ):
         raise InfrastructureError("generated proof receipt has an invalid context digest")
+    if receipt["verification_policy_sha256"] != verification_policy_digest():
+        raise InfrastructureError("generated proof receipt names a stale verification policy")
+    if receipt["engine_sha256"] != engine_digest():
+        raise InfrastructureError("generated proof receipt names a stale verification engine")
     specifications = receipt.get("specifications")
     if (
         not isinstance(specifications, dict)
-        or not {policy["product_spec"], policy["verification_spec"]}.issubset(specifications)
+        or policy["product_spec"] not in specifications
         or any(
             re.fullmatch(r"sha256:[0-9a-f]{64}", str(value)) is None
             for value in specifications.values()
@@ -1479,7 +1488,7 @@ def run_gate(args: argparse.Namespace, repository: Path, contract_root: Path) ->
     if state["manifest"]["status"] == "implemented":
         return run_composition(args, repository, contract_root)
     receipt = {
-        "schema": "OxideVerificationFoundationEvidenceV1",
+        "schema": "OxideVerificationFoundationEvidenceV2",
         "result": "passed",
         "scope": "verification-foundation",
         "program_status": "unimplemented",
@@ -1489,6 +1498,7 @@ def run_gate(args: argparse.Namespace, repository: Path, contract_root: Path) ->
         "manifest_sha256": sha256_file(inside(repository, policy["manifest"])),
         "contract_sha256": sha256_file(inside(contract_root, args.contract)),
         "engine_sha256": engine_digest(),
+        "verification_policy_sha256": verification_policy_digest(),
         "toolchain_lock_sha256": sha256_file(inside(contract_root, policy["toolchain_lock"])),
         "target": policy["target"],
         "features": policy["production_features"],

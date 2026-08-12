@@ -8,27 +8,32 @@
 
 ## How it works
 
-Oxide is a meta-harness for coordinating Codex agents in parallel. It compiles
-natural-language specifications into executable contracts for implementation,
-review, and formal verification.
-
-Before admission, a contract-generation agent must trace every generated goal,
-task, and acceptance check to the specification. It may not guess through an
-ambiguity or invent missing success criteria. Instead, it proposes concrete prose
-changes; only user-approved changes are committed as a new specification version,
-and the contract is regenerated from that exact version.
+Oxide is a meta-harness for coordinating Codex agents in parallel. Its planning
+agent turns human-written specifications into a staged roadmap. For one approved
+stage, its contract agent then derives executable implementation, review, proof,
+and acceptance work.
 
 ```text
- human-written specification <---- approved revisions ----+
-              |                                           |
-              v                                           |
- contract-generation agent ---- ambiguity or gap ---------+
+ specification directory
               |
               v
- traced executable contract
+ planning agent <-------- user feedback
               |
               v
- agent attestation + user approval + mechanical qualification
+ approved ROADMAP.md
+              |
+              v
+ contract agent <-------- user feedback
+        |     |
+        |     +---- ambiguity or gap ----> approved source/roadmap revision
+        |                                      |
+        +--------------------------------------+
+              |
+              v
+ stage contract + exact semantic trace
+              |
+              v
+ agent attestation + user approval + mechanical qualification receipts
               |
               v
  +-----------------------------------------------------------+
@@ -55,18 +60,21 @@ and the contract is regenerated from that exact version.
                   newly unblocked work
 ```
 
-The alignment receipt binds the approved specification commit, its exact files,
-the regenerated contract, every semantic citation, the contract-generation
-agent’s contractibility attestation, and the user’s approval. Any specification
-or contract change invalidates it. Mechanical derivations may add dependency,
-classification, evidence, and recovery constraints, but may not change program
-behavior or success semantics.
+The user can challenge stage ordering, scope, tasks, or verification goals during
+either session. An ambiguity is never silently resolved. The contract agent must
+propose a concrete source change, obtain approval, write it back to the
+human-readable specification and roadmap, and regenerate the contract.
 
-Only after alignment and isolated mechanical qualification does Oxide create run
+The generated receipts separately record planning approval, the contract agent’s
+contractibility attestation, the user’s approval, and mechanical qualification.
+They bind the selected stage, applicable global invariants, exact cited source
+sections, semantic trace, and generated contract. A relevant change invalidates
+admission; an unrelated edit confined to a deferred future stage does not.
+
+Only after approval and isolated mechanical qualification does Oxide create run
 state or start the journal and workers. The contract defines tasks and their
-dependencies. The scheduler gives each idle worker the highest-value ready
-assignment. With no fixed role pools, implementation, review, and proof work can
-proceed concurrently.
+dependencies. With no fixed role pools, implementation, review, and proof work
+can proceed concurrently.
 
 Publishing freezes an immutable Git candidate, but does not expose it to the
 swarm immediately. Oxide first runs its deterministic policy against that exact
@@ -85,9 +93,9 @@ unlocks dependent work.
 ## Verification philosophy
 
 Oxide uses [Verus](https://verus-lang.github.io/verus/guide/) to prove that Rust
-code satisfies its formal contracts. The
-[verification primer](https://github.com/textembedding/oxide/blob/main/docs/VERIFICATION_PRIMER.md)
-explains the reasoning behind this model.
+code satisfies its formal contracts. Its normative
+[verification policy](https://github.com/textembedding/oxide/blob/main/docs/VERIFICATION_PRIMER.md)
+applies to every target independently of its product specifications.
 
 Every production logical component belongs to one refinement chain:
 
@@ -134,12 +142,15 @@ it does not need an Oxide-specific directory:
 ```text
 my-rust-product/
 ├── docs/
-│   ├── ROADMAP.md
 │   └── specs/
+├── ROADMAP.md
 ├── src/ or crates/
 └── verification/
     ├── contract.toml
-    ├── alignment.json
+    ├── roadmap-approval.json
+    ├── contract-attestation.json
+    ├── contract-approval.json
+    ├── contract-qualification.json
     ├── manifest.toml
     ├── toolchain.lock.toml
     ├── contracts/
@@ -155,9 +166,9 @@ graph, and assigns formal or supplementary checks to coherent candidates. Oxide
 constructs formal Verus commands itself, so a candidate cannot redefine the judge
 that accepts it.
 
-`verification/alignment.json` is a generated, machine-readable approval receipt;
-it is not another semantic specification. The Markdown files cited by the
-contract remain the sole human-readable authority for product behavior.
+The generated JSON files are immutable evidence, not semantic specifications.
+Specifications remain authoritative for product behavior, `ROADMAP.md` is the
+approved staged plan, and the stage contract is their enforceable derivation.
 
 At run creation, Oxide freezes the target commit, contract and immutable closure,
 verification-engine digest, execution policy, journal capacity, qualification
@@ -200,25 +211,62 @@ uv sync --extra dev
 `oxide` is the local entry point and automatically uses `.venv` when available.
 No global installation is required.
 
+Create the approved roadmap in an interactive planning session:
+
+```bash
+./oxide harness plan --target /path/to/my-rust-product/docs/specs/
+```
+
+The planning agent reads the complete specification corpus, derives as many or as
+few implementation phases as the work requires, and revises `ROADMAP.md` until
+the user enters `/approve`. An approved roadmap may retain future work as
+`planned`, `deferred`, or `blocked`; only a `ready` phase can generate a contract.
+
+Every roadmap uses the same validated schema, regardless of the source material.
+The root `ROADMAP.md` presents that data as an overview table and concise phase
+sections for human readers. Its exact TOML representation is kept in a collapsed
+section for Oxide. The readable view is generated from the TOML, so there is only
+one plan to approve and no second representation that can drift.
+
+Maintain an approved roadmap without reopening the whole plan:
+
+```bash
+./oxide harness plan \
+  --target /path/to/my-rust-product/docs/specs/ \
+  --update stage-1
+```
+
+Oxide asks for the intended change, locks every unselected phase and all stable
+phase IDs, then shows the exact diff and approval impact. Repeat `--update` to
+permit a coordinated multi-phase change. A readiness-only change preserves
+dependent approvals; a semantic change invalidates approvals for dependent phases.
+Nothing is written until `/approve`.
+
+Use maintenance mode for readiness, dependencies, and allocation of
+requirements already present in the specifications. If program behavior or
+success semantics change, update the specification first and then maintain the
+roadmap; the roadmap cannot introduce that behavior by itself.
+
+Generate one stage contract in a second interactive session:
+
+```bash
+./oxide harness generate-contract /path/to/my-rust-product/ROADMAP.md stage-0
+```
+
+The contract agent resolves the selected stage’s cited requirements and global
+invariants, explains its tasks and verification goals, and accepts free-form user
+feedback. `/approve` writes any approved upstream refinements, regenerates
+`verification/contract.toml`, records the agent attestation and user approval,
+and mechanically qualifies the exact artifact set. Commit the modified target
+files before execution.
+
 Before a run, qualify the journal backend under real multiprocess contention:
 
 ```bash
 ./oxide harness validate-concurrency --workers 8 --rounds 6
 ```
 
-After the contract-generation agent and user agree on the committed specification
-and generated contract, record that exact approval and commit its receipt:
-
-```bash
-./oxide harness approve-contract \
-  --target /path/to/my-rust-product \
-  --agent "contract-generation agent" \
-  --approve
-git -C /path/to/my-rust-product add verification/alignment.json
-git -C /path/to/my-rust-product commit -m "Approve generated verification contract"
-```
-
-Then launch against a target Rust project:
+Then launch against the committed target:
 
 ```bash
 ./oxide harness run \
@@ -229,6 +277,10 @@ Then launch against a target Rust project:
 The default contract is `verification/contract.toml`. Useful parallelism is
 determined by the contract’s dependency graph and its live mix of implementation,
 review, and proof work, up to the current 64-worker process limit.
+
+Neither interactive command creates a run, journal, worker, or observer. `run`
+fails before any of those exist when the roadmap approval, attestation, user
+approval, qualification, trace, or selected-stage binding is missing or stale.
 
 ## Observe and control
 
@@ -248,6 +300,6 @@ Runtime databases, logs, evidence, worker clones, and sockets remain under the
 ignored `.oxide/` directory. Product files remain in the target project.
 
 The normative system boundaries and acceptance invariants are in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The rationale behind Oxide’s
-pervasive-verification model is in the non-normative
-[verification primer](docs/VERIFICATION_PRIMER.md).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Oxide's universal assurance rules
+and their rationale are in the normative
+[verification policy](docs/VERIFICATION_PRIMER.md).

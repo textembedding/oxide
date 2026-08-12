@@ -12,6 +12,7 @@ from oxide.alignment import (
     write_alignment_receipt,
 )
 from oxide.contract import ContractError, load_contract
+from oxide.verification_policy import verification_policy_digest
 
 
 def _contract(*, anchor: str = "REQ-1", prompt: str = "Implement REQ-1.") -> str:
@@ -21,6 +22,7 @@ id = "aligned"
 enabled = true
 goal = "Implement the approved behavior."
 minimum_reviews = 3
+verification_policy_sha256 = "{verification_policy_digest()}"
 immutable_paths = ["verification/contract.toml", "verification/alignment.json", "docs"]
 
 [alignment]
