@@ -1,20 +1,18 @@
-"""Standardized, source-traced roadmaps and scope-aware planning approval."""
+"""Standardized, source-traced roadmaps and phase-set bindings."""
 
 from __future__ import annotations
 
 import hashlib
 import html
 import json
-import os
 import re
 import subprocess
 import tomllib
+import unicodedata
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
-
-from .verification_policy import verification_policy_digest
 
 
 class RoadmapError(RuntimeError):
@@ -23,12 +21,8 @@ class RoadmapError(RuntimeError):
 
 ROADMAP_MARKER = "<!-- oxide-roadmap-schema:1 -->"
 ROADMAP_VIEW_MARKER = "<!-- oxide-roadmap-view:1 -->"
-ROADMAP_APPROVAL_PATH = "verification/roadmap-approval.json"
 ROADMAP_SCHEMA = 1
-ROADMAP_APPROVAL_SCHEMA = "OxideRoadmapApprovalV2"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-_COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 
 
@@ -44,13 +38,6 @@ def canonical_bytes(value: object) -> bytes:
 
 def digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
-
-
-def _atomic_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def _relative_path(value: object, field: str) -> str:
@@ -93,7 +80,7 @@ def _source_references(value: object, field: str) -> list[dict[str, str]]:
             or "\x00" in requirement
         ):
             raise RoadmapError(f"{field}[{ordinal}] has malformed source text")
-        normalized = (path, anchor.strip(), requirement.strip())
+        normalized = (path, canonical_source_anchor(anchor), canonical_source_text(requirement))
         if normalized in seen:
             raise RoadmapError(f"{field} contains duplicate source requirements")
         seen.add(normalized)
@@ -597,8 +584,103 @@ def load_roadmap(path: str | Path) -> dict[str, Any]:
         raise RoadmapError(f"cannot read roadmap {source}: {error}") from error
 
 
+def canonical_source_anchor(value: str) -> str:
+    """Normalize Markdown heading presentation while preserving its title."""
+    value = value.strip().lstrip("#").strip().rstrip("#").strip()
+    # Prefix with a non-list token so a numeric heading such as ``14.3`` is not
+    # mistaken for ordered-list presentation by the general Markdown normalizer.
+    sentinel = "\ue002"
+    return canonical_source_text(f"{sentinel} {value}").removeprefix(f"{sentinel} ")
+
+
 def _normalize_heading(value: str) -> str:
-    return re.sub(r"[ \t]+", " ", value.strip().lstrip("#").strip().rstrip("#").strip())
+    return canonical_source_anchor(value)
+
+
+def _protect_markdown_code(value: str) -> tuple[str, list[str]]:
+    """Remove code delimiters while preserving the delimited bytes exactly."""
+    protected: list[str] = []
+
+    def token(content: str) -> str:
+        index = len(protected)
+        protected.append(content)
+        return f"\ue000{index}\ue001"
+
+    def fenced(match: re.Match[str]) -> str:
+        block = match.group(0)
+        lines = block.split("\n")
+        content = "\n".join(lines[1:-1]) if len(lines) >= 2 else ""
+        return token(content)
+
+    value = re.sub(
+        r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*?^[ \t]*(?:```|~~~)[ \t]*$",
+        fenced,
+        value,
+    )
+    value = re.sub(r"(?<!`)`([^`\n]*)`(?!`)", lambda match: token(match.group(1)), value)
+    return value, protected
+
+
+def _restore_markdown_code(value: str, protected: list[str]) -> str:
+    for index, content in enumerate(protected):
+        value = value.replace(f"\ue000{index}\ue001", content)
+    return value
+
+
+def canonical_source_text(value: str) -> str:
+    """Canonicalize Markdown presentation while retaining semantic source text.
+
+    Case, words, punctuation, links, and code bytes remain significant. Soft
+    wrapping, indentation, list/heading markers, emphasis, escapes, comments,
+    and table-rule styling do not. This lets exact source citations survive a
+    formatter without allowing a semantic rewrite to retain authority.
+    """
+    normalized = unicodedata.normalize("NFC", value).replace("\r\n", "\n").replace("\r", "\n")
+    normalized, protected = _protect_markdown_code(normalized)
+    normalized = re.sub(r"<!--[\s\S]*?-->", "", normalized)
+    lines: list[str] = []
+    table_rule = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$")
+    horizontal_rule = re.compile(r"^(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$")
+    for raw_line in normalized.split("\n"):
+        line = raw_line.strip()
+        if table_rule.fullmatch(line) or horizontal_rule.fullmatch(line):
+            continue
+        line = re.sub(r"^(?:>\s*)+", "", line)
+        line = re.sub(r"^#{1,6}[ \t]+", "", line)
+        line = re.sub(r"^(?:[-+*]|\d{1,9}[.)])[ \t]+", "", line)
+        line = re.sub(r"^\[[ xX]\][ \t]+", "", line)
+        line = re.sub(
+            r"</?(?:b|em|i|mark|small|span|strong|sub|sup|u)(?:\s[^>]*)?>",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+        # Retain link destinations because changing one can change meaning; only
+        # the Markdown punctuation around the label is presentational.
+        line = re.sub(r"!\[([^]]*)\]\(([^)]+)\)", r"\1 \2", line)
+        line = re.sub(r"\[([^]]+)\]\(([^)]+)\)", r"\1 \2", line)
+        for delimiters in (("**", "**"), ("__", "__"), ("*", "*"), ("_", "_")):
+            opening, closing = map(re.escape, delimiters)
+            line = re.sub(
+                rf"(?<!\w){opening}(?=\S)(.+?)(?<=\S){closing}(?!\w)",
+                r"\1",
+                line,
+            )
+        line = re.sub(r"\\([\\`*{}\[\]()#+\-.!_>])", r"\1", line)
+        lines.append(html.unescape(line))
+    canonical = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    return _restore_markdown_code(canonical, protected)
+
+
+def _roadmap_human_view(text: str) -> str:
+    if ROADMAP_VIEW_MARKER not in text:
+        raise RoadmapError("roadmap is missing its generated human view marker")
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        match = _HEADING.match(line.rstrip("\r\n"))
+        if match and _normalize_heading(match.group(2)) == "Machine-readable roadmap data":
+            return "".join(lines[:index])
+    raise RoadmapError("roadmap is missing its machine-readable data heading")
 
 
 def markdown_section(text: str, anchor: str, source: str) -> str:
@@ -661,9 +743,12 @@ def _stage_binding(
     except UnicodeDecodeError as error:
         raise RoadmapError("roadmap is not UTF-8") from error
     roadmap = parse_roadmap(roadmap_text, roadmap_path)
-    if roadmap_text != render_roadmap_document(roadmap_text, roadmap_path):
+    expected_roadmap = render_roadmap_document(roadmap_text, roadmap_path)
+    if canonical_source_text(_roadmap_human_view(roadmap_text)) != canonical_source_text(
+        _roadmap_human_view(expected_roadmap)
+    ):
         raise RoadmapError(
-            "roadmap human view does not match its machine data; regenerate it with Oxide"
+            "roadmap human view changes the meaning of its machine data; regenerate it with Oxide"
         )
     stage = next((item for item in roadmap["stages"] if item["id"] == stage_id), None)
     if stage is None:
@@ -695,7 +780,7 @@ def _stage_binding(
         except UnicodeDecodeError as error:
             raise RoadmapError(f"source specification is not UTF-8: {reference['path']}") from error
         section = markdown_section(text, reference["anchor"], reference["path"])
-        if reference["requirement"] not in section:
+        if canonical_source_text(reference["requirement"]) not in canonical_source_text(section):
             raise RoadmapError(
                 f"source requirement is absent from section {reference['anchor']!r} in "
                 f"{reference['path']}"
@@ -703,7 +788,7 @@ def _stage_binding(
         closure.append(
             {
                 **reference,
-                "section_sha256": digest_bytes(section.encode("utf-8")),
+                "section_sha256": digest_bytes(canonical_source_text(section).encode("utf-8")),
             }
         )
     return {
@@ -731,6 +816,70 @@ def stage_binding(
     return _stage_binding(read, roadmap_path, stage_id)
 
 
+def stage_set_binding(
+    repository: Path,
+    roadmap_path: str,
+    stage_ids: Iterable[str],
+    *,
+    commit: str | None = None,
+) -> dict[str, Any]:
+    """Bind an ordered set of roadmap phases and its deduplicated semantic closure."""
+    requested = list(stage_ids)
+    if not requested or len(requested) != len(set(requested)):
+        raise RoadmapError("contract generation must select one or more unique phases")
+    roadmap_raw = (
+        _git_reader(repository, commit)(roadmap_path)
+        if commit
+        else _worktree_reader(repository)(roadmap_path)
+    )
+    roadmap = parse_roadmap(roadmap_raw.decode("utf-8"), roadmap_path)
+    order = [stage["id"] for stage in roadmap["stages"]]
+    unknown = sorted(set(requested) - set(order))
+    if unknown:
+        raise RoadmapError("roadmap contains no phases: " + ", ".join(unknown))
+    selected = [identifier for identifier in order if identifier in set(requested)]
+    if selected != requested:
+        raise RoadmapError("selected phases must follow roadmap order")
+    bindings = [stage_binding(repository, roadmap_path, item, commit=commit) for item in selected]
+    selected_set = set(selected)
+    for binding in bindings:
+        missing = [
+            dependency
+            for dependency in binding["stage"]["dependencies"]
+            if dependency not in selected_set
+        ]
+        if missing:
+            raise RoadmapError(
+                f"phase {binding['stage_id']!r} requires selected dependencies: "
+                + ", ".join(missing)
+            )
+    closure: dict[tuple[str, str, str], dict[str, str]] = {}
+    invariants: dict[str, dict[str, Any]] = {}
+    for binding in bindings:
+        for item in binding["semantic_closure"]:
+            closure[(item["path"], item["anchor"], item["requirement"])] = item
+        for invariant in binding["global_invariants"]:
+            invariants[invariant["id"]] = invariant
+    return {
+        "roadmap_path": roadmap_path,
+        "roadmap_sha256": digest_bytes(roadmap_raw),
+        "stage_ids": selected,
+        "stages": [binding["stage"] for binding in bindings],
+        "stage_set_sha256": digest_bytes(
+            canonical_bytes([binding["stage"] for binding in bindings])
+        ),
+        "global_invariants": [invariants[key] for key in sorted(invariants)],
+        "global_invariants_sha256": digest_bytes(
+            canonical_bytes([invariants[key] for key in sorted(invariants)])
+        ),
+        "semantic_closure": [closure[key] for key in sorted(closure)],
+        "semantic_closure_sha256": digest_bytes(
+            canonical_bytes([closure[key] for key in sorted(closure)])
+        ),
+        "specification_root": bindings[0]["specification_root"],
+    }
+
+
 def proposed_stage_binding(
     repository: Path,
     roadmap_path: str,
@@ -749,17 +898,66 @@ def proposed_stage_binding(
     return _stage_binding(read, roadmap_path, stage_id)
 
 
-def planning_policy_digest() -> str:
-    return digest_bytes(
-        canonical_bytes(
-            {
-                "roadmap_module": digest_bytes(Path(__file__).read_bytes()),
-                "roadmap_schema": ROADMAP_SCHEMA,
-                "approval_schema": ROADMAP_APPROVAL_SCHEMA,
-                "verification_policy_sha256": verification_policy_digest(),
-            }
-        )
-    )
+def proposed_stage_set_binding(
+    repository: Path,
+    roadmap_path: str,
+    roadmap_content: str,
+    stage_ids: Iterable[str],
+    replacements: dict[str, str],
+) -> dict[str, Any]:
+    """Bind a multi-phase in-memory proposal before any approved file is written."""
+    current = _worktree_reader(repository)
+    encoded = {path: content.encode("utf-8") for path, content in replacements.items()}
+    encoded[roadmap_path] = roadmap_content.encode("utf-8")
+
+    def read(path: str) -> bytes:
+        return encoded[path] if path in encoded else current(path)
+
+    requested = list(stage_ids)
+    roadmap_raw = read(roadmap_path)
+    roadmap = parse_roadmap(roadmap_raw.decode("utf-8"), roadmap_path)
+    order = [phase["id"] for phase in roadmap["stages"]]
+    selected = [identifier for identifier in order if identifier in set(requested)]
+    if selected != requested:
+        raise RoadmapError("selected phases must exist once and follow roadmap order")
+    bindings = [_stage_binding(read, roadmap_path, identifier) for identifier in selected]
+    selected_set = set(selected)
+    for binding in bindings:
+        missing = [
+            dependency
+            for dependency in binding["stage"]["dependencies"]
+            if dependency not in selected_set
+        ]
+        if missing:
+            raise RoadmapError(
+                f"phase {binding['stage_id']!r} requires selected dependencies: "
+                + ", ".join(missing)
+            )
+    closure: dict[tuple[str, str, str], dict[str, str]] = {}
+    invariants: dict[str, dict[str, Any]] = {}
+    for binding in bindings:
+        for item in binding["semantic_closure"]:
+            closure[(item["path"], item["anchor"], item["requirement"])] = item
+        for invariant in binding["global_invariants"]:
+            invariants[invariant["id"]] = invariant
+    return {
+        "roadmap_path": roadmap_path,
+        "roadmap_sha256": digest_bytes(roadmap_raw),
+        "stage_ids": selected,
+        "stages": [binding["stage"] for binding in bindings],
+        "stage_set_sha256": digest_bytes(
+            canonical_bytes([binding["stage"] for binding in bindings])
+        ),
+        "global_invariants": [invariants[key] for key in sorted(invariants)],
+        "global_invariants_sha256": digest_bytes(
+            canonical_bytes([invariants[key] for key in sorted(invariants)])
+        ),
+        "semantic_closure": [closure[key] for key in sorted(closure)],
+        "semantic_closure_sha256": digest_bytes(
+            canonical_bytes([closure[key] for key in sorted(closure)])
+        ),
+        "specification_root": bindings[0]["specification_root"],
+    }
 
 
 def specification_corpus(repository: Path, directory: str) -> list[dict[str, str]]:
@@ -776,292 +974,3 @@ def specification_corpus(repository: Path, directory: str) -> list[dict[str, str
         }
         for path in files
     ]
-
-
-def _repository_head(repository: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else "unborn"
-
-
-def _valid_identity(value: object) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == {"name", "email"}
-        and all(isinstance(item, str) and item.strip() for item in value.values())
-        and "@" in value["email"]
-    )
-
-
-def build_roadmap_approval(
-    repository: Path,
-    roadmap_path: str,
-    *,
-    specification_directory: str,
-    stage_ids: Iterable[str],
-    agent: dict[str, Any],
-    user_identity: dict[str, str],
-    prior: dict[str, Any] | None = None,
-    invalidated_stage_ids: Iterable[str] = (),
-) -> dict[str, Any]:
-    if (
-        not isinstance(agent, dict)
-        or set(agent)
-        != {
-            "identity",
-            "complete_specification_corpus",
-            "faithful_to_specifications",
-            "unresolved",
-        }
-        or not isinstance(agent["identity"], str)
-        or not agent["identity"].strip()
-        or agent["complete_specification_corpus"] is not True
-        or agent["faithful_to_specifications"] is not True
-        or agent["unresolved"] != []
-    ):
-        raise RoadmapError("planning agent has not provided a complete roadmap attestation")
-    if not _valid_identity(user_identity):
-        raise RoadmapError("approving user Git identity is malformed")
-    path = _relative_path(roadmap_path, "roadmap approval path")
-    roadmap = load_roadmap(repository / path)
-    if roadmap["status"] != "ready":
-        raise RoadmapError("a draft roadmap cannot be approved")
-    requested = list(stage_ids)
-    if not requested or len(requested) != len(set(requested)):
-        raise RoadmapError("roadmap approval must identify one or more unique stages")
-    invalidated = set(invalidated_stage_ids)
-    approvals: dict[str, dict[str, Any]] = {}
-    if isinstance(prior, dict) and prior.get("schema") == ROADMAP_APPROVAL_SCHEMA:
-        for item in prior.get("stage_approvals", []):
-            if not isinstance(item, dict) or not isinstance(item.get("stage_id"), str):
-                continue
-            if item["stage_id"] in invalidated:
-                continue
-            try:
-                current = stage_binding(repository, path, item["stage_id"])
-            except RoadmapError:
-                continue
-            if all(
-                item.get(field) == current[field]
-                for field in (
-                    "stage_sha256",
-                    "global_invariants_sha256",
-                    "semantic_closure_sha256",
-                )
-            ):
-                approvals[item["stage_id"]] = item
-    for stage_id in requested:
-        binding = stage_binding(repository, path, stage_id)
-        approvals[stage_id] = {
-            "stage_id": stage_id,
-            "stage_sha256": binding["stage_sha256"],
-            "global_invariants_sha256": binding["global_invariants_sha256"],
-            "semantic_closure": binding["semantic_closure"],
-            "semantic_closure_sha256": binding["semantic_closure_sha256"],
-        }
-    raw = (repository / path).read_bytes()
-    return {
-        "schema": ROADMAP_APPROVAL_SCHEMA,
-        "status": "approved",
-        "roadmap_path": path,
-        "roadmap_sha256_at_approval": digest_bytes(raw),
-        "repository_revision": _repository_head(repository),
-        "specification_directory": _relative_path(
-            specification_directory, "roadmap specification directory"
-        ),
-        "specification_corpus_at_approval": specification_corpus(
-            repository, specification_directory
-        ),
-        "planning_policy_sha256": planning_policy_digest(),
-        "verification_policy_sha256": verification_policy_digest(),
-        "agent": agent,
-        "user": {
-            "name": user_identity["name"].strip(),
-            "email": user_identity["email"].strip(),
-            "approved": True,
-        },
-        "stage_approvals": [approvals[key] for key in sorted(approvals)],
-    }
-
-
-def write_roadmap_approval(
-    repository: Path,
-    roadmap_path: str,
-    *,
-    specification_directory: str,
-    stage_ids: Iterable[str],
-    agent: dict[str, Any],
-    user_identity: dict[str, str],
-    destination: str = ROADMAP_APPROVAL_PATH,
-    invalidated_stage_ids: Iterable[str] = (),
-) -> Path:
-    path = (repository / destination).resolve()
-    if not path.is_relative_to(repository.resolve()):
-        raise RoadmapError("roadmap approval receipt escaped the repository")
-    prior: dict[str, Any] | None = None
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            prior = loaded if isinstance(loaded, dict) else None
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            prior = None
-    receipt = build_roadmap_approval(
-        repository,
-        roadmap_path,
-        specification_directory=specification_directory,
-        stage_ids=stage_ids,
-        agent=agent,
-        user_identity=user_identity,
-        prior=prior,
-        invalidated_stage_ids=invalidated_stage_ids,
-    )
-    _atomic_json(path, receipt)
-    return path
-
-
-def _load_json_bytes(raw: bytes, description: str) -> dict[str, Any]:
-    try:
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RoadmapError(f"{description} is unreadable") from error
-    if not isinstance(value, dict):
-        raise RoadmapError(f"{description} must be an object")
-    return value
-
-
-def validate_roadmap_approval(
-    repository: Path,
-    roadmap_path: str,
-    stage_id: str,
-    *,
-    commit: str | None = None,
-    receipt_path: str = ROADMAP_APPROVAL_PATH,
-) -> dict[str, Any]:
-    read = _git_reader(repository, commit) if commit else _worktree_reader(repository)
-    try:
-        raw = read(receipt_path)
-    except RoadmapError as error:
-        raise RoadmapError(
-            "selected roadmap stage has no user-approved planning receipt"
-        ) from error
-    receipt = _load_json_bytes(raw, "roadmap approval receipt")
-    required = {
-        "schema",
-        "status",
-        "roadmap_path",
-        "roadmap_sha256_at_approval",
-        "repository_revision",
-        "specification_directory",
-        "specification_corpus_at_approval",
-        "planning_policy_sha256",
-        "verification_policy_sha256",
-        "agent",
-        "user",
-        "stage_approvals",
-    }
-    if set(receipt) != required or receipt.get("schema") != ROADMAP_APPROVAL_SCHEMA:
-        raise RoadmapError("roadmap approval receipt has the wrong schema closure")
-    if receipt.get("status") != "approved" or receipt.get("roadmap_path") != roadmap_path:
-        raise RoadmapError("roadmap approval receipt does not approve this roadmap")
-    if (
-        _DIGEST.fullmatch(str(receipt.get("roadmap_sha256_at_approval", ""))) is None
-        or _COMMIT.fullmatch(str(receipt.get("repository_revision", ""))) is None
-        or not isinstance(receipt.get("specification_directory"), str)
-        or not isinstance(receipt.get("specification_corpus_at_approval"), list)
-        or any(
-            not isinstance(item, dict)
-            or set(item) != {"path", "sha256"}
-            or not isinstance(item["path"], str)
-            or _DIGEST.fullmatch(str(item["sha256"])) is None
-            for item in receipt["specification_corpus_at_approval"]
-        )
-    ):
-        raise RoadmapError("roadmap approval provenance is malformed")
-    if receipt.get("planning_policy_sha256") != planning_policy_digest():
-        raise RoadmapError("roadmap planning policy changed; rerun the planning session")
-    if receipt.get("verification_policy_sha256") != verification_policy_digest():
-        raise RoadmapError("verification policy changed; rerun the planning session")
-    agent, user = receipt.get("agent"), receipt.get("user")
-    if (
-        not isinstance(agent, dict)
-        or set(agent)
-        != {
-            "identity",
-            "complete_specification_corpus",
-            "faithful_to_specifications",
-            "unresolved",
-        }
-        or not isinstance(agent.get("identity"), str)
-        or not agent["identity"].strip()
-        or agent.get("complete_specification_corpus") is not True
-        or agent.get("faithful_to_specifications") is not True
-        or agent.get("unresolved") != []
-    ):
-        raise RoadmapError("planning agent attestation is incomplete")
-    identity = (
-        {"name": user.get("name"), "email": user.get("email")} if isinstance(user, dict) else None
-    )
-    if not _valid_identity(identity):
-        raise RoadmapError("roadmap approval user identity is malformed")
-    if (
-        not isinstance(user, dict)
-        or set(user) != {"name", "email", "approved"}
-        or user.get("approved") is not True
-    ):
-        raise RoadmapError("roadmap lacks explicit user approval")
-    approvals = receipt.get("stage_approvals")
-    if (
-        not isinstance(approvals, list)
-        or not approvals
-        or len(
-            {
-                item.get("stage_id")
-                for item in approvals
-                if isinstance(item, dict) and isinstance(item.get("stage_id"), str)
-            }
-        )
-        != len(approvals)
-    ):
-        raise RoadmapError("roadmap stage approvals are malformed or duplicate")
-    binding = stage_binding(repository, roadmap_path, stage_id, commit=commit)
-    matches = [
-        item for item in approvals if isinstance(item, dict) and item.get("stage_id") == stage_id
-    ]
-    if len(matches) != 1:
-        raise RoadmapError(f"roadmap stage {stage_id!r} has not been explicitly approved")
-    approved = matches[0]
-    expected_fields = {
-        "stage_id",
-        "stage_sha256",
-        "global_invariants_sha256",
-        "semantic_closure",
-        "semantic_closure_sha256",
-    }
-    if set(approved) != expected_fields:
-        raise RoadmapError("roadmap stage approval is malformed")
-    for field in ("stage_sha256", "global_invariants_sha256", "semantic_closure_sha256"):
-        if approved.get(field) != binding[field]:
-            raise RoadmapError(
-                "selected roadmap stage, applicable invariant, or cited requirement changed; "
-                "rerun planning or contract generation"
-            )
-    if approved.get("semantic_closure") != binding["semantic_closure"]:
-        raise RoadmapError("selected roadmap semantic closure differs from its approval")
-    return {
-        "schema": ROADMAP_APPROVAL_SCHEMA,
-        "receipt_path": receipt_path,
-        "receipt_sha256": digest_bytes(raw),
-        "stage_id": stage_id,
-        "stage_sha256": binding["stage_sha256"],
-        "global_invariants_sha256": binding["global_invariants_sha256"],
-        "semantic_closure_sha256": binding["semantic_closure_sha256"],
-        "planning_policy_sha256": receipt["planning_policy_sha256"],
-        "verification_policy_sha256": receipt["verification_policy_sha256"],
-        "agent_identity": str(agent.get("identity", "")),
-        "approved_by": {"name": user["name"], "email": user["email"]},
-        "binding": binding,
-    }

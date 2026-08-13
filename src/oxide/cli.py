@@ -62,7 +62,9 @@ from .planning import (
     TerminalUser,
     run_generate_contract_session,
     run_plan_session,
+    select_contract_phases,
 )
+from .roadmap import RoadmapError, load_roadmap
 from .verification.driver import engine_digest, invocation
 from .verification_policy import verification_policy_digest
 from .worker import Worker, worktree_diff
@@ -1367,7 +1369,7 @@ def command_plan(arguments: argparse.Namespace) -> int:
         raise HarnessError(str(error)) from error
     operation = "Roadmap maintenance" if arguments.update else "Planning"
     print(f"{operation} complete: {result}")
-    print("Commit ROADMAP.md and verification/roadmap-approval.json before contract generation.")
+    print("Commit the approved ROADMAP.md before contract generation.")
     return 0
 
 
@@ -1389,22 +1391,27 @@ def command_generate_contract(arguments: argparse.Namespace) -> int:
     if not roadmap.is_file():
         raise HarnessError("generate-contract requires an approved ROADMAP.md")
     repository = _git_root_for_cli(roadmap)
+    user = TerminalUser()
+    try:
+        selected = select_contract_phases(load_roadmap(roadmap), user)
+    except (PlanningError, RoadmapError) as error:
+        raise HarnessError(str(error)) from error
     try:
         result = run_generate_contract_session(
             roadmap,
-            arguments.stage,
+            selected,
             agent=CodexSessionAgent(
                 repository,
                 model=arguments.model,
                 reasoning_effort=arguments.reasoning_effort,
                 timeout_seconds=arguments.agent_timeout,
             ),
-            user=TerminalUser(),
+            user=user,
         )
     except PlanningError as error:
         raise HarnessError(str(error)) from error
     print(f"Contract generation complete: {result}")
-    print("Commit the approved sources, roadmap, contract, and generated receipts before run.")
+    print("Commit the approved ROADMAP.md and verification/contract.toml before run.")
     return 0
 
 
@@ -2602,10 +2609,9 @@ def build_parser() -> argparse.ArgumentParser:
     plan.set_defaults(handler=command_plan)
     generate = commands.add_parser(
         "generate-contract",
-        help="collaboratively generate and approve one roadmap-stage contract",
+        help="select ready phases and collaboratively generate one aggregate contract",
     )
     generate.add_argument("roadmap", help="path to the approved ROADMAP.md")
-    generate.add_argument("stage", help="stable roadmap stage ID")
     generate.add_argument(
         "--model",
         default=DEFAULT_SESSION_MODEL,

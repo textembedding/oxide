@@ -15,7 +15,7 @@ The terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
 Oxide collaboratively derives a staged roadmap and Rust/Verus implementation
 contract from a target's human-readable specifications, then turns an approved
-stage contract into an authoritative Git tree with maximal useful parallelism.
+multi-phase contract into an authoritative Git tree with maximal useful parallelism.
 
 - The **target repository** owns product requirements, approved roadmap, verification
   contract and DAG, production code, abstract models, implementation
@@ -25,7 +25,7 @@ stage contract into an authoritative Git tree with maximal useful parallelism.
   scheduling, isolated Git execution, process authority, prompts, review,
   evidence execution, exact-tree merge gating, replay, and rewind.
 - Oxide's universal verification-policy digest is a judge input bound by planning
-  approval, generated contracts, admission receipts, frozen runs, and proof
+  approval, generated contracts, admission results, frozen runs, and proof
   evidence. A target specification need not repeat that policy and cannot weaken it.
 - The **journal** stores generic immutable records created by the swarm: workflow
   events, discoveries, decisions, failures, reviews, and evidence.
@@ -44,7 +44,7 @@ is therefore a separate, explicit admission gate.
 
 The target's natural-language specification set is the sole human-readable
 semantic authority for program behavior and success. `ROADMAP.md` is the canonical
-staged plan derived from those specifications. A generated stage contract is a
+staged plan derived from those specifications. A generated phase contract is a
 machine-executable derivation, not a second source of product intent.
 
 `oxide harness plan --target <specification-directory>` starts a collaborative
@@ -54,9 +54,8 @@ an arbitrary number of coherent phases from capabilities and dependencies, expla
 scope and dependencies, and accept free-form user pushback. It MUST NOT assume
 that specifications use planning phases or a fixed numbering scheme. Current,
 future, deferred, and blocked work MUST remain represented without inventing
-missing semantics. It MUST write no approved roadmap or approval receipt until
-the user explicitly approves the current exact
-proposal. The standardized roadmap MUST give every stage a stable identifier,
+missing semantics. It MUST write no roadmap until the user explicitly approves
+the current exact proposal. The standardized roadmap MUST give every phase a stable identifier,
 outcome, included and deferred scope, dependencies, exact source requirements,
 applicable global invariants, implementation and verification goals, and readiness.
 Roadmap approval does not make every phase contractible; only a phase marked
@@ -80,12 +79,14 @@ phase change also invalidates approvals for its transitive dependents. Adding,
 removing, renaming, or globally restructuring phases requires a new full planning
 session.
 
-`oxide harness generate-contract <ROADMAP.md> <stage-id>` starts a separate
-contract-agent session for exactly one approved stage. The agent MUST resolve the
-stage's exact source requirements and applicable global invariants, explain the
-proposed executable tasks and verification goals, and accept free-form user
-refinement. Agent contractibility attestation and user approval are separate and
-neither substitutes for the other.
+`oxide harness generate-contract <ROADMAP.md>` first presents a dependency-aware
+phase selector. Only ready phases may be checked, and each dependency must be
+checked before its dependent. After confirmation, one contract-agent session
+generates one contract spanning the checked phases. The agent MUST resolve their
+exact source requirements and applicable global invariants, explain the proposed
+executable tasks and verification goals, and accept free-form user refinement.
+Agent contractibility attestation and user approval are separate and neither
+substitutes for the other.
 
 Before a contract can be admitted, its generation agent MUST inspect the complete
 declared specification set and classify it as aligned or not aligned. Ambiguity,
@@ -104,21 +105,24 @@ those citations and the exact generated goal, task, and check content. Mechanica
 derivations MAY add enforcement details, including dependency edges, source
 classifications, proof obligations, evidence identity, and recovery checks. They
 MUST NOT add or change product behavior, failure behavior, or success semantics.
+Citation identity MUST preserve wording, case, punctuation, links, and code while
+normalizing presentation-only Markdown such as soft wrapping, indentation, list
+markers, heading markers, emphasis, and line-ending convention.
 
-Admission requires four strict machine-readable artifact classes:
+Admission requires three strict machine-readable inputs:
 
-- roadmap planning provenance and explicit user approval for the selected stage;
+- the user-approved `ROADMAP.md` and selected phase closure;
 - an agent attestation that the stage is contractible, all gaps are resolved, and
   the derivation introduces no product semantics absent from approved sources;
-- explicit user approval of the current stage meaning, generated contract, and
-  verification goals;
-- mechanical qualification binding the exact roadmap-stage closure, semantic
-  trace, generated contract, and alignment-policy identity.
+- explicit user approval of the current phase meanings, generated contract, and
+  verification goals.
 
-The receipts are evidence of exact decisions, not additional semantic
-specifications. Deterministic validation proves identity, trace closure, and
-absence of unresolved fields; the agent and user remain responsible for the
-natural-language entailment judgment.
+The attestation and approval are bound inside `contract.toml` to its semantic
+payload. They are evidence of exact decisions, not additional product semantics.
+Oxide recomputes mechanical qualification at admission; it does not trust a
+qualification assertion stored by the generator. Deterministic validation proves
+identity, trace closure, and absence of unresolved fields; the agent and user
+remain responsible for the natural-language entailment judgment.
 
 Oxide MUST validate alignment before backend qualification. It MUST then complete
 contract and toolchain qualification in disposable admission state before creating
@@ -144,9 +148,9 @@ The contract MUST identify:
 - production features, target, entry point, and composition theorem;
 - one acyclic implementation DAG with at least one evidence requirement per task;
 - bounded execution, artifact, and receipt policies;
-- the approved roadmap stage, applicable global invariants, exact cited source
-  requirements, separate approval artifacts, and one or more source citations for
-  every generated semantic unit.
+- the selected roadmap phases, applicable global invariants, exact cited source
+  requirements, embedded attestation and approval, and one or more source
+  citations for every generated semantic unit.
 
 Formal checks select an Oxide-supported Verus operation and target proof root.
 They MUST NOT supply an alternate verifier command. Explicit command checks are

@@ -29,10 +29,10 @@ review, and formal verification.
         +--------------------------------------+
               |
               v
- stage contract + exact semantic trace
+ multi-phase contract + exact semantic trace
               |
               v
- agent attestation + user approval + mechanical qualification receipts
+ embedded attestation + user approval; mechanical qualification
               |
               v
  +-----------------------------------------------------------+
@@ -60,8 +60,8 @@ review, and formal verification.
 ```
 
 1. Run `./oxide harness plan` to turn a specification into an approved roadmap.
-2. Run `./oxide harness generate-contract` to turn one roadmap phase into an
-   executable contract. If anything is unclear, the agent asks before proceeding.
+2. Run `./oxide harness generate-contract`, check one or more ready phases, and
+   generate one executable contract. Dependencies must be checked first.
 3. Approve the generated contract after the agent attests it and Oxide
    mechanically qualifies it.
 4. Run `./oxide harness run` to start Codex workers. They claim implementation,
@@ -126,10 +126,6 @@ my-rust-product/
 ├── src/ or crates/
 └── verification/
     ├── contract.toml
-    ├── roadmap-approval.json
-    ├── contract-attestation.json
-    ├── contract-approval.json
-    ├── contract-qualification.json
     ├── manifest.toml
     ├── toolchain.lock.toml
     ├── contracts/
@@ -145,9 +141,20 @@ graph, and assigns formal or supplementary checks to coherent candidates. Oxide
 constructs formal Verus commands itself, so a candidate cannot redefine the judge
 that accepts it.
 
-The generated JSON files are immutable evidence, not semantic specifications.
-Specifications remain authoritative for product behavior, `ROADMAP.md` is the
-approved staged plan, and the stage contract is their enforceable derivation.
+`contract.toml` also binds the contract agent's attestation and the user's exact
+approval. Oxide recomputes mechanical qualification at admission instead of
+trusting a stored qualification claim. Specifications remain authoritative for
+product behavior, `ROADMAP.md` is the approved staged plan, and the contract is
+their enforceable derivation.
+
+Source traceability is strict about meaning, not Markdown styling. Rewording,
+punctuation, links, and code invalidate a binding; line wrapping, indentation,
+list markers, and emphasis do not force a contract rewrite.
+
+`manifest.toml` remains separate because it is not a pre-contract approval file.
+It is the evolving coverage map from production Rust components to contracts,
+models, proofs, and the trusted boundary. Workers update it with the code; the
+exact prospective-tree gate validates it before merge.
 
 At run creation, Oxide freezes the target commit, contract and immutable closure,
 verification-engine digest, execution policy, journal capacity, qualification
@@ -217,17 +224,17 @@ when behavior or success semantics change. Repeat `--update` for each phase in a
 coordinated multi-phase change. Readiness-only updates preserve dependent
 approvals; semantic changes invalidate affected approvals.
 
-4. Generate the contract for one ready phase:
+4. Select ready phases and generate their contract:
 
 ```bash
-./oxide harness generate-contract /path/to/my-rust-product/ROADMAP.md stage-0
+./oxide harness generate-contract /path/to/my-rust-product/ROADMAP.md
 ```
 
-The contract agent resolves the cited requirements and invariants, then revises
-the tasks and verification goals with you. Enter `/approve` to persist approved
-source changes, generate `verification/contract.toml`, record the attestation and
-approval, and qualify the exact artifacts. Commit the target repository changes
-before execution.
+The selector enables a phase only when it is ready and all of its dependencies
+are checked. Confirm the checked set to start the contract agent. It resolves the
+cited requirements and invariants, then revises the tasks and verification goals
+with you. Enter `/approve` to write one `verification/contract.toml` containing
+the exact trace, attestation, and approval. Commit it before execution.
 
 5. Qualify the journal backend, then launch against the committed target:
 
@@ -241,8 +248,8 @@ before execution.
 `run` uses `verification/contract.toml` by default and supports up to 64 workers;
 the contract graph determines how many can work productively. Planning and
 contract generation never start runtime processes. Launch fails before creating
-run state if any approval, attestation, qualification, trace, or phase binding is
-missing or stale.
+run state if its approval, attestation, recomputed qualification, trace, or phase
+binding is missing or stale.
 
 ## Observe and control
 

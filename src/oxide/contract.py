@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
+from .roadmap import canonical_source_anchor, canonical_source_text
 from .verification_policy import verification_policy_digest
 
 
@@ -16,6 +18,7 @@ class ContractError(RuntimeError):
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERUS_OPERATIONS = {"proof", "gate", "composition"}
 _ALIGNMENT_GAPS = (
     "ambiguities",
@@ -23,6 +26,21 @@ _ALIGNMENT_GAPS = (
     "unsupported_assumptions",
     "semantic_gaps",
 )
+
+
+def contract_payload_digest(value: dict[str, Any]) -> str:
+    """Bind contract semantics without self-referential decision metadata."""
+    payload = dict(value)
+    payload.pop("attestation", None)
+    payload.pop("approval", None)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _relative_path(value: object, field: str) -> str:
@@ -86,17 +104,18 @@ def _source_refs(
             or "\x00" in requirement
         ):
             raise ContractError(f"{field}[{ordinal}].requirement is malformed")
+        normalized_anchor = canonical_source_anchor(anchor)
         identity = (
-            (specification, anchor, requirement.strip())
+            (specification, normalized_anchor, canonical_source_text(requirement))
             if exact_requirements
-            else (specification, anchor)
+            else (specification, normalized_anchor)
         )
         if identity in identities:
             raise ContractError(f"{field} contains duplicate citations")
         identities.add(identity)
-        citation = {"specification": specification, "anchor": anchor}
+        citation = {"specification": specification, "anchor": normalized_anchor}
         if exact_requirements:
-            citation["requirement"] = requirement.strip()
+            citation["requirement"] = canonical_source_text(requirement)
         normalized.append(citation)
     return normalized
 
@@ -198,13 +217,16 @@ def _check(
 
 
 def validate_contract(
-    value: object, source: str | Path = "verification/contract.toml"
+    value: object,
+    source: str | Path = "verification/contract.toml",
+    *,
+    require_approval: bool = True,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError("verification contract must be a TOML table")
     contract = dict(value)
     schema = contract.get("schema")
-    if schema not in {3, 4}:
+    if schema not in {3, 5}:
         raise ContractError("unsupported verification contract schema")
     identifier = contract.get("id")
     if not isinstance(identifier, str) or not _SAFE_ID.fullmatch(identifier):
@@ -248,11 +270,7 @@ def validate_contract(
         allowed_alignment.update(
             {
                 "roadmap",
-                "roadmap_stage",
-                "roadmap_approval",
-                "attestation",
-                "approval",
-                "qualification",
+                "roadmap_stages",
                 "implementation_goals",
                 "verification_goals",
             }
@@ -281,28 +299,24 @@ def validate_contract(
                 "contract.alignment.receipt must be a JSON file under verification/"
             )
         receipt_paths = [receipt]
-        roadmap = roadmap_stage = None
+        roadmap = None
         implementation_goals: list[str] = []
         verification_goals: list[str] = []
     else:
         roadmap = _relative_path(alignment.get("roadmap"), "contract.alignment.roadmap")
-        roadmap_stage = alignment.get("roadmap_stage")
         if roadmap != "ROADMAP.md":
-            raise ContractError("schema 4 contract.alignment.roadmap must be ROADMAP.md")
-        if not isinstance(roadmap_stage, str) or _SAFE_ID.fullmatch(roadmap_stage) is None:
-            raise ContractError("contract.alignment.roadmap_stage is invalid")
-        named_receipts = {
-            field: _relative_path(alignment.get(field), f"contract.alignment.{field}")
-            for field in ("roadmap_approval", "attestation", "approval", "qualification")
-        }
-        if any(
-            not path.startswith("verification/") or not path.endswith(".json")
-            for path in named_receipts.values()
-        ):
-            raise ContractError("alignment receipts must be JSON files under verification/")
-        if len(set(named_receipts.values())) != len(named_receipts):
-            raise ContractError("alignment receipt paths must be distinct")
-        receipt_paths = list(named_receipts.values())
+            raise ContractError("schema 5 contract.alignment.roadmap must be ROADMAP.md")
+        roadmap_stages = _string_list(
+            alignment.get("roadmap_stages"),
+            "contract.alignment.roadmap_stages",
+            nonempty=True,
+        )
+        if any(_SAFE_ID.fullmatch(item) is None for item in roadmap_stages):
+            raise ContractError("contract.alignment.roadmap_stages contains an invalid phase ID")
+        declared_stages = _string_list(contract.get("stages"), "contract.stages", nonempty=True)
+        if declared_stages != roadmap_stages:
+            raise ContractError("contract.stages must equal contract.alignment.roadmap_stages")
+        receipt_paths = []
         implementation_goals = _string_list(
             alignment.get("implementation_goals"),
             "contract.alignment.implementation_goals",
@@ -324,13 +338,69 @@ def validate_contract(
         alignment.get("proposed_revisions", []),
         "contract.alignment.proposed_revisions",
     )
+    if schema == 5:
+        decision_fields = {"binding", "attestation", "approval"}
+        if not require_approval and (decision_fields & set(contract)):
+            raise ContractError(
+                "draft schema 5 contracts must leave binding and approval metadata to Oxide"
+            )
+        if require_approval and not decision_fields <= set(contract):
+            raise ContractError(
+                "schema 5 contract lacks its semantic binding, attestation, or user approval"
+            )
+        binding = contract.get("binding")
+        if require_approval and (
+            not isinstance(binding, dict)
+            or set(binding)
+            != {
+                "stage_set_sha256",
+                "global_invariants_sha256",
+                "semantic_closure_sha256",
+            }
+            or any(_DIGEST.fullmatch(str(value)) is None for value in binding.values())
+        ):
+            raise ContractError("contract semantic phase-set binding is malformed")
+        payload_sha256 = contract_payload_digest(contract)
+        attestation = contract.get("attestation")
+        approval = contract.get("approval")
+        if require_approval and (
+            not isinstance(attestation, dict)
+            or set(attestation)
+            != {
+                "identity",
+                "payload_sha256",
+                "contractible",
+                "faithful_to_approved_sources",
+                "introduces_no_product_semantics",
+                "unresolved",
+            }
+            or not isinstance(attestation.get("identity"), str)
+            or not attestation["identity"].strip()
+            or attestation.get("payload_sha256") != payload_sha256
+            or attestation.get("contractible") is not True
+            or attestation.get("faithful_to_approved_sources") is not True
+            or attestation.get("introduces_no_product_semantics") is not True
+            or attestation.get("unresolved") != []
+        ):
+            raise ContractError("contract agent attestation is incomplete or stale")
+        if require_approval and (
+            not isinstance(approval, dict)
+            or set(approval) != {"user_name", "user_email", "payload_sha256", "approved"}
+            or not isinstance(approval.get("user_name"), str)
+            or not approval["user_name"].strip()
+            or not isinstance(approval.get("user_email"), str)
+            or "@" not in approval["user_email"]
+            or approval.get("payload_sha256") != payload_sha256
+            or approval.get("approved") is not True
+        ):
+            raise ContractError("contract lacks current explicit user approval")
     if any(gaps.values()) and not proposed_revisions:
         raise ContractError("unresolved alignment gaps require concrete proposed revisions")
     goal_sources = _source_refs(
         alignment.get("goal_sources"),
         "contract.alignment.goal_sources",
         specification_set,
-        exact_requirements=schema == 4,
+        exact_requirements=schema == 5,
     )
 
     def covered(path: str) -> bool:
@@ -379,6 +449,11 @@ def validate_contract(
         if not isinstance(task, dict):
             raise ContractError("contract tasks must be tables")
         task_id = task.get("id")
+        allowed_task_fields = {"id", "title", "prompt", "depends_on", "sources", "checks"}
+        if schema == 5:
+            allowed_task_fields.add("phase")
+        if set(task) != allowed_task_fields:
+            raise ContractError(f"task {task_id} has unsupported or missing fields")
         if (
             not isinstance(task_id, str)
             or not _SAFE_ID.fullmatch(task_id)
@@ -401,11 +476,14 @@ def validate_contract(
             or not raw_checks
         ):
             raise ContractError(f"task {task_id} is incomplete")
+        phase = task.get("phase") if schema == 5 else None
+        if schema == 5 and phase not in roadmap_stages:
+            raise ContractError(f"task {task_id} names an unselected roadmap phase")
         task_sources = _source_refs(
             task.get("sources"),
             f"task {task_id}.sources",
             specification_set,
-            exact_requirements=schema == 4,
+            exact_requirements=schema == 5,
         )
         checks = [
             _check(
@@ -413,22 +491,23 @@ def validate_contract(
                 index,
                 task_id,
                 specification_set,
-                exact_requirements=schema == 4,
+                exact_requirements=schema == 5,
             )
             for index, item in enumerate(raw_checks, 1)
         ]
         if len({item["id"] for item in checks}) != len(checks):
             raise ContractError(f"task {task_id} has duplicate check ids")
-        normalized_tasks.append(
-            {
-                "id": task_id,
-                "title": title,
-                "prompt": prompt,
-                "depends_on": list(dependencies),
-                "checks": checks,
-                "sources": task_sources,
-            }
-        )
+        normalized_task = {
+            "id": task_id,
+            "title": title,
+            "prompt": prompt,
+            "depends_on": list(dependencies),
+            "checks": checks,
+            "sources": task_sources,
+        }
+        if schema == 5:
+            normalized_task["phase"] = phase
+        normalized_tasks.append(normalized_task)
     dependencies = {task["id"]: set(task["depends_on"]) for task in normalized_tasks}
     for task_id, required in dependencies.items():
         if task_id in required or not required <= identifiers:
@@ -440,8 +519,8 @@ def validate_contract(
             raise ContractError("verification contract task graph contains a cycle")
         remaining -= ready
     selected_stage = contract.get("stage", identifier)
-    if schema == 4 and selected_stage != roadmap_stage:
-        raise ContractError("contract.stage must equal contract.alignment.roadmap_stage")
+    if schema == 5 and "stage" in contract:
+        raise ContractError("schema 5 contracts use contract.stages, not contract.stage")
     normalized_alignment: dict[str, Any] = {
         "specifications": specifications,
         "contractible": contractible,
@@ -460,6 +539,7 @@ def validate_contract(
                         "title": task["title"],
                         "prompt": task["prompt"],
                         "depends_on": task["depends_on"],
+                        **({"phase": task["phase"]} if schema == 5 else {}),
                     },
                     "sources": task["sources"],
                 }
@@ -496,17 +576,14 @@ def validate_contract(
         normalized_alignment.update(
             {
                 "roadmap": roadmap,
-                "roadmap_stage": roadmap_stage,
-                "roadmap_approval": named_receipts["roadmap_approval"],
-                "attestation": named_receipts["attestation"],
-                "approval": named_receipts["approval"],
-                "qualification": named_receipts["qualification"],
+                "roadmap_stages": roadmap_stages,
                 "implementation_goals": implementation_goals,
                 "verification_goals": verification_goals,
             }
         )
     stage = {
-        "stage": selected_stage,
+        "stage": selected_stage if schema != 5 else "+".join(roadmap_stages),
+        "stages": roadmap_stages if schema == 5 else [selected_stage],
         "enabled": True,
         "goal": goal,
         "minimum_reviews": minimum_reviews,

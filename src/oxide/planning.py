@@ -26,9 +26,8 @@ from typing import Any, Protocol, TextIO
 from .alignment import (
     AlignmentError,
     validate_interactive_trace,
-    write_interactive_alignment_receipts,
 )
-from .contract import ContractError, validate_contract
+from .contract import ContractError, contract_payload_digest, validate_contract
 from .roadmap import (
     RoadmapError,
     canonical_bytes,
@@ -36,11 +35,11 @@ from .roadmap import (
     load_roadmap,
     parse_roadmap,
     proposed_stage_binding,
+    proposed_stage_set_binding,
     render_roadmap_document,
     roadmap_maintenance_impact,
     specification_corpus,
-    validate_roadmap_approval,
-    write_roadmap_approval,
+    stage_set_binding,
 )
 from .verification_policy import (
     POLICY_PROFILE,
@@ -125,6 +124,83 @@ class ScriptedUser:
             raise PlanningError("scripted user ran out of responses") from error
         self.transcript.append(response)
         return response
+
+
+def selectable_ready_phases(roadmap: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return selector metadata for every roadmap phase in roadmap order."""
+    phases: list[dict[str, Any]] = []
+    for phase in roadmap["stages"]:
+        phases.append(
+            {
+                "id": phase["id"],
+                "outcome": phase["outcome"],
+                "readiness": phase["readiness"],
+                "dependencies": phase["dependencies"],
+            }
+        )
+    return phases
+
+
+def select_contract_phases(roadmap: dict[str, Any], user: SessionUser) -> list[str]:
+    """Interactive checkbox-style selector with dependency-aware toggling.
+
+    A numeric toggle is intentionally used instead of a terminal UI dependency so
+    the same behavior works over SSH and remains scriptable in model-free tests.
+    """
+    phases = selectable_ready_phases(roadmap)
+    chosen: set[str] = set()
+    while True:
+        lines = ["Select ready phases for this contract:"]
+        for index, phase in enumerate(phases, 1):
+            dependencies = set(phase["dependencies"])
+            checked = phase["id"] in chosen
+            marker = "x" if checked else " "
+            suffix = ""
+            if phase["readiness"] != "ready":
+                suffix = f" (not ready: {phase['readiness']})"
+            elif not dependencies <= chosen:
+                suffix = (
+                    " (select dependencies first: "
+                    + ", ".join(item for item in phase["dependencies"] if item not in chosen)
+                    + ")"
+                )
+            lines.append(f"  {index}. [{marker}] {phase['id']} — {phase['outcome']}{suffix}")
+        user.show("\n".join(lines))
+        response = user.respond("Toggle a phase number, /confirm the checked phases, or /quit: ")
+        if response == "/quit":
+            raise PlanningError("contract-generation session cancelled; nothing was approved")
+        if response == "/confirm":
+            if not chosen:
+                user.show("Select at least one ready phase before confirming.")
+                continue
+            return [phase["id"] for phase in phases if phase["id"] in chosen]
+        try:
+            index = int(response) - 1
+            if not 0 <= index < len(phases):
+                raise IndexError
+            phase = phases[index]
+        except (ValueError, IndexError):
+            user.show("Enter one displayed phase number, /confirm, or /quit.")
+            continue
+        identifier = phase["id"]
+        if identifier in chosen:
+            dependents = {
+                item["id"]
+                for item in phases
+                if item["id"] in chosen and identifier in item["dependencies"]
+            }
+            if dependents:
+                user.show("Uncheck dependent phases first: " + ", ".join(sorted(dependents)))
+                continue
+            chosen.remove(identifier)
+            continue
+        missing = [item for item in phase["dependencies"] if item not in chosen]
+        if phase["readiness"] != "ready":
+            user.show(f"{identifier} is {phase['readiness']}, not ready.")
+        elif missing:
+            user.show("Select dependencies first: " + ", ".join(missing))
+        else:
+            chosen.add(identifier)
 
 
 class CodexSessionAgent:
@@ -740,8 +816,8 @@ def run_plan_session(
             raise PlanningError("roadmap maintenance requires an existing approved ROADMAP.md")
         try:
             baseline = load_roadmap(roadmap_path)
-            for stage_id in maintenance_ids:
-                validate_roadmap_approval(repository, "ROADMAP.md", stage_id)
+            if baseline["status"] != "ready":
+                raise RoadmapError("roadmap maintenance requires a ready baseline")
         except RoadmapError as error:
             raise PlanningError(f"roadmap maintenance baseline is not approved: {error}") from error
         while not maintenance_request:
@@ -890,39 +966,10 @@ def run_plan_session(
                 _PLAN_SCHEMA,
             )
             continue
-        identity = user_identity or git_identity(repository)
-        approved_stage_ids = (
-            maintenance_ids if maintenance_ids else [stage["id"] for stage in roadmap["stages"]]
-        )
-        invalidated_stage_ids = (
-            maintenance_impact["invalidated_stage_ids"] if maintenance_impact is not None else []
-        )
-
-        def approve_written_roadmap(
-            identity: dict[str, str] = identity,
-            approved_stage_ids: tuple[str, ...] = tuple(approved_stage_ids),
-            invalidated_stage_ids: tuple[str, ...] = tuple(invalidated_stage_ids),
-        ) -> None:
-            write_roadmap_approval(
-                repository,
-                "ROADMAP.md",
-                specification_directory=directory,
-                stage_ids=approved_stage_ids,
-                agent={
-                    "identity": agent.identity,
-                    "complete_specification_corpus": True,
-                    "faithful_to_specifications": True,
-                    "unresolved": [],
-                },
-                user_identity=identity,
-                invalidated_stage_ids=invalidated_stage_ids,
-            )
-
         try:
             _apply_with_rollback(
                 {roadmap_path: roadmap_text},
-                approve_written_roadmap,
-                tracked=[repository / "verification" / "roadmap-approval.json"],
+                lambda: None,
             )
         except RoadmapError as error:
             raise PlanningError(f"approved roadmap failed qualification: {error}") from error
@@ -930,14 +977,14 @@ def run_plan_session(
         return roadmap_path
 
 
-def _contract_prompt(repository: Path, roadmap_path: str, stage_id: str) -> str:
-    approval = validate_roadmap_approval(repository, roadmap_path, stage_id)
-    binding = approval["binding"]
+def _contract_prompt(repository: Path, roadmap_path: str, stage_ids: Iterable[str]) -> str:
+    selected = [stage_ids] if isinstance(stage_ids, str) else list(stage_ids)
+    binding = stage_set_binding(repository, roadmap_path, selected)
     source_paths = sorted({item["path"] for item in binding["semantic_closure"]})
     bundle = _frozen_source_bundle(repository, [roadmap_path, *source_paths])
     policy = verification_policy_prompt()
     return f"""You are Oxide's interactive contract-generation agent. Generate exactly one
-implementation contract for roadmap stage {stage_id!r} in {roadmap_path!r}. The approved roadmap
+implementation contract for roadmap phases {selected!r} in {roadmap_path!r}. The approved roadmap
 and full text of every source specification in the selected-stage semantic closure are included
 below. Read the supplied source bundle directly. Do not use shell, file, Git, or network tools to
 reread it during this turn. The selected-stage semantic closure is:
@@ -951,14 +998,19 @@ replacement content for each affected specification and an updated complete ROAD
 For roadmap_markdown, return the authoritative marker and TOML schema; Oxide regenerates the
 standardized human-readable roadmap view from that data. Do not edit files yourself.
 
-Return a complete schema=4 verification/contract.toml. Its stage must equal {stage_id!r}; its
-goal must exactly equal the roadmap outcome. [alignment] must name ROADMAP.md, {stage_id!r},
-verification/roadmap-approval.json, verification/contract-attestation.json,
-verification/contract-approval.json, and verification/contract-qualification.json. It must
-copy the stage implementation_goals and verification_goals exactly. Every goal, task, and
+Return one complete schema=5 verification/contract.toml. Its stages and
+[alignment].roadmap_stages must equal {selected!r} in roadmap order. Its goal must summarize
+exactly the selected outcomes without adding behavior. Every task must name one selected phase.
+[alignment] must name ROADMAP.md and must contain the selected phases' concatenated
+implementation_goals and verification_goals in roadmap order. Every goal, task, and
 check source must contain specification, heading anchor, and exact requirement text from the
-approved closure. Its specifications list must equal the closure's distinct paths. All these
-files, ROADMAP.md, the cited specifications, and the contract itself must be immutable_paths.
+approved closure. Source wording, case, punctuation, links, and code are strict; Markdown
+presentation may be normalized. Its specifications list must equal the closure's distinct paths. ROADMAP.md,
+the cited specifications, the contract itself, the toolchain lock, and coverage manifest must be
+immutable_paths. Do not include attestation, approval, or qualification tables. After the user
+approves the proposal, Oxide appends the agent attestation and user approval to this same
+contract.toml and recomputes mechanical qualification at admission. Do not name sidecar approval
+JSON files.
 Use Oxide's existing formal-check conventions and target verification files. Mechanical
 dependencies and evidence bindings may enforce approved semantics but may not add product
 behavior. Set ready_for_approval and contractible only with empty unresolved fields and a
@@ -980,13 +1032,13 @@ FROZEN SOURCE BUNDLE
 """
 
 
-def _contract_value(text: str) -> dict[str, Any]:
+def _contract_value(text: str, *, require_approval: bool = False) -> dict[str, Any]:
     try:
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
         raise PlanningError(f"generated contract TOML is invalid: {error}") from error
     try:
-        return validate_contract(raw)
+        return validate_contract(raw, require_approval=require_approval)
     except ContractError as error:
         raise PlanningError(str(error)) from error
 
@@ -1019,6 +1071,56 @@ def _validated_updates(
     return updates
 
 
+def _toml_quote(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def embed_contract_approval(
+    contract_text: str,
+    *,
+    binding: dict[str, Any],
+    agent_identity: str,
+    user_identity: dict[str, str],
+) -> str:
+    """Append the actual interactive decisions to an agent-generated contract."""
+    try:
+        raw = tomllib.loads(contract_text)
+    except tomllib.TOMLDecodeError as error:
+        raise PlanningError(f"generated contract TOML is invalid: {error}") from error
+    if raw.get("schema") != 5:
+        raise PlanningError("interactive multi-phase generation requires contract schema 5")
+    if {"binding", "attestation", "approval"} & set(raw):
+        raise PlanningError("Oxide, not the contract agent, owns approval metadata")
+    semantic_binding = {
+        "stage_set_sha256": binding["stage_set_sha256"],
+        "global_invariants_sha256": binding["global_invariants_sha256"],
+        "semantic_closure_sha256": binding["semantic_closure_sha256"],
+    }
+    raw["binding"] = semantic_binding
+    payload_sha256 = contract_payload_digest(raw)
+    metadata = (
+        "\n\n[binding]\n"
+        f"stage_set_sha256 = {_toml_quote(semantic_binding['stage_set_sha256'])}\n"
+        "global_invariants_sha256 = "
+        f"{_toml_quote(semantic_binding['global_invariants_sha256'])}\n"
+        "semantic_closure_sha256 = "
+        f"{_toml_quote(semantic_binding['semantic_closure_sha256'])}\n\n"
+        "[attestation]\n"
+        f"identity = {_toml_quote(agent_identity)}\n"
+        f"payload_sha256 = {_toml_quote(payload_sha256)}\n"
+        "contractible = true\n"
+        "faithful_to_approved_sources = true\n"
+        "introduces_no_product_semantics = true\n"
+        "unresolved = []\n\n"
+        "[approval]\n"
+        f"user_name = {_toml_quote(user_identity['name'])}\n"
+        f"user_email = {_toml_quote(user_identity['email'])}\n"
+        f"payload_sha256 = {_toml_quote(payload_sha256)}\n"
+        "approved = true\n"
+    )
+    return contract_text.rstrip() + metadata
+
+
 def _apply_with_rollback(
     updates: dict[Path, str], validate: Any, *, tracked: Iterable[Path] = ()
 ) -> None:
@@ -1039,7 +1141,7 @@ def _apply_with_rollback(
 
 def run_generate_contract_session(
     roadmap_file: Path,
-    stage_id: str,
+    stage_ids: Iterable[str],
     *,
     agent: SessionAgent,
     user: SessionUser,
@@ -1047,17 +1149,18 @@ def run_generate_contract_session(
 ) -> Path:
     repository = _git_root(roadmap_file)
     roadmap_relative = roadmap_file.resolve().relative_to(repository).as_posix()
+    selected = [stage_ids] if isinstance(stage_ids, str) else list(stage_ids)
+    if not selected:
+        raise PlanningError("contract generation selected no phases")
     try:
-        planning_approval = validate_roadmap_approval(repository, roadmap_relative, stage_id)
+        original_binding = stage_set_binding(repository, roadmap_relative, selected)
+        for phase in original_binding["stages"]:
+            if phase["readiness"] != "ready":
+                raise PlanningError(f"roadmap phase {phase['id']!r} is not ready")
     except RoadmapError as error:
         raise PlanningError(str(error)) from error
-    original_binding = planning_approval["binding"]
-    if original_binding["stage"]["readiness"] != "ready":
-        raise PlanningError(
-            f"roadmap stage {stage_id!r} is approved but not ready for contract generation"
-        )
     response = agent.start(
-        _contract_prompt(repository, roadmap_relative, stage_id), _CONTRACT_SCHEMA
+        _contract_prompt(repository, roadmap_relative, selected), _CONTRACT_SCHEMA
     )
     contract_path = repository / "verification" / "contract.toml"
     while True:
@@ -1073,27 +1176,29 @@ def run_generate_contract_session(
             roadmap_text = updates[repository / "ROADMAP.md"]
             roadmap = parse_roadmap(roadmap_text, "ROADMAP.md")
             contract_stage = _contract_value(response["contract_toml"])
-            if contract_stage["stage"] != stage_id:
-                raise PlanningError("generated contract selects a different roadmap stage")
+            if contract_stage.get("stages") != selected:
+                raise PlanningError("generated contract selects different roadmap phases")
             replacements = {
                 path.relative_to(repository).as_posix(): content
                 for path, content in updates.items()
                 if path not in {repository / "ROADMAP.md", contract_path}
             }
-            proposal_binding = proposed_stage_binding(
+            proposal_binding = proposed_stage_set_binding(
                 repository,
                 "ROADMAP.md",
                 roadmap_text,
-                stage_id,
+                selected,
                 replacements,
             )
+            if any(phase["readiness"] != "ready" for phase in proposal_binding["stages"]):
+                raise PlanningError("every selected phase must remain ready")
             validate_interactive_trace(contract_stage, proposal_binding)
             user.show(
                 "Exact approval binding:\n"
                 + json.dumps(
                     {
-                        "stage_id": stage_id,
-                        "stage_sha256": proposal_binding["stage_sha256"],
+                        "stage_ids": selected,
+                        "stage_set_sha256": proposal_binding["stage_set_sha256"],
                         "global_invariants_sha256": proposal_binding["global_invariants_sha256"],
                         "semantic_closure": proposal_binding["semantic_closure"],
                         "semantic_closure_sha256": proposal_binding["semantic_closure_sha256"],
@@ -1121,7 +1226,7 @@ def run_generate_contract_session(
             proposal_problem = str(error)
             user.show(f"Contract proposal is not mechanically valid yet: {proposal_problem}")
         decision = user.respond(
-            "Feedback, /approve this exact stage meaning, contract, and verification goals, "
+            "Feedback, /approve these exact phase meanings, contract, and verification goals, "
             "or /quit: "
         )
         if decision == "/quit":
@@ -1171,46 +1276,23 @@ def run_generate_contract_session(
 
         def qualify_written_artifacts(identity: dict[str, str] = identity) -> None:
             nonlocal contract_stage
-            final_roadmap = load_roadmap(repository / "ROADMAP.md")
-            selected = next(
-                (stage for stage in final_roadmap["stages"] if stage["id"] == stage_id), None
-            )
-            if selected is None or selected["readiness"] != "ready":
-                raise PlanningError("selected roadmap stage is not ready for contract generation")
-            write_roadmap_approval(
-                repository,
-                "ROADMAP.md",
-                specification_directory=final_roadmap["specification_root"],
-                stage_ids=[stage_id],
-                agent={
-                    "identity": agent.identity,
-                    "complete_specification_corpus": True,
-                    "faithful_to_specifications": True,
-                    "unresolved": [],
-                },
-                user_identity=identity,
-            )
-            contract_stage = _contract_value(contract_path.read_text(encoding="utf-8"))
-            write_interactive_alignment_receipts(
-                repository,
-                contract_path,
-                contract_stage,
+            final_binding = stage_set_binding(repository, "ROADMAP.md", selected)
+            approved = embed_contract_approval(
+                contract_path.read_text(encoding="utf-8"),
+                binding=final_binding,
                 agent_identity=agent.identity,
                 user_identity=identity,
             )
+            _atomic_text(contract_path, approved)
+            contract_stage = _contract_value(approved, require_approval=True)
+            validate_interactive_trace(contract_stage, final_binding)
 
         try:
             _apply_with_rollback(
                 updates,
                 qualify_written_artifacts,
-                tracked=[
-                    repository / "verification" / "roadmap-approval.json",
-                    repository / "verification" / "contract-attestation.json",
-                    repository / "verification" / "contract-approval.json",
-                    repository / "verification" / "contract-qualification.json",
-                ],
             )
         except (AlignmentError, ContractError, RoadmapError, PlanningError) as error:
             raise PlanningError(f"approved artifact set failed qualification: {error}") from error
-        user.show(f"Approved stage contract written to {contract_path}")
+        user.show(f"Approved phase contract written to {contract_path}")
         return contract_path

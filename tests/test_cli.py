@@ -966,9 +966,7 @@ def test_macos_commands_and_controls_remain_available() -> None:
         ]
     )
     assert maintenance.update == ["storage", "search"]
-    generation = parser.parse_args(
-        ["harness", "generate-contract", "/tmp/product/ROADMAP.md", "stage-0"]
-    )
+    generation = parser.parse_args(["harness", "generate-contract", "/tmp/product/ROADMAP.md"])
     assert generation.handler is cli.command_generate_contract
     assert generation.model == "gpt-5.6-sol"
     assert generation.reasoning_effort == "max"

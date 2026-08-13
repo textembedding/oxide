@@ -19,14 +19,16 @@ from oxide.planning import (
     _plan_prompt,
     run_generate_contract_session,
     run_plan_session,
+    select_contract_phases,
 )
 from oxide.roadmap import (
     ROADMAP_VIEW_MARKER,
     RoadmapError,
+    canonical_source_text,
     load_roadmap,
     parse_roadmap,
     render_roadmap_document,
-    validate_roadmap_approval,
+    stage_binding,
 )
 from oxide.verification_policy import POLICY_PROFILE, verification_policy_digest
 
@@ -395,9 +397,9 @@ def _contract(
     verification_goal: str = "Prove append durability and recovery refinement.",
 ) -> str:
     return f'''\
-schema = 4
-id = "journal-stage-0"
-stage = "stage-0"
+schema = 5
+id = "journal-phases"
+stages = ["stage-0"]
 enabled = true
 goal = "Deliver the durable journal foundation."
 minimum_reviews = 3
@@ -406,20 +408,14 @@ immutable_paths = [
   "ROADMAP.md",
   "docs/specs",
   "verification/contract.toml",
-  "verification/roadmap-approval.json",
-  "verification/contract-attestation.json",
-  "verification/contract-approval.json",
-  "verification/contract-qualification.json",
+  "verification/manifest.toml",
+  "verification/toolchain.lock.toml",
 ]
 
 [alignment]
 specifications = ["docs/specs/PRODUCT.md"]
 roadmap = "ROADMAP.md"
-roadmap_stage = "stage-0"
-roadmap_approval = "verification/roadmap-approval.json"
-attestation = "verification/contract-attestation.json"
-approval = "verification/contract-approval.json"
-qualification = "verification/contract-qualification.json"
+roadmap_stages = ["stage-0"]
 contractible = true
 implementation_goals = ["{requirement}"]
 verification_goals = ["{verification_goal}"]
@@ -435,6 +431,7 @@ evidence_policy = "exact-verus-context-v1"
 
 [[tasks]]
 id = "append-recovery"
+phase = "stage-0"
 title = "Implement durable append and recovery"
 prompt = "Implement the approved durable append and recovery behavior with its Verus proof."
 depends_on = []
@@ -453,7 +450,7 @@ def _contract_response(
     contract: str,
     *,
     ready: bool = True,
-    verification_goal: str = "Prove append durability and recovery refinement.",
+    verification_goal: str | list[str] = "Prove append durability and recovery refinement.",
     file_updates: list[dict] | None = None,
 ) -> dict:
     gaps = {
@@ -464,6 +461,9 @@ def _contract_response(
     }
     if not ready:
         gaps["ambiguities"] = ["Recovery success is not precise enough"]
+    verification_goals = (
+        [verification_goal] if isinstance(verification_goal, str) else verification_goal
+    )
     return {
         "message": "Contract and exact verification goals are ready."
         if ready
@@ -473,7 +473,7 @@ def _contract_response(
         "faithful_to_sources": ready,
         "complete_specification_corpus": True,
         "unresolved": gaps,
-        "verification_goals": [verification_goal],
+        "verification_goals": verification_goals,
         "file_updates": file_updates or [],
         "roadmap_markdown": roadmap,
         "contract_toml": contract,
@@ -489,13 +489,55 @@ def _approved_plan(repository: Path) -> None:
     )
 
 
+def _two_phase_contract() -> str:
+    durable_requirement = "Implement an append-only journal with durable recovery."
+    exact_requirement = "Add bounded exact search."
+    contract = _contract()
+    contract = (
+        contract.replace('stages = ["stage-0"]', 'stages = ["stage-0", "stage-1"]')
+        .replace(
+            'goal = "Deliver the durable journal foundation."',
+            'goal = "Deliver the durable journal foundation and bounded exact search."',
+        )
+        .replace('roadmap_stages = ["stage-0"]', 'roadmap_stages = ["stage-0", "stage-1"]')
+        .replace(
+            f'implementation_goals = ["{durable_requirement}"]',
+            f'implementation_goals = ["{durable_requirement}", "{exact_requirement}"]',
+        )
+        .replace(
+            'verification_goals = ["Prove append durability and recovery refinement."]',
+            'verification_goals = ["Prove append durability and recovery refinement.", '
+            '"Prove exact result preservation."]',
+        )
+    )
+    return (
+        contract
+        + f'''\
+
+[[tasks]]
+id = "bounded-exact-search"
+phase = "stage-1"
+title = "Implement bounded exact search"
+prompt = "Implement the approved bounded exact search behavior and proof."
+depends_on = ["append-recovery"]
+sources = [{{ specification = "docs/specs/PRODUCT.md", anchor = "Exact retrieval", requirement = "{exact_requirement}" }}]
+
+[[tasks.checks]]
+id = "bounded-exact-search-proof"
+driver = "command"
+command = "cargo test --all-targets"
+sources = [{{ specification = "docs/specs/PRODUCT.md", anchor = "Exact retrieval", requirement = "{exact_requirement}" }}]
+'''
+    )
+
+
 def test_contract_prompt_injects_oxide_policy_outside_target_semantic_closure(
     tmp_path: Path,
 ) -> None:
     repository = _repository(tmp_path)
     _approved_plan(repository)
 
-    prompt = _contract_prompt(repository, "ROADMAP.md", "stage-0")
+    prompt = _contract_prompt(repository, "ROADMAP.md", ["stage-0"])
 
     assert "BEGIN OXIDE NORMATIVE VERIFICATION POLICY" in prompt
     assert verification_policy_digest() in prompt
@@ -504,18 +546,39 @@ def test_contract_prompt_injects_oxide_policy_outside_target_semantic_closure(
     assert '"path": "docs/specs/PRODUCT.md"' in prompt
 
 
-def test_roadmap_approval_is_invalidated_when_oxide_verification_policy_changes(
-    tmp_path: Path,
-) -> None:
+def test_source_trace_ignores_formatting_but_not_semantic_changes(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     _approved_plan(repository)
-    receipt = repository / "verification" / "roadmap-approval.json"
-    value = json.loads(receipt.read_text(encoding="utf-8"))
-    value["verification_policy_sha256"] = "sha256:" + "0" * 64
-    receipt.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    specification = repository / "docs" / "specs" / "PRODUCT.md"
+    specification.write_text(
+        SPEC.replace(
+            "Implement an append-only journal with durable recovery.",
+            "Implement an append-only journal\n    with durable recovery.",
+        ),
+        encoding="utf-8",
+    )
+    assert stage_binding(repository, "ROADMAP.md", "stage-0")["stage_id"] == "stage-0"
 
-    with pytest.raises(RoadmapError, match="verification policy changed"):
-        validate_roadmap_approval(repository, "ROADMAP.md", "stage-0")
+    specification.write_text(
+        specification.read_text(encoding="utf-8").replace(
+            "durable recovery", "best-effort recovery"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RoadmapError, match="source requirement is absent"):
+        stage_binding(repository, "ROADMAP.md", "stage-0")
+
+
+def test_source_canonicalization_preserves_code_and_semantics() -> None:
+    assert canonical_source_text("Alpha  beta\n gamma") == "Alpha beta gamma"
+    assert canonical_source_text("Alpha `x  y` beta") == "Alpha x  y beta"
+    assert canonical_source_text("Every command is **planned**.") == (
+        canonical_source_text("Every command is planned.")
+    )
+    assert canonical_source_text("Run `cargo  test` now.") != canonical_source_text(
+        "Run `cargo test` now."
+    )
+    assert canonical_source_text("Alpha beta") != canonical_source_text("alpha beta")
 
 
 def _approved_contract(repository: Path) -> None:
@@ -568,13 +631,7 @@ def test_plan_pushback_refines_agent_derived_boundaries_and_requires_approval(
         "planned",
         "planned",
     ]
-    receipt = json.loads((repository / "verification" / "roadmap-approval.json").read_text())
-    assert [item["stage_id"] for item in receipt["stage_approvals"]] == [
-        "stage-0",
-        "stage-1",
-        "stage-2",
-        "stage-3",
-    ]
+    assert not any((repository / "verification").iterdir())
     assert "Move durability ahead of search." in user.transcript
 
 
@@ -601,13 +658,6 @@ def test_plan_maintenance_changes_only_the_selected_phase(tmp_path: Path) -> Non
     ]
     assert any("stage-1: readiness" in item for item in user.transcript)
     assert any("no dependent phase approvals invalidated" in item for item in user.transcript)
-    receipt = json.loads((repository / "verification" / "roadmap-approval.json").read_text())
-    assert [item["stage_id"] for item in receipt["stage_approvals"]] == [
-        "stage-0",
-        "stage-1",
-        "stage-2",
-        "stage-3",
-    ]
 
 
 def test_plan_maintenance_rejects_unselected_phase_changes(tmp_path: Path) -> None:
@@ -635,7 +685,7 @@ def test_plan_maintenance_rejects_unselected_phase_changes(tmp_path: Path) -> No
     assert any("changed unselected phase 'stage-2'" in item for item in user.transcript)
 
 
-def test_plan_maintenance_invalidates_dependent_phase_approvals(tmp_path: Path) -> None:
+def test_plan_maintenance_reports_dependent_phase_invalidation(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     _approved_plan(repository)
     revised = _roadmap().replace(
@@ -652,17 +702,10 @@ def test_plan_maintenance_invalidates_dependent_phase_approvals(tmp_path: Path) 
         update_stage_ids=["stage-1"],
     )
 
-    receipt = json.loads((repository / "verification" / "roadmap-approval.json").read_text())
-    assert [item["stage_id"] for item in receipt["stage_approvals"]] == [
-        "stage-0",
-        "stage-1",
-    ]
     assert any(
         "dependent phase approvals invalidated: stage-2, stage-3" in item
         for item in user.transcript
     )
-    with pytest.raises(RoadmapError, match="not been explicitly approved"):
-        validate_roadmap_approval(repository, "ROADMAP.md", "stage-2")
 
 
 def test_plan_repairs_agent_schema_errors_before_requesting_user_review(
@@ -704,7 +747,6 @@ def test_plan_without_explicit_approval_writes_nothing(tmp_path: Path) -> None:
             user_identity={"name": "Test User", "email": "test@example.com"},
         )
     assert not (repository / "ROADMAP.md").exists()
-    assert not (repository / "verification" / "roadmap-approval.json").exists()
     assert not (repository / ".oxide").exists()
 
 
@@ -723,8 +765,22 @@ def test_roadmap_human_view_cannot_diverge_from_approved_machine_data(
         encoding="utf-8",
     )
 
-    with pytest.raises(RoadmapError, match="human view does not match"):
-        validate_roadmap_approval(repository, "ROADMAP.md", "stage-0")
+    with pytest.raises(RoadmapError, match="human view changes the meaning"):
+        stage_binding(repository, "ROADMAP.md", "stage-0")
+
+
+def test_roadmap_human_view_allows_presentation_only_changes(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _approved_plan(repository)
+    path = repository / "ROADMAP.md"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        .replace("**Readiness:** Ready", "Readiness: Ready", 1)
+        .replace("#### Scope", "##### Scope", 1),
+        encoding="utf-8",
+    )
+
+    assert stage_binding(repository, "ROADMAP.md", "stage-0")["stage_id"] == "stage-0"
 
 
 def test_plan_keeps_invalid_source_trace_inside_the_collaborative_loop(
@@ -787,17 +843,18 @@ readiness = "ready"
         user=ScriptedUser(["/approve"]),
         user_identity={"name": "Test User", "email": "test@example.com"},
     )
-    receipt = json.loads((repository / "verification" / "roadmap-approval.json").read_text())
-    assert [item["stage_id"] for item in receipt["stage_approvals"]] == ["stage-0"]
+    assert [item["id"] for item in load_roadmap(repository / "ROADMAP.md")["stages"]] == ["stage-0"]
 
 
 def test_contract_generation_rejects_an_approved_but_unready_stage(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     _approved_plan(repository)
-    with pytest.raises(PlanningError, match="approved but not ready"):
+    promoted = _roadmap().replace('readiness = "planned"', 'readiness = "ready"', 1)
+    (repository / "ROADMAP.md").write_text(render_roadmap_document(promoted), encoding="utf-8")
+    with pytest.raises(PlanningError, match="not ready"):
         run_generate_contract_session(
             repository / "ROADMAP.md",
-            "stage-1",
+            ["stage-0", "stage-1", "stage-2"],
             agent=ScriptedAgent([]),
             user=ScriptedUser([]),
             user_identity={"name": "Test User", "email": "test@example.com"},
@@ -848,38 +905,24 @@ def test_contract_refinement_backpropagates_and_regenerates_before_approval(
     assert refined_goal in (repository / "verification" / "contract.toml").read_text()
     assert not (repository / ".oxide").exists()
     contract, result = _commit_approvals(repository)
-    assert result["schema"] == "OxideInteractiveAlignmentBindingV3"
+    assert result["schema"] == "OxideEmbeddedAlignmentV1"
     assert load_contract(contract)["alignment"]["verification_goals"] == [refined_goal]
 
 
-def test_attestation_user_approval_and_qualification_are_separate_and_required(
-    tmp_path: Path,
-) -> None:
+def test_contract_embeds_attestation_and_approval_without_sidecars(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     _approved_plan(repository)
     _approved_contract(repository)
-    contract, _ = _commit_approvals(repository)
-    stage = load_contract(contract)
-    base = _git(repository, "rev-parse", "HEAD")
-    artifacts = [
-        "contract-attestation.json",
-        "contract-approval.json",
-        "contract-qualification.json",
-    ]
-    for artifact in artifacts:
-        path = repository / "verification" / artifact
-        original = path.read_text()
-        path.write_text("{}\n")
-        _git(repository, "add", str(path))
-        _git(repository, "commit", "-qm", f"corrupt {artifact}")
-        with pytest.raises(AlignmentError):
-            validate_alignment_receipt(
-                repository, _git(repository, "rev-parse", "HEAD"), contract, stage
-            )
-        path.write_text(original)
-        _git(repository, "add", str(path))
-        _git(repository, "commit", "-qm", f"restore {artifact}")
-    assert base != _git(repository, "rev-parse", "HEAD")
+    contract = repository / "verification" / "contract.toml"
+    text = contract.read_text(encoding="utf-8")
+    assert "[binding]" in text
+    assert "[attestation]" in text
+    assert "[approval]" in text
+    assert {path.name for path in (repository / "verification").iterdir()} == {"contract.toml"}
+
+    contract.write_text(text.replace("approved = true", "approved = false"), encoding="utf-8")
+    with pytest.raises(Exception, match="approval"):
+        load_contract(contract)
 
 
 def test_relevant_change_invalidates_but_deferred_future_stage_edit_does_not(
@@ -907,6 +950,31 @@ def test_relevant_change_invalidates_but_deferred_future_stage_edit_does_not(
         validate_alignment_receipt(
             repository, _git(repository, "rev-parse", "HEAD"), contract, stage
         )
+
+
+def test_formatting_only_selected_source_edit_preserves_contract_approval(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    _approved_plan(repository)
+    _approved_contract(repository)
+    contract, _ = _commit_approvals(repository)
+    stage = load_contract(contract)
+    specification = repository / "docs" / "specs" / "PRODUCT.md"
+    specification.write_text(
+        specification.read_text().replace(
+            "Implement an append-only journal with durable recovery.",
+            "Implement an **append-only journal**\n  with durable recovery.",
+        ),
+        encoding="utf-8",
+    )
+    _git(repository, "add", str(specification))
+    _git(repository, "commit", "-qm", "reformat selected requirement")
+
+    result = validate_alignment_receipt(
+        repository, _git(repository, "rev-parse", "HEAD"), contract, stage
+    )
+    assert result["stage_ids"] == ["stage-0"]
 
 
 def test_selected_stage_or_global_invariant_change_invalidates_contract(tmp_path: Path) -> None:
@@ -967,7 +1035,7 @@ def test_contract_semantics_absent_from_roadmap_closure_fail_qualification(tmp_p
             user=ScriptedUser(["/approve", "/quit"]),
             user_identity={"name": "Test User", "email": "test@example.com"},
         )
-    assert not (repository / "verification" / "contract-attestation.json").exists()
+    assert not (repository / "verification" / "contract.toml").exists()
 
 
 def test_negative_flow_cannot_create_run_state_or_manual_alignment_receipt(tmp_path: Path) -> None:
@@ -982,8 +1050,7 @@ def test_negative_flow_cannot_create_run_state_or_manual_alignment_receipt(tmp_p
             user_identity={"name": "Test User", "email": "test@example.com"},
         )
     assert not (repository / ".oxide").exists()
-    assert not (repository / "verification" / "contract-approval.json").exists()
-    assert not (repository / "verification" / "alignment.json").exists()
+    assert not any((repository / "verification").iterdir())
 
 
 def test_unapproved_or_ambiguous_planning_cannot_be_silently_admitted(tmp_path: Path) -> None:
@@ -996,8 +1063,6 @@ def test_unapproved_or_ambiguous_planning_cannot_be_silently_admitted(tmp_path: 
             user_identity={"name": "Test User", "email": "test@example.com"},
         )
     assert not (repository / "ROADMAP.md").exists()
-    with pytest.raises(RoadmapError):
-        validate_roadmap_approval(repository, "ROADMAP.md", "stage-0")
 
 
 def test_run_admission_fails_before_state_when_interactive_artifacts_are_missing(
@@ -1057,9 +1122,65 @@ def test_end_to_end_scripted_transcript_covers_both_approval_boundaries(
         user_identity={"name": "Test User", "email": "test@example.com"},
     )
     contract, binding = _commit_approvals(repository)
-    assert binding["schema"] == "OxideInteractiveAlignmentBindingV3"
+    assert binding["schema"] == "OxideEmbeddedAlignmentV1"
     assert binding["agent_identity"] == "fake-agent/test"
     assert binding["approved_by"]["email"] == "test@example.com"
     assert load_contract(contract)["stage"] == "stage-0"
     assert "Keep the proposed capability order." in planning_user.transcript
     assert "Keep recovery proof explicit." in contract_user.transcript
+
+
+def test_checked_phases_generate_one_aggregate_contract(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    _approved_plan(repository)
+    selected_roadmap = _roadmap().replace('readiness = "planned"', 'readiness = "ready"', 1)
+    (repository / "ROADMAP.md").write_text(
+        render_roadmap_document(selected_roadmap), encoding="utf-8"
+    )
+    goals = [
+        "Prove append durability and recovery refinement.",
+        "Prove exact result preservation.",
+    ]
+
+    path = run_generate_contract_session(
+        repository / "ROADMAP.md",
+        ["stage-0", "stage-1"],
+        agent=ScriptedAgent(
+            [
+                _contract_response(
+                    selected_roadmap,
+                    _two_phase_contract(),
+                    verification_goal=goals,
+                )
+            ]
+        ),
+        user=ScriptedUser(["/approve"]),
+        user_identity={"name": "Test User", "email": "test@example.com"},
+    )
+
+    contract = load_contract(path)
+    assert contract["stages"] == ["stage-0", "stage-1"]
+    assert [task["phase"] for task in contract["tasks"]] == ["stage-0", "stage-1"]
+    assert contract["alignment"]["verification_goals"] == goals
+    assert "[binding]" in path.read_text(encoding="utf-8")
+
+
+def test_phase_selector_requires_ready_dependencies_and_supports_multiple_phases() -> None:
+    roadmap = parse_roadmap(
+        _roadmap()
+        .replace('readiness = "planned"', 'readiness = "ready"', 1)
+        .replace('readiness = "planned"', 'readiness = "ready"', 1)
+    )
+    user = ScriptedUser(["2", "1", "2", "3", "/confirm"])
+
+    assert select_contract_phases(roadmap, user) == ["stage-0", "stage-1", "stage-2"]
+    assert any("Select dependencies first: stage-0" in item for item in user.transcript)
+    assert any("stage-3" in item and "not ready" in item for item in user.transcript)
+
+
+def test_phase_selector_refuses_unchecking_a_selected_dependency() -> None:
+    roadmap = parse_roadmap(_roadmap().replace('readiness = "planned"', 'readiness = "ready"', 1))
+    user = ScriptedUser(["1", "2", "1", "/confirm"])
+
+    assert select_contract_phases(roadmap, user) == ["stage-0", "stage-1"]
+    assert any("Uncheck dependent phases first: stage-1" in item for item in user.transcript)
