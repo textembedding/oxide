@@ -1,0 +1,12 @@
+{% if kind == "user-feedback" %}
+User feedback:
+{{ feedback }}
+Known mechanical issue:
+{{ problem }}
+Revise every affected complete artifact.
+{% elif kind == "approval-denied" %}
+The user attempted approval, but the exact artifact set is not contractible. Mechanical issue:
+{{ problem }}. Resolve the gaps without inventing semantics.
+{% else %}
+{{ fail_unknown_follow_up_kind }}
+{% endif %}

@@ -28,6 +28,7 @@ from .alignment import (
     validate_interactive_trace,
 )
 from .contract import ContractError, contract_payload_digest, validate_contract
+from .prompt_templates import PromptTemplateError, render_prompt
 from .roadmap import (
     RoadmapError,
     canonical_bytes,
@@ -50,6 +51,13 @@ from .verification_policy import (
 
 class PlanningError(RuntimeError):
     pass
+
+
+def _render_agent_prompt(name: str, **values: object) -> str:
+    try:
+        return render_prompt(name, **values)
+    except PromptTemplateError as error:
+        raise PlanningError(str(error)) from error
 
 
 DEFAULT_SESSION_MODEL = "gpt-5.6-sol"
@@ -717,78 +725,18 @@ def _plan_prompt(
     )
     policy = verification_policy_prompt()
     maintenance_ids = list(maintenance_stage_ids)
-    maintenance = ""
-    if maintenance_ids:
-        maintenance = f"""
-MAINTENANCE MODE
-The existing approved ROADMAP.md is the immutable baseline for this session. Apply only this
-user-requested change to the explicitly selected phases {json.dumps(maintenance_ids)}:
-{maintenance_request}
-
-Preserve the exact phase order and IDs, top-level roadmap fields, global invariants, and every
-unselected phase. Do not add, remove, rename, reorder, or opportunistically rewrite phases. If
-the request needs product semantics absent from the specifications, report the gap instead of
-inventing it. Return the complete schema with only the requested phase changes.
-"""
-    return f"""You are Oxide's interactive planning agent. The complete frozen text of every
-Markdown file under {specification_directory!r}, plus any existing roadmap, is included below.
-The exact specification corpus is {json.dumps(corpus, sort_keys=True)}. Read the supplied source
-bundle directly. Do not use shell, file, Git, or network tools to reread it during this turn.
-
-Propose or refine repository-root ROADMAP.md. Specifications normally describe capabilities,
-constraints, and intended behavior rather than implementation stages. Derive as many or as few
-stages as the work justifies from dependency order, coherent capability increments, verification
-readiness, and empirical gates. Preserve an explicit source-defined boundary when one genuinely
-exists, but never assume a particular stage count, numbering scheme, naming convention, product
-domain, or maturity model.
-
-Represent the complete source-defined horizon, not only the work that is contractible today.
-Trace every material current requirement, intended future capability, deferral, open research
-direction, and permanent non-goal to a global invariant, a stage's included scope, or an explicit
-exclusion. A future capability that lacks enough detail for contract generation belongs in a
-planned, deferred, or blocked stage; do not omit it and do not invent the missing behavior or
-success criteria. Top-level status='ready' means the staged plan is complete and approved as a
-plan, not that every stage is ready for contract generation. Only a stage whose semantic closure
-is sufficiently precise and dependency-closed may use readiness='ready'. Explain outcomes,
-priorities, scope, dependencies, deferrals, and any information needed to make later work ready.
-Surface ambiguities that prevent honest planning instead of silently resolving them.
-Before returning, perform a second coverage pass over every source heading—especially sections
-describing deferred work, future direction, open questions, non-goals, evolution, capacity, or
-research—and confirm that each material item has an explicit roadmap disposition.
-
-Oxide's normative verification policy is supplied separately below. It is mandatory for every
-target and has profile {POLICY_PROFILE!r} and digest {verification_policy_digest()!r}. Apply it
-to stage decomposition and every verification goal even when the target specifications contain
-no abstract verification guidance. Universal assurance invariants MAY appear in the roadmap's
-human-readable verification plan with sources=[], because their authority is the separately
-bound Oxide policy rather than target prose. Do not cite the policy as a target product
-requirement, copy it into the specification corpus, or use it to invent program behavior. The roadmap must plan
-meaningful contracts, component refinement, coverage, and composition alongside implementation;
-must not create an unverified production-logic category or proof-cleanup phase; and must keep
-formal correctness distinct from empirical capacity.
-{maintenance}
-
-Return the complete machine-readable roadmap payload on every turn. It must contain the marker
-<!-- oxide-roadmap-schema:1 --> followed by one fenced TOML block with schema=1, title,
-status, specification_root, [[global_invariants]] and [[stages]]. Oxide will replace any prose
-outside that block with its own standardized, human-readable projection; do not create a second
-prose representation of the plan. Each invariant has id, statement, and source records with
-path/anchor/requirement. Each stage must contain exactly id, outcome, included_scope,
-excluded_scope, dependencies, source_specifications, applicable_global_invariants,
-implementation_goals, verification_goals, and readiness; do not add fields such as priority.
-Readiness is a lifecycle enum and must be exactly one of 'planned', 'ready', 'deferred', or
-'blocked', never explanatory prose. Put acceptance and exit criteria in verification_goals.
-Every source record must quote exact approved text under exactly one Markdown heading. A global
-invariant may have sources=[] only when it states a universal requirement imposed by the supplied
-Oxide verification policy; product-behavior invariants must remain exactly source-traced.
-Set status='ready' and ready_for_approval=true only when the complete corpus is represented,
-the roadmap is faithful, and unresolved is empty. Do not edit files yourself.
-
-FROZEN SOURCE BUNDLE
-{bundle}
-
-{policy}
-"""
+    return _render_agent_prompt(
+        "planning",
+        specification_directory_json=json.dumps(specification_directory),
+        corpus_json=json.dumps(corpus, sort_keys=True),
+        policy_profile_json=json.dumps(POLICY_PROFILE),
+        policy_digest_json=json.dumps(verification_policy_digest()),
+        maintenance_mode=bool(maintenance_ids),
+        maintenance_phase_ids_json=json.dumps(maintenance_ids),
+        maintenance_request=maintenance_request,
+        source_bundle=bundle,
+        verification_policy=policy,
+    )
 
 
 def run_plan_session(
@@ -863,10 +811,11 @@ def run_plan_session(
                         f"after 3 automatic repairs: {roadmap_problem}"
                     ) from error
                 response = agent.respond(
-                    "Your proposed ROADMAP.md failed mechanical schema validation. "
-                    f"Exact error: {roadmap_problem}. Repair only the Markdown/TOML structure; "
-                    "preserve all source-derived product semantics and return the complete "
-                    "ROADMAP.md again. Do not ask the user to resolve your formatting error.",
+                    _render_agent_prompt(
+                        "planning-follow-up",
+                        kind="schema-repair",
+                        problem=roadmap_problem,
+                    ),
                     _PLAN_SCHEMA,
                 )
                 continue
@@ -907,13 +856,11 @@ def run_plan_session(
                         f"3 automatic repairs: {roadmap_problem}"
                     ) from error
                 response = agent.respond(
-                    "Your proposed ROADMAP.md failed deterministic source-trace or maintenance "
-                    f"qualification. Exact error: {roadmap_problem}. Repair the cited source "
-                    "anchor and exact requirement, dependency, or scoped-maintenance change "
-                    "using only the frozen source bundle and approved baseline. Preserve all "
-                    "source-derived product semantics and return the complete ROADMAP.md again. "
-                    "Do not ask the user to resolve a qualification error that the supplied "
-                    "sources can resolve.",
+                    _render_agent_prompt(
+                        "planning-follow-up",
+                        kind="trace-repair",
+                        problem=roadmap_problem,
+                    ),
                     _PLAN_SCHEMA,
                 )
                 continue
@@ -930,8 +877,7 @@ def run_plan_session(
                     "planning agent did not return a complete ROADMAP.md after 3 automatic repairs"
                 )
             response = agent.respond(
-                "You omitted the required complete ROADMAP.md. Return the complete mechanically "
-                "valid artifact without changing source-derived product semantics.",
+                _render_agent_prompt("planning-follow-up", kind="missing-roadmap"),
                 _PLAN_SCHEMA,
             )
             continue
@@ -941,11 +887,12 @@ def run_plan_session(
             raise PlanningError("planning session cancelled; no roadmap was approved")
         if decision != "/approve":
             response = agent.respond(
-                "User feedback:\n"
-                + decision
-                + "\nKnown mechanical issue:\n"
-                + (roadmap_problem or "none")
-                + "\nRevise the full proposal.",
+                _render_agent_prompt(
+                    "planning-follow-up",
+                    kind="user-feedback",
+                    feedback=decision,
+                    problem=roadmap_problem or "none",
+                ),
                 _PLAN_SCHEMA,
             )
             continue
@@ -960,9 +907,11 @@ def run_plan_session(
         ):
             user.show("Approval denied: the roadmap is not aligned and mechanically ready.")
             response = agent.respond(
-                "The user attempted approval, but the proposal is not contractible. "
-                f"Mechanical issue: {roadmap_problem or 'none'}. Resolve all reported gaps "
-                "without silently inventing semantics.",
+                _render_agent_prompt(
+                    "planning-follow-up",
+                    kind="approval-denied",
+                    problem=roadmap_problem or "none",
+                ),
                 _PLAN_SCHEMA,
             )
             continue
@@ -983,53 +932,16 @@ def _contract_prompt(repository: Path, roadmap_path: str, stage_ids: Iterable[st
     source_paths = sorted({item["path"] for item in binding["semantic_closure"]})
     bundle = _frozen_source_bundle(repository, [roadmap_path, *source_paths])
     policy = verification_policy_prompt()
-    return f"""You are Oxide's interactive contract-generation agent. Generate exactly one
-implementation contract for roadmap phases {selected!r} in {roadmap_path!r}. The approved roadmap
-and full text of every source specification in the selected-stage semantic closure are included
-below. Read the supplied source bundle directly. Do not use shell, file, Git, or network tools to
-reread it during this turn. The selected-stage semantic closure is:
-{json.dumps(binding["semantic_closure"], indent=2, sort_keys=True)}
-
-Propose coherent executable tasks, dependencies, formal Verus proof goals, supplementary
-acceptance checks, and one qualified evidence slot per declared check. Explain verification
-goals to the user. Surface ambiguity, missing acceptance criteria, unsupported assumptions,
-or semantic gaps; never infer through them. If clarification is needed, propose complete
-replacement content for each affected specification and an updated complete ROADMAP.md.
-For roadmap_markdown, return the authoritative marker and TOML schema; Oxide regenerates the
-standardized human-readable roadmap view from that data. Do not edit files yourself.
-
-Return one complete schema=5 verification/contract.toml. Its stages and
-[alignment].roadmap_stages must equal {selected!r} in roadmap order. Its goal must summarize
-exactly the selected outcomes without adding behavior. Every task must name one selected phase.
-[alignment] must name ROADMAP.md and must contain the selected phases' concatenated
-implementation_goals and verification_goals in roadmap order. Every goal, task, and
-check source must contain specification, heading anchor, and exact requirement text from the
-approved closure. Source wording, case, punctuation, links, and code are strict; Markdown
-presentation may be normalized. Its specifications list must equal the closure's distinct paths. ROADMAP.md,
-the cited specifications, the contract itself, the toolchain lock, and coverage manifest must be
-immutable_paths. Do not include attestation, approval, or qualification tables. After the user
-approves the proposal, Oxide appends the agent attestation and user approval to this same
-contract.toml and recomputes mechanical qualification at admission. Do not name sidecar approval
-JSON files.
-Use Oxide's existing formal-check conventions and target verification files. Mechanical
-dependencies and evidence bindings may enforce approved semantics but may not add product
-behavior. Set ready_for_approval and contractible only with empty unresolved fields and a
-faithful exact trace.
-
-Oxide's normative verification policy is supplied separately below. It is a mandatory judge
-input with profile {POLICY_PROFILE!r} and digest {verification_policy_digest()!r}. The contract
-must set verification_policy_sha256 to exactly that digest and must operationalize the policy
-through meaningful component proofs, complete production classification and coverage, trusted-
-boundary declarations, deterministic integrity checks, and exact prospective-tree composition.
-Those are Oxide assurance constraints and need not be misrepresented as target product citations.
-Every claim about program behavior or success must still trace exactly to the approved target
-semantic closure. Never use the policy to invent missing product semantics.
-
-FROZEN SOURCE BUNDLE
-{bundle}
-
-{policy}
-"""
+    return _render_agent_prompt(
+        "contract-generation",
+        selected_phases_json=json.dumps(selected),
+        roadmap_path_json=json.dumps(roadmap_path),
+        semantic_closure_json=json.dumps(binding["semantic_closure"], indent=2, sort_keys=True),
+        policy_profile_json=json.dumps(POLICY_PROFILE),
+        policy_digest_json=json.dumps(verification_policy_digest()),
+        source_bundle=bundle,
+        verification_policy=policy,
+    )
 
 
 def _contract_value(text: str, *, require_approval: bool = False) -> dict[str, Any]:
@@ -1233,11 +1145,12 @@ def run_generate_contract_session(
             raise PlanningError("contract-generation session cancelled; nothing was approved")
         if decision != "/approve":
             response = agent.respond(
-                "User feedback:\n"
-                + decision
-                + "\nKnown mechanical issue:\n"
-                + (proposal_problem or "none")
-                + "\nRevise every affected complete artifact.",
+                _render_agent_prompt(
+                    "contract-follow-up",
+                    kind="user-feedback",
+                    feedback=decision,
+                    problem=proposal_problem or "none",
+                ),
                 _CONTRACT_SCHEMA,
             )
             continue
@@ -1265,9 +1178,11 @@ def run_generate_contract_session(
         ):
             user.show("Approval denied: unresolved or mechanically invalid contract generation.")
             response = agent.respond(
-                "The user attempted approval, but the exact artifact set is not contractible. "
-                f"Mechanical issue: {proposal_problem or 'none'}. Resolve the gaps without "
-                "inventing semantics.",
+                _render_agent_prompt(
+                    "contract-follow-up",
+                    kind="approval-denied",
+                    problem=proposal_problem or "none",
+                ),
                 _CONTRACT_SCHEMA,
             )
             continue

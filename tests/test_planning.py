@@ -21,6 +21,7 @@ from oxide.planning import (
     run_plan_session,
     select_contract_phases,
 )
+from oxide.prompt_templates import PromptTemplateError, render_prompt
 from oxide.roadmap import (
     ROADMAP_VIEW_MARKER,
     RoadmapError,
@@ -257,6 +258,36 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert "All production logic is verified by default." in prompt
     assert "The Rust verification landscape" not in prompt
     assert "docs/specs/VERIFICATION.md" not in prompt
+
+
+def test_planning_prompt_template_injects_maintenance_values(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+
+    prompt = _plan_prompt(
+        repository,
+        "docs/specs",
+        maintenance_stage_ids=["stage-1"],
+        maintenance_request="Promote semantic search after its dependency is ready.",
+    )
+
+    assert "MAINTENANCE MODE" in prompt
+    assert '["stage-1"]' in prompt
+    assert "Promote semantic search after its dependency is ready." in prompt
+
+
+def test_packaged_prompt_templates_fail_closed_on_missing_values() -> None:
+    rendered = render_prompt(
+        "planning-follow-up",
+        kind="schema-repair",
+        problem="missing stage outcome",
+    )
+
+    assert "failed mechanical schema validation" in rendered
+    assert "missing stage outcome" in rendered
+    with pytest.raises(PromptTemplateError, match="cannot render prompt template planning"):
+        render_prompt("planning")
+    with pytest.raises(PromptTemplateError, match="unknown prompt template"):
+        render_prompt("not-a-prompt")
 
 
 def _roadmap(

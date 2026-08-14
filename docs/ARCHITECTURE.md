@@ -88,6 +88,12 @@ executable tasks and verification goals, and accept free-form user refinement.
 Agent contractibility attestation and user approval are separate and neither
 substitutes for the other.
 
+Planning, contract-generation, and follow-up agent instructions MUST live in the
+packaged Jinja templates under `src/oxide/prompts/`. Python code supplies frozen
+source bundles and identity values but MUST NOT carry parallel copies of prompt
+prose. Template rendering uses strict undefined-variable handling and fails before
+an agent starts when an injected value is absent.
+
 Before a contract can be admitted, its generation agent MUST inspect the complete
 declared specification set and classify it as aligned or not aligned. Ambiguity,
 missing acceptance criteria, unsupported assumptions, and other semantic gaps MUST

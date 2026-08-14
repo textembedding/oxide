@@ -7,7 +7,7 @@ name = "oxide"
 version = "0.0.1"
 description = "Parallel implementation harness for formally verified Rust programs"
 requires-python = ">=3.11"
-dependencies = ["Pygments>=2.19"]
+dependencies = ["Jinja2>=3.1", "Pygments>=2.19"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
