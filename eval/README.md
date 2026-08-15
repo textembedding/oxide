@@ -50,22 +50,26 @@ holdout set. Journal-scale benchmark examples should contain 1,500–3,000 lines
 specification spread across product, development, and research concerns. Never
 promote a prompt based only on the smoke score.
 
-## Proposed benchmark examples
+## Benchmark examples
 
-The first serious suite should use three unrelated Rust products:
+The serious suite adds three unrelated Rust products whose base specification
+corpora contain 1,500–3,000 lines each:
 
-1. **Transactional reservation and settlement kernel** — bounded inventory,
+1. [`transactional-reservation`](examples/transactional-reservation) — a
+   **transactional reservation and settlement kernel** with bounded inventory,
    atomic holds, expiration, confirmation, cancellation, refunds, idempotent
    retries, multi-item failure rules, trusted payment and clock adapters, crash
    recovery, tenant isolation, and capacity targets. This tests concurrent state
    transitions, error precedence, trusted boundaries, and the distinction between
    formally proved safety and measured performance.
-2. **Offline collaborative document engine** — causal operations, convergence,
+2. [`collaborative-document`](examples/collaborative-document) — an **offline
+   collaborative document engine** with causal operations, convergence,
    conflict resolution, snapshots, reconnect synchronization, access control,
    schema evolution, malformed-peer isolation, and scale targets. This tests
    whether the planner finds independent layers without inventing conflict
    semantics or treating distributed-system experiments as proofs.
-3. **Globally consistent agent message board** — a "Slack for agents" designed
+3. [`agent-message-board`](examples/agent-message-board) — a **globally
+   consistent agent message board**, or "Slack for agents," designed
    for many-to-many communication between large numbers of concurrent Codex
    sessions. Messages are immutable, content-addressed records in one globally
    consistent chronology, with typed forms for discoveries, questions, claims,
@@ -86,11 +90,10 @@ The first serious suite should use three unrelated Rust products:
    network and storage effects, and keep formal guarantees distinct from measured
    fan-out, throughput, latency, and retrieval quality.
 
-Each base corpus should be 1,500–3,000 lines, contain no roadmap or stage labels,
-and have public tuning perturbations plus unseen holdout perturbations. Variants
-should be expressed as small patches over one base corpus rather than duplicating
-thousands of lines. The optimizer should see tuning diagnostics; prompt promotion
-should depend on the held-out score.
+Each base corpus contains no roadmap or stage labels. Its adversarial variant is a
+small semantic patch over the complete base corpus rather than a duplicated copy.
+The checked-in variants are public tuning examples; prompt promotion should also
+depend on unseen holdout perturbations.
 
 ## Commands
 

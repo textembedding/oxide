@@ -62,14 +62,33 @@ class CodexPlannerRunner:
 _JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["faithfulness", "decomposition", "readability", "reason"],
+    "required": ["faithfulness", "coverage", "decomposition", "readability", "reason"],
     "properties": {
         "faithfulness": {"type": "integer", "minimum": 0, "maximum": 4},
+        "coverage": {"type": "integer", "minimum": 0, "maximum": 4},
         "decomposition": {"type": "integer", "minimum": 0, "maximum": 4},
         "readability": {"type": "integer", "minimum": 0, "maximum": 4},
         "reason": {"type": "string"},
     },
 }
+
+
+def _judge_source_bundle(case: EvaluationCase) -> str:
+    """Include the base corpus once, followed by only a variant's real delta files."""
+    blocks: list[str] = []
+    seen: set[Path] = set()
+    for label, scenario in (("BASE", case.base), ("VARIANT", case.variant)):
+        for path in sorted((scenario.directory / "specs").rglob("*.md")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            relative = path.relative_to(scenario.directory).as_posix()
+            blocks.append(
+                f"===== {label} SOURCE {relative} =====\n"
+                + path.read_text(encoding="utf-8").rstrip()
+            )
+    return "\n\n".join(blocks)
 
 
 @dataclass
@@ -88,18 +107,24 @@ class CodexQualityJudge:
         prompt = f"""\
 You are judging two planning outputs for an Oxide prompt evaluation.
 Deterministic checks have already validated schema, exact source citations, dependency
-acyclicity, and declared requirement coverage. Judge only the qualities that are not
+acyclicity, and representative requirement oracles. Judge the complete supplied source
+corpus for the qualities that are not
 reliably reducible to string checks:
 
 1. faithfulness: goals and exclusions do not smuggle in product behavior absent from sources;
-2. decomposition: boundaries are cohesive, useful, and no more serial than real dependencies;
-3. readability: a human can understand outcomes, deferrals, and sequencing quickly.
+2. coverage: every material requirement, deferral, non-goal, and research question has one
+   visible disposition rather than disappearing behind the representative oracles;
+3. decomposition: boundaries are cohesive, useful, and no more serial than real dependencies;
+4. readability: a human can understand outcomes, deferrals, and sequencing quickly.
 
 Use 0 (unacceptable) through 4 (excellent). Do not reward matching a particular number of
 stages. Do not waive a semantic defect because the prose sounds polished.
 
 Case: {case.identifier} — {case.title}
 Expected relation: {case.relation}
+
+SOURCE CORPUS
+{_judge_source_bundle(case)}
 
 BASE RESPONSE
 {json.dumps(base_response, ensure_ascii=False, sort_keys=True)}
@@ -113,8 +138,10 @@ VARIANT RESPONSE
             reasoning_effort=self.reasoning_effort,
             timeout_seconds=self.timeout_seconds,
         ).start(prompt, _JUDGE_SCHEMA)
-        values = [int(result[key]) for key in ("faithfulness", "decomposition", "readability")]
-        return sum(values) / 12.0, result
+        values = [
+            int(result[key]) for key in ("faithfulness", "coverage", "decomposition", "readability")
+        ]
+        return sum(values) / 16.0, result
 
 
 _PROPOSAL_SCHEMA: dict[str, Any] = {

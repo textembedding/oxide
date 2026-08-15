@@ -1,0 +1,125 @@
+expected_approval = false
+minimum_unresolved = 1
+required_signal_groups = [["descending", "smaller", "contradict"]]
+forbidden_terms = ["PostgreSQL", "RocksDB", "Tokio", "QUIC", "Automerge", "Yjs"]
+fixture_unresolved = ["The descending group-dot rule contradicts the smaller-group-dot-first override for concurrent inserts into the same stable gap."]
+
+[[requirements]]
+id = "durability"
+anchor = "Global invariants"
+text = "Every acknowledged operation group remains durable and discoverable after a successful restart under the declared storage assumptions."
+readiness = ["ready"]
+
+[[requirements]]
+id = "convergence"
+anchor = "Strong convergence"
+text = "Any two qualified replicas with identical admitted-group sets and identical schema catalogs return identical canonical materialized bytes."
+readiness = ["blocked", "planned"]
+
+[[requirements]]
+id = "group-atomicity"
+anchor = "Atomicity"
+text = "An admitted group publishes all members or none."
+readiness = ["ready"]
+
+[[requirements]]
+id = "conflict-order"
+anchor = "Concurrent text insertion"
+text = "Concurrent insertions into the same stable gap are ordered by descending canonical group-dot order and then ascending member-local scalar offset."
+readiness = ["blocked"]
+
+[[requirements]]
+id = "conflicting-order"
+anchor = "Concurrent insertion precedence"
+text = "When two authorized inserts target the same stable gap and are concurrent, the insert with the lexicographically smaller canonical group dot must appear first."
+readiness = ["blocked"]
+
+[[requirements]]
+id = "revocation"
+anchor = "Revoke"
+text = "An operation concurrent with a revocation is authorized by its own causal state and remains valid if the grant was then active."
+readiness = ["ready"]
+
+[[requirements]]
+id = "sync"
+anchor = "Reconnect completion"
+text = "If two authorized replicas remain connected, exchange fair delivery, possess compatible schemas, and stop creating new operations, synchronization eventually leaves them with equal admitted-group sets."
+readiness = ["planned", "blocked"]
+
+[[requirements]]
+id = "schema-quarantine"
+anchor = "Unknown-schema admission"
+text = "A group using an unknown schema remains quarantined as `unsupported_schema` and does not enter authoritative document history."
+readiness = ["ready"]
+
+[[requirements]]
+id = "snapshot"
+anchor = "Restore"
+text = "Restore then replays retained groups above the frontier through the same abstract transitions used by normal admission."
+readiness = ["planned", "blocked"]
+
+[[requirements]]
+id = "malformed-isolation"
+anchor = "Global invariants"
+text = "Unknown or malformed peer input cannot mutate authoritative state."
+readiness = ["ready"]
+
+[[requirements]]
+id = "composition"
+anchor = "Composition theorem"
+text = "The exact production public API refines the PRODUCT abstract transitions for the exact prospective authoritative tree."
+readiness = ["planned", "blocked"]
+
+[[requirements]]
+id = "storage-boundary"
+anchor = "Storage adapter"
+text = "It must not decide authorization, causal readiness, conflict winners, compaction eligibility, or recovery compatibility."
+readiness = ["ready"]
+
+[[requirements]]
+id = "capacity"
+anchor = "Service objectives"
+text = "Under the standard connected workload, one reference server must sustain at least 500,000 admitted operation groups per second at 70 percent or less CPU saturation."
+readiness = ["planned", "blocked"]
+
+[[requirements]]
+id = "recovery-time"
+anchor = "Recovery objectives"
+text = "For a 1 TiB retained history with a qualifying snapshot less than ten minutes old, restart to read availability must complete within 60 seconds on the reference target."
+readiness = ["planned", "blocked"]
+
+[[dependencies]]
+before = "group-atomicity"
+after = "convergence"
+
+[[dependencies]]
+before = "conflict-order"
+after = "convergence"
+
+[[dependencies]]
+before = "conflicting-order"
+after = "convergence"
+
+[[dependencies]]
+before = "revocation"
+after = "sync"
+
+[[dependencies]]
+before = "schema-quarantine"
+after = "sync"
+
+[[dependencies]]
+before = "convergence"
+after = "snapshot"
+
+[[dependencies]]
+before = "storage-boundary"
+after = "snapshot"
+
+[[dependencies]]
+before = "snapshot"
+after = "recovery-time"
+
+[[dependencies]]
+before = "composition"
+after = "capacity"

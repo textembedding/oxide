@@ -1,0 +1,12 @@
+id = "transactional-reservation"
+title = "Expiration ambiguity must block a globally safe reservation plan"
+relation = "must-block"
+affected_requirements = ["expiration-boundary"]
+
+[[scenarios]]
+id = "base"
+directory = "base"
+
+[[scenarios]]
+id = "variant"
+directory = "deadline-contradiction"

@@ -110,7 +110,7 @@ def _smoke(arguments: argparse.Namespace) -> int:
         )
         if result.best_candidate != {"planning_prompt": candidate}:
             return 1
-    print("3 smoke examples passed; GEPA seed evaluation completed")
+    print(f"{len(reports)} model-free examples passed; GEPA seed evaluation completed")
     return 0
 
 

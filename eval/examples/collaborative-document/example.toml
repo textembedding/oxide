@@ -1,0 +1,12 @@
+id = "collaborative-document"
+title = "Contradictory concurrent-insertion semantics must block planning"
+relation = "must-block"
+affected_requirements = ["conflict-order"]
+
+[[scenarios]]
+id = "base"
+directory = "base"
+
+[[scenarios]]
+id = "variant"
+directory = "conflict-contradiction"

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from eval.cases import load_cases
 from eval.gepa_harness import optimize_prompt
-from eval.runners import FixturePlannerRunner
+from eval.runners import FixturePlannerRunner, _judge_source_bundle
 from eval.scoring import EvaluationHarness
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -19,15 +20,34 @@ def _harness() -> tuple[str, EvaluationHarness]:
     return seed, EvaluationHarness(REPOSITORY, seed, cases, FixturePlannerRunner())
 
 
-def test_three_cases_cover_distinct_metamorphic_relations() -> None:
+BENCHMARK_CASES = {
+    "agent-message-board",
+    "collaborative-document",
+    "transactional-reservation",
+}
+SMOKE_CASES = {"durable-counter", "private-notes", "retry-queue"}
+
+
+def test_suite_contains_smoke_and_journal_scale_cases() -> None:
     cases = load_cases()
 
-    assert [case.identifier for case in cases] == [
-        "durable-counter",
-        "private-notes",
-        "retry-queue",
-    ]
-    assert [case.relation for case in cases] == ["equivalent", "must-block", "must-block"]
+    assert {case.identifier for case in cases} == SMOKE_CASES | BENCHMARK_CASES
+    relations = {case.identifier: case.relation for case in cases}
+    assert relations["durable-counter"] == "equivalent"
+    assert all(relations[identifier] == "must-block" for identifier in BENCHMARK_CASES)
+
+
+def test_benchmark_corpora_are_large_domain_specs_without_planning_labels() -> None:
+    examples = REPOSITORY / "eval" / "examples"
+    planning_label = re.compile(r"\b(?:roadmap|stages?)\b", re.IGNORECASE)
+
+    for identifier in BENCHMARK_CASES:
+        files = sorted((examples / identifier / "base" / "specs").glob("*.md"))
+        assert [path.name for path in files] == ["DEVELOPMENT.md", "PRODUCT.md", "RESEARCH.md"]
+        texts = [path.read_text(encoding="utf-8") for path in files]
+        line_count = sum(len(text.splitlines()) for text in texts)
+        assert 1_500 <= line_count <= 3_000
+        assert not any(planning_label.search(text) for text in texts)
 
 
 def test_fixture_outputs_score_every_deterministic_and_metamorphic_objective() -> None:
@@ -35,9 +55,21 @@ def test_fixture_outputs_score_every_deterministic_and_metamorphic_objective() -
 
     reports = [harness.evaluate(seed, case) for case in harness.cases.values()]
 
-    assert [report.score for report in reports] == [1.0, 1.0, 1.0]
+    assert len(reports) == len(SMOKE_CASES | BENCHMARK_CASES)
+    assert all(report.score == 1.0 for report in reports)
     assert all(not report.diagnostics for report in reports)
     assert all(report.base.mechanical and report.variant.mechanical for report in reports)
+
+
+def test_judge_sees_complete_base_corpus_once_plus_only_variant_delta() -> None:
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+
+    bundle = _judge_source_bundle(case)
+
+    assert bundle.count("# Agent Message Board Product Specification") == 1
+    assert bundle.count("# Agent Message Board Development Specification") == 1
+    assert bundle.count("# Agent Message Board Research Specification") == 1
+    assert "VARIANT SOURCE specs/CLAIM-CONFLICT.md" in bundle
 
 
 def test_candidate_cannot_drop_production_jinja_inputs() -> None:
@@ -98,10 +130,10 @@ def test_gepa_executes_the_real_evaluator_contract_model_free(tmp_path: Path) ->
         harness,
         proposer=unchanged,
         run_directory=tmp_path / "gepa",
-        max_metric_calls=3,
+        max_metric_calls=len(harness.cases),
         max_candidate_proposals=0,
     )
 
     assert result.best_candidate == {"planning_prompt": seed}
     assert result.val_aggregate_scores[result.best_idx] == 1.0
-    assert result.total_metric_calls == 3
+    assert result.total_metric_calls == len(harness.cases)

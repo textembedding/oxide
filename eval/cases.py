@@ -1,4 +1,4 @@
-"""Load small, requirement-level planning evaluations from TOML fixtures."""
+"""Load requirement-level planning evaluations from TOML fixtures."""
 
 from __future__ import annotations
 

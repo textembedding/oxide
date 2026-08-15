@@ -1,0 +1,137 @@
+expected_approval = true
+minimum_unresolved = 0
+required_signal_groups = []
+forbidden_terms = ["Kafka", "Redis", "Kubernetes", "PostgreSQL"]
+fixture_unresolved = []
+
+[[requirements]]
+id = "immutable-record"
+anchor = "3.4 Record"
+text = "No operation edits, replaces, or deletes an admitted record."
+readiness = ["ready"]
+
+[[requirements]]
+id = "atomic-batch"
+anchor = "5.3 Atomic visibility"
+text = "The batch either admits every record or admits none."
+readiness = ["ready"]
+
+[[requirements]]
+id = "global-order"
+anchor = "6.1 Linearizable cut"
+text = "Concurrent publications may be ordered either way, but every observer agrees on the chosen BoardSeq order."
+readiness = ["ready"]
+
+[[requirements]]
+id = "claim-winner"
+anchor = "7.2 Claim winner"
+text = "The earliest valid Claim by BoardSeq is the unique winner for its claim key and generation."
+readiness = ["ready"]
+
+[[requirements]]
+id = "cursor-monotonic"
+anchor = "8.3 Cursor acknowledgement"
+text = "Acknowledgement advances a cursor monotonically."
+readiness = ["ready"]
+
+[[requirements]]
+id = "semantic-nonauthority"
+anchor = "9.2 Authority boundary"
+text = "Semantic similarity never creates a causal link, claim, decision, correction, authorization, or task dependency."
+readiness = ["ready"]
+
+[[requirements]]
+id = "batch-authorization"
+anchor = "10.2 Capability evaluation"
+text = "Every record in a batch must satisfy the capability independently."
+readiness = ["ready"]
+
+[[requirements]]
+id = "movement-equivalence"
+anchor = "11.3 Live shard movement"
+text = "No authorized retained record may be omitted or duplicated because movement is active."
+readiness = ["ready"]
+
+[[requirements]]
+id = "checkpoint-replay"
+anchor = "12.1 Checkpoint"
+text = "Restoring a checkpoint followed by replay above its cut produces the same logical state as full replay."
+readiness = ["ready"]
+
+[[requirements]]
+id = "recovery-equivalence"
+anchor = "13.2 Recovery result"
+text = "Recovery either produces one state observationally equivalent to pre-crash acknowledged history or fails closed before serving traffic."
+readiness = ["ready"]
+
+[[requirements]]
+id = "storage-exclusivity"
+anchor = "13.1 Storage transaction adapter"
+text = "It provides guarded conditional insert or update with at most one successful contender per guard instance."
+readiness = ["ready"]
+
+[[requirements]]
+id = "composition"
+anchor = "14.3 Composition theorem"
+text = "The whole-program theorem connects every public handler to one abstract transition or observation over `BoardState`."
+readiness = ["ready"]
+
+[[requirements]]
+id = "capacity"
+anchor = "6.1 Sustainable throughput"
+text = "The release target is 5,000,000 admitted records per second across the reference deployment."
+readiness = ["ready"]
+
+[[requirements]]
+id = "agent-utility"
+anchor = "9.5 Agent utility"
+text = "The study measures answer accuracy, follow-up query count, input tokens, wall time, and unsupported assertions."
+readiness = ["ready"]
+
+[[dependencies]]
+before = "immutable-record"
+after = "atomic-batch"
+
+[[dependencies]]
+before = "storage-exclusivity"
+after = "atomic-batch"
+
+[[dependencies]]
+before = "atomic-batch"
+after = "global-order"
+
+[[dependencies]]
+before = "global-order"
+after = "claim-winner"
+
+[[dependencies]]
+before = "global-order"
+after = "cursor-monotonic"
+
+[[dependencies]]
+before = "global-order"
+after = "movement-equivalence"
+
+[[dependencies]]
+before = "movement-equivalence"
+after = "checkpoint-replay"
+
+[[dependencies]]
+before = "checkpoint-replay"
+after = "recovery-equivalence"
+
+[[dependencies]]
+before = "claim-winner"
+after = "composition"
+
+[[dependencies]]
+before = "recovery-equivalence"
+after = "composition"
+
+[[dependencies]]
+before = "composition"
+after = "capacity"
+
+[[dependencies]]
+before = "semantic-nonauthority"
+after = "agent-utility"
