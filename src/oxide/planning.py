@@ -527,7 +527,7 @@ class CodexSessionAgent:
         return self._run(feedback, schema, resume=True)
 
 
-_PLAN_SCHEMA: dict[str, Any] = {
+PLAN_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -547,6 +547,9 @@ _PLAN_SCHEMA: dict[str, Any] = {
         "roadmap_markdown": {"type": "string"},
     },
 }
+
+# Kept private at the workflow call sites; evaluators import the stable public name.
+_PLAN_SCHEMA = PLAN_RESPONSE_SCHEMA
 
 
 _GAPS_SCHEMA = {
@@ -710,13 +713,14 @@ def _frozen_source_bundle(repository: Path, paths: Iterable[str]) -> str:
     return "\n\n".join(blocks)
 
 
-def _plan_prompt(
+def planning_prompt_values(
     repository: Path,
     specification_directory: str,
     *,
     maintenance_stage_ids: Iterable[str] = (),
     maintenance_request: str = "",
-) -> str:
+) -> dict[str, object]:
+    """Return the frozen inputs used by production and prompt evaluation."""
     corpus = specification_corpus(repository, specification_directory)
     existing = [path for path in ("ROADMAP.md", "docs/ROADMAP.md") if (repository / path).is_file()]
     bundle = _frozen_source_bundle(
@@ -725,17 +729,34 @@ def _plan_prompt(
     )
     policy = verification_policy_prompt()
     maintenance_ids = list(maintenance_stage_ids)
+    return {
+        "specification_directory_json": json.dumps(specification_directory),
+        "corpus_json": json.dumps(corpus, sort_keys=True),
+        "policy_profile_json": json.dumps(POLICY_PROFILE),
+        "policy_digest_json": json.dumps(verification_policy_digest()),
+        "maintenance_mode": bool(maintenance_ids),
+        "maintenance_phase_ids_json": json.dumps(maintenance_ids),
+        "maintenance_request": maintenance_request,
+        "source_bundle": bundle,
+        "verification_policy": policy,
+    }
+
+
+def _plan_prompt(
+    repository: Path,
+    specification_directory: str,
+    *,
+    maintenance_stage_ids: Iterable[str] = (),
+    maintenance_request: str = "",
+) -> str:
     return _render_agent_prompt(
         "planning",
-        specification_directory_json=json.dumps(specification_directory),
-        corpus_json=json.dumps(corpus, sort_keys=True),
-        policy_profile_json=json.dumps(POLICY_PROFILE),
-        policy_digest_json=json.dumps(verification_policy_digest()),
-        maintenance_mode=bool(maintenance_ids),
-        maintenance_phase_ids_json=json.dumps(maintenance_ids),
-        maintenance_request=maintenance_request,
-        source_bundle=bundle,
-        verification_policy=policy,
+        **planning_prompt_values(
+            repository,
+            specification_directory,
+            maintenance_stage_ids=maintenance_stage_ids,
+            maintenance_request=maintenance_request,
+        ),
     )
 
 

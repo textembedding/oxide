@@ -198,6 +198,10 @@ uv sync --extra dev
 
 `./oxide` automatically uses the local `.venv`; no global install is required.
 
+Prompt evaluation and bounded GEPA optimization live in
+[`eval/`](eval/README.md). They score source fidelity and adversarial robustness
+without prescribing one gold roadmap.
+
 2. Plan the project:
 
 ```bash

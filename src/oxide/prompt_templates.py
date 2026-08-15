@@ -44,3 +44,17 @@ def render_prompt(name: str, **values: object) -> str:
         return _template(name).render(**values)
     except TemplateError as error:
         raise PromptTemplateError(f"cannot render prompt template {name}: {error}") from error
+
+
+def render_prompt_source(source: str, **values: object) -> str:
+    """Render an in-memory candidate with the production template policy."""
+    try:
+        template = Template(
+            source,
+            undefined=StrictUndefined,
+            autoescape=False,
+            keep_trailing_newline=True,
+        )
+        return template.render(**values)
+    except TemplateError as error:
+        raise PromptTemplateError(f"cannot render candidate prompt: {error}") from error

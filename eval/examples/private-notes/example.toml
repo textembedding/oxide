@@ -1,0 +1,13 @@
+id = "private-notes"
+title = "Contradictory access semantics must be surfaced"
+relation = "must-block"
+affected_requirements = ["privacy"]
+
+[[scenarios]]
+id = "base"
+directory = "base"
+
+[[scenarios]]
+id = "variant"
+directory = "contradiction"
+

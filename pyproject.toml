@@ -11,6 +11,7 @@ dependencies = ["Jinja2>=3.1", "Pygments>=2.19"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+eval = ["gepa>=0.1.2,<0.2"]
 
 [project.scripts]
 oxide = "oxide.cli:main"
@@ -22,7 +23,7 @@ packages = ["src/oxide"]
 "docs/VERIFICATION_PRIMER.md" = "oxide/VERIFICATION_PRIMER.md"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "eval/tests"]
 addopts = "-q"
 
 [tool.ruff]

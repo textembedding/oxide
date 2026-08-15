@@ -1,0 +1,13 @@
+id = "durable-counter"
+title = "Formatting must not change a durable counter plan"
+relation = "equivalent"
+affected_requirements = []
+
+[[scenarios]]
+id = "base"
+directory = "base"
+
+[[scenarios]]
+id = "variant"
+directory = "formatting"
+

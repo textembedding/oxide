@@ -1,0 +1,34 @@
+expected_approval = false
+minimum_unresolved = 1
+required_signal_groups = [["retry", "maximum", "terminal"]]
+forbidden_terms = ["Kafka", "Redis", "Kubernetes"]
+fixture_unresolved = ["The retry maximum and terminal disposition require product decisions."]
+
+[[requirements]]
+id = "fifo"
+anchor = "Queue operations"
+text = "Jobs are dequeued in first-in, first-out order."
+readiness = ["ready"]
+
+[[requirements]]
+id = "ownership"
+anchor = "Queue operations"
+text = "At most one worker owns an unacknowledged job at a time."
+readiness = ["ready"]
+
+[[requirements]]
+id = "recovery"
+anchor = "Recovery"
+text = "After a worker crash, its unacknowledged job becomes available again during recovery."
+readiness = ["ready"]
+
+[[requirements]]
+id = "retry-policy"
+anchor = "Retry policy"
+text = "Failed jobs are retried, but the maximum attempt count and terminal disposition are not specified."
+readiness = ["blocked"]
+
+[[dependencies]]
+before = "ownership"
+after = "recovery"
+

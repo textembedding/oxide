@@ -1,0 +1,13 @@
+id = "retry-queue"
+title = "An underspecified retry policy must stop contractibility"
+relation = "must-block"
+affected_requirements = ["retry-policy"]
+
+[[scenarios]]
+id = "base"
+directory = "base"
+
+[[scenarios]]
+id = "variant"
+directory = "missing-criterion"
+

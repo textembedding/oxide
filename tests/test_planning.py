@@ -17,11 +17,12 @@ from oxide.planning import (
     ScriptedUser,
     _contract_prompt,
     _plan_prompt,
+    planning_prompt_values,
     run_generate_contract_session,
     run_plan_session,
     select_contract_phases,
 )
-from oxide.prompt_templates import PromptTemplateError, render_prompt
+from oxide.prompt_templates import PromptTemplateError, render_prompt, render_prompt_source
 from oxide.roadmap import (
     ROADMAP_VIEW_MARKER,
     RoadmapError,
@@ -258,6 +259,20 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert "All production logic is verified by default." in prompt
     assert "The Rust verification landscape" not in prompt
     assert "docs/specs/VERIFICATION.md" not in prompt
+
+
+def test_candidate_prompt_uses_the_exact_production_input_context(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "oxide" / "prompts" / "planning.md.j2"
+    ).read_text(encoding="utf-8")
+
+    candidate = render_prompt_source(
+        source,
+        **planning_prompt_values(repository, "docs/specs"),
+    )
+
+    assert candidate == _plan_prompt(repository, "docs/specs")
 
 
 def test_planning_prompt_template_injects_maintenance_values(tmp_path: Path) -> None:

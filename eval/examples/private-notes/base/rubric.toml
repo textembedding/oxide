@@ -1,0 +1,34 @@
+expected_approval = true
+minimum_unresolved = 0
+required_signal_groups = []
+forbidden_terms = ["PostgreSQL", "OpenID", "AES-256"]
+fixture_unresolved = []
+
+[[requirements]]
+id = "create"
+anchor = "Core operations"
+text = "An authenticated account can create a note with a title and body."
+readiness = ["ready"]
+
+[[requirements]]
+id = "search"
+anchor = "Core operations"
+text = "Exact title search returns matching notes in creation order."
+readiness = ["ready"]
+
+[[requirements]]
+id = "privacy"
+anchor = "Access control"
+text = "Only the owning account can read a note body."
+readiness = ["ready"]
+
+[[requirements]]
+id = "semantic"
+anchor = "Future retrieval"
+text = "Semantic full-text retrieval is deferred until its relevance and privacy criteria are specified."
+readiness = ["deferred"]
+
+[[dependencies]]
+before = "create"
+after = "semantic"
+

@@ -1,0 +1,40 @@
+expected_approval = true
+minimum_unresolved = 0
+required_signal_groups = []
+forbidden_terms = ["PostgreSQL", "OAuth", "Redis"]
+fixture_unresolved = []
+
+[[requirements]]
+id = "update"
+anchor = "Updates"
+text = "A client may add a signed 64-bit delta to a named counter."
+readiness = ["ready"]
+
+[[requirements]]
+id = "overflow"
+anchor = "Updates"
+text = "An update that would overflow the signed 64-bit range is rejected without changing the counter."
+readiness = ["ready"]
+
+[[requirements]]
+id = "read"
+anchor = "Reads"
+text = "A read returns the current value of the named counter."
+readiness = ["ready"]
+
+[[requirements]]
+id = "durability"
+anchor = "Durability"
+text = "Every acknowledged update remains visible after process restart."
+readiness = ["ready"]
+
+[[requirements]]
+id = "http"
+anchor = "HTTP adapter"
+text = "An HTTP adapter is deferred until the counter state machine is implemented and proved."
+readiness = ["deferred"]
+
+[[dependencies]]
+before = "update"
+after = "http"
+
