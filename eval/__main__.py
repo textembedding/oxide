@@ -35,7 +35,12 @@ def _harness(arguments: argparse.Namespace) -> tuple[str, EvaluationHarness]:
             timeout_seconds=arguments.timeout,
         )
     judge = (
-        CodexQualityJudge(REPOSITORY, model=arguments.model, timeout_seconds=arguments.timeout)
+        CodexQualityJudge(
+            REPOSITORY,
+            model=arguments.model,
+            reasoning_effort=arguments.reasoning_effort,
+            timeout_seconds=arguments.timeout,
+        )
         if arguments.judge == "codex"
         else None
     )

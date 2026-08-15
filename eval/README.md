@@ -23,9 +23,12 @@ Layer 2 is metamorphic and adversarial behavior:
 - removing a necessary acceptance criterion makes affected work non-ready;
 - contradictory requirements are surfaced instead of silently reconciled.
 
-An optional LLM judge scores faithfulness, decomposition quality, and human
-readability only after deterministic qualification succeeds. Judge feedback can
-improve a prompt, but it cannot turn an invalid source trace into a passing result.
+An optional LLM judge scores faithfulness, full-corpus coverage, decomposition
+quality, and human readability only after deterministic qualification succeeds.
+With the judge enabled, the aggregate score weights deterministic checks at 50%,
+metamorphic checks at 20%, and the judge at 30%. This makes holistic critique
+material to GEPA's search while the mechanical-validity cap prevents a judge from
+turning an invalid source trace into a passing result.
 
 Each score includes compact diagnostics. [GEPA](https://github.com/gepa-ai/gepa) receives those diagnostics as
 actionable side information and proposes a replacement Jinja template. Candidate
@@ -124,9 +127,10 @@ the signed-in Codex CLI, while GEPA supplies candidate selection and feedback:
 ```bash
 uv run python -m eval optimize \
   --runner codex \
+  --judge codex \
   --proposer codex \
-  --max-metric-calls 30 \
-  --max-proposals 8 \
+  --max-metric-calls 18 \
+  --max-proposals 2 \
   --output eval/runs/planning-v1
 ```
 

@@ -24,6 +24,10 @@ from oxide.roadmap import (
 from .cases import EvaluationCase, Scenario
 from .runners import PlannerRunner, QualityJudge
 
+DETERMINISTIC_WEIGHT = 0.50
+METAMORPHIC_WEIGHT = 0.20
+JUDGE_WEIGHT = 0.30
+
 
 @dataclass
 class ScenarioReport:
@@ -410,7 +414,11 @@ class EvaluationHarness:
         judge_details: dict[str, Any] | None = None
         if self.judge is not None and base.mechanical and variant.mechanical:
             judge_score, judge_details = self.judge.score(case, base.response, variant.response)
-            score = 0.70 * deterministic + 0.20 * metamorphic + 0.10 * judge_score
+            score = (
+                DETERMINISTIC_WEIGHT * deterministic
+                + METAMORPHIC_WEIGHT * metamorphic
+                + JUDGE_WEIGHT * judge_score
+            )
         else:
             score = 0.78 * deterministic + 0.22 * metamorphic
         if not base.mechanical or not variant.mechanical:

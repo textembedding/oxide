@@ -8,7 +8,12 @@ import pytest
 from eval.cases import load_cases
 from eval.gepa_harness import optimize_prompt
 from eval.runners import FixturePlannerRunner, _judge_source_bundle
-from eval.scoring import EvaluationHarness
+from eval.scoring import (
+    DETERMINISTIC_WEIGHT,
+    JUDGE_WEIGHT,
+    METAMORPHIC_WEIGHT,
+    EvaluationHarness,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SEED_PATH = REPOSITORY / "src" / "oxide" / "prompts" / "planning.md.j2"
@@ -70,6 +75,26 @@ def test_judge_sees_complete_base_corpus_once_plus_only_variant_delta() -> None:
     assert bundle.count("# Agent Message Board Development Specification") == 1
     assert bundle.count("# Agent Message Board Research Specification") == 1
     assert "VARIANT SOURCE specs/CLAIM-CONFLICT.md" in bundle
+
+
+def test_judge_materially_influences_score_without_displacing_hard_guards() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class ZeroJudge:
+        def score(self, case, base_response, variant_response):
+            del case, base_response, variant_response
+            return 0.0, {"reason": "intentionally harsh fixture judge"}
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, FixturePlannerRunner(), ZeroJudge())
+    report = harness.evaluate(seed, harness.cases["durable-counter"])
+
+    assert DETERMINISTIC_WEIGHT + METAMORPHIC_WEIGHT + JUDGE_WEIGHT == 1.0
+    assert JUDGE_WEIGHT == 0.30
+    assert report.deterministic_score == 1.0
+    assert report.metamorphic_score == 1.0
+    assert report.judge_score == 0.0
+    assert report.score == DETERMINISTIC_WEIGHT + METAMORPHIC_WEIGHT
 
 
 def test_candidate_cannot_drop_production_jinja_inputs() -> None:
