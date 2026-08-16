@@ -53,6 +53,10 @@ class PlanningError(RuntimeError):
     pass
 
 
+class PlanningInfrastructureError(PlanningError):
+    """A planning turn failed for operational reasons rather than model quality."""
+
+
 def _render_agent_prompt(name: str, **values: object) -> str:
     try:
         return render_prompt(name, **values)
@@ -223,13 +227,18 @@ class CodexSessionAgent:
         model: str | None = DEFAULT_SESSION_MODEL,
         reasoning_effort: str = DEFAULT_SESSION_REASONING_EFFORT,
         timeout_seconds: float = 900.0,
+        absolute_timeout_seconds: float | None = None,
         heartbeat_seconds: float = 10.0,
         progress: Callable[[str], None] | None = None,
     ):
         executable = shutil.which("codex")
         if executable is None:
-            raise PlanningError("codex CLI is not installed or is absent from PATH")
-        if timeout_seconds <= 0 or heartbeat_seconds <= 0:
+            raise PlanningInfrastructureError("codex CLI is not installed or is absent from PATH")
+        if (
+            timeout_seconds <= 0
+            or (absolute_timeout_seconds is not None and absolute_timeout_seconds <= 0)
+            or heartbeat_seconds <= 0
+        ):
             raise PlanningError("Codex session timeout and heartbeat must be positive")
         if reasoning_effort not in self._REASONING_EFFORTS:
             choices = ", ".join(sorted(self._REASONING_EFFORTS))
@@ -239,6 +248,7 @@ class CodexSessionAgent:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
+        self.absolute_timeout_seconds = absolute_timeout_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self._progress = progress or self._terminal_progress
         self.thread_id: str | None = None
@@ -414,7 +424,9 @@ class CodexSessionAgent:
                     start_new_session=True,
                 )
             except OSError as error:
-                raise PlanningError(f"could not start Codex planning session: {error}") from error
+                raise PlanningInfrastructureError(
+                    f"could not start Codex planning session: {error}"
+                ) from error
             assert (
                 process.stdin is not None
                 and process.stdout is not None
@@ -436,18 +448,38 @@ class CodexSessionAgent:
                 process.stdin.close()
             except (BrokenPipeError, OSError) as error:
                 self._stop_process(process)
-                raise PlanningError(
+                raise PlanningInfrastructureError(
                     f"could not deliver the planning prompt to Codex: {error}"
                 ) from error
             started = time.monotonic()
             last_activity = started
+            absolute_deadline = (
+                started + self.absolute_timeout_seconds
+                if self.absolute_timeout_seconds is not None
+                else None
+            )
             next_heartbeat = started + self.heartbeat_seconds
             open_streams = len(readers)
             diagnostic_tail: deque[str] = deque(maxlen=40)
             try:
                 while open_streams:
                     now = time.monotonic()
+                    if now >= last_activity + self.timeout_seconds:
+                        self._stop_process(process)
+                        raise PlanningInfrastructureError(
+                            "Codex agent turn produced no events for "
+                            f"{self.timeout_seconds:g} seconds "
+                            f"({int(now - started)}s total); no response was approved"
+                        )
+                    if absolute_deadline is not None and now >= absolute_deadline:
+                        self._stop_process(process)
+                        raise PlanningInfrastructureError(
+                            "Codex agent turn exceeded its absolute wall-clock deadline of "
+                            f"{self.absolute_timeout_seconds:g} seconds; no response was approved"
+                        )
                     deadline = last_activity + self.timeout_seconds
+                    if absolute_deadline is not None:
+                        deadline = min(deadline, absolute_deadline)
                     wait = max(
                         0.0,
                         min(0.5, deadline - now, max(0.0, next_heartbeat - now)),
@@ -458,10 +490,17 @@ class CodexSessionAgent:
                         now = time.monotonic()
                         if now >= last_activity + self.timeout_seconds:
                             self._stop_process(process)
-                            raise PlanningError(
+                            raise PlanningInfrastructureError(
                                 "Codex agent turn produced no events for "
                                 f"{self.timeout_seconds:g} seconds "
                                 f"({int(now - started)}s total); no response was approved"
+                            )
+                        if absolute_deadline is not None and now >= absolute_deadline:
+                            self._stop_process(process)
+                            raise PlanningInfrastructureError(
+                                "Codex agent turn exceeded its absolute wall-clock deadline of "
+                                f"{self.absolute_timeout_seconds:g} seconds; "
+                                "no response was approved"
                             )
                         if now >= next_heartbeat:
                             elapsed = int(now - started)
@@ -495,24 +534,39 @@ class CodexSessionAgent:
                         self._progress(progress)
             except KeyboardInterrupt as error:
                 self._stop_process(process)
-                raise PlanningError(
+                raise PlanningInfrastructureError(
                     "Codex planning session interrupted; no proposal was approved"
                 ) from error
-            remaining = max(0.0, last_activity + self.timeout_seconds - time.monotonic())
+            now = time.monotonic()
+            deadline = last_activity + self.timeout_seconds
+            if absolute_deadline is not None:
+                deadline = min(deadline, absolute_deadline)
+            remaining = max(0.0, deadline - now)
             try:
                 returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 self._stop_process(process)
-                raise PlanningError(
+                if absolute_deadline is not None and time.monotonic() >= absolute_deadline:
+                    raise PlanningInfrastructureError(
+                        "Codex agent turn exceeded its absolute wall-clock deadline of "
+                        f"{self.absolute_timeout_seconds:g} seconds; no response was approved"
+                    ) from None
+                raise PlanningInfrastructureError(
                     "Codex agent turn produced no events for "
                     f"{self.timeout_seconds:g} seconds; no response was approved"
                 ) from None
             if returncode:
                 detail = "\n".join(diagnostic_tail).strip() or f"exit status {returncode}"
-                raise PlanningError(f"Codex planning session failed: {detail}")
+                raise PlanningInfrastructureError(f"Codex planning session failed: {detail}")
             try:
-                response = json.loads(output_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                output = output_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                raise PlanningInfrastructureError(
+                    "Codex session completed without a readable response artifact"
+                ) from error
+            try:
+                response = json.loads(output)
+            except json.JSONDecodeError as error:
                 raise PlanningError(
                     "Codex returned no valid structured planning response"
                 ) from error
@@ -722,13 +776,17 @@ def planning_prompt_values(
 ) -> dict[str, object]:
     """Return the frozen inputs used by production and prompt evaluation."""
     corpus = specification_corpus(repository, specification_directory)
-    existing = [path for path in ("ROADMAP.md", "docs/ROADMAP.md") if (repository / path).is_file()]
+    maintenance_ids = list(maintenance_stage_ids)
+    existing = (
+        [path for path in ("ROADMAP.md", "docs/ROADMAP.md") if (repository / path).is_file()]
+        if maintenance_ids
+        else []
+    )
     bundle = _frozen_source_bundle(
         repository,
         [*(item["path"] for item in corpus), *existing],
     )
     policy = verification_policy_prompt()
-    maintenance_ids = list(maintenance_stage_ids)
     return {
         "specification_directory_json": json.dumps(specification_directory),
         "corpus_json": json.dumps(corpus, sort_keys=True),

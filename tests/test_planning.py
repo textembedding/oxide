@@ -13,6 +13,7 @@ from oxide.contract import load_contract
 from oxide.planning import (
     CodexSessionAgent,
     PlanningError,
+    PlanningInfrastructureError,
     ScriptedAgent,
     ScriptedUser,
     _contract_prompt,
@@ -189,6 +190,7 @@ time.sleep(60)
     agent = CodexSessionAgent(
         tmp_path,
         timeout_seconds=0.15,
+        absolute_timeout_seconds=2,
         heartbeat_seconds=0.03,
         progress=progress.append,
     )
@@ -223,12 +225,55 @@ output.write_text(json.dumps({"message": "ready"}), encoding="utf-8")
     agent = CodexSessionAgent(
         tmp_path,
         timeout_seconds=0.25,
+        absolute_timeout_seconds=2,
         heartbeat_seconds=0.05,
         progress=progress.append,
     )
 
     assert agent.start("Plan this repository.", {"type": "object"}) == {"message": "ready"}
     assert any("Codex reasoning: step 4" in line for line in progress)
+
+
+def test_codex_session_enforces_absolute_deadline_despite_continuous_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = _fake_codex(
+        tmp_path,
+        """\
+import json
+import time
+
+print(json.dumps({"type": "thread.started", "thread_id": "busy-thread"}), flush=True)
+while True:
+    print(json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "retrying"}}), flush=True)
+    time.sleep(0.02)
+""",
+    )
+    monkeypatch.setattr("oxide.planning.shutil.which", lambda _name: str(executable))
+    agent = CodexSessionAgent(
+        tmp_path,
+        timeout_seconds=1,
+        absolute_timeout_seconds=0.15,
+        heartbeat_seconds=0.03,
+        progress=lambda _message: None,
+    )
+
+    with pytest.raises(
+        PlanningInfrastructureError,
+        match="absolute wall-clock deadline of 0.15 seconds",
+    ):
+        agent.start("Plan this repository.", {"type": "object"})
+
+
+def test_codex_session_has_no_absolute_deadline_unless_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = _fake_codex(tmp_path, "")
+    monkeypatch.setattr("oxide.planning.shutil.which", lambda _name: str(executable))
+
+    agent = CodexSessionAgent(tmp_path)
+
+    assert agent.absolute_timeout_seconds is None
 
 
 def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
@@ -246,13 +291,17 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert '"path":"docs/specs/PRODUCT.md"' in prompt
     assert '"path":"docs/specs/RESEARCH.md"' in prompt
     assert "WITHHELD EVALUATION LABEL" not in prompt
-    assert "Do not use shell, file, Git, or network tools to reread it" in prompt
+    assert "Do not use shell, file, Git,\nnetwork, or other tools to reread it" in prompt
     assert "Stage 0 through Stage 3" not in prompt
-    assert "never assume a particular stage count" in prompt
+    assert "Never assume a particular stage count" in prompt
     assert "complete source-defined horizon" in prompt
-    assert "planned, deferred, or blocked stage" in prompt
-    assert "perform a second coverage pass over every source heading" in prompt
+    assert "planned, deferred, or blocked phase" in prompt
+    assert "Perform a second coverage pass over every source heading" in prompt
     assert "standardized, human-readable projection" in prompt
+    assert "authored narrative lists" in prompt
+    assert "use one deterministic source or logical order" in " ".join(prompt.split())
+    assert "Oxide preserves that order" in prompt
+    assert "canonicalizes phase and collection order" not in prompt
     assert "BEGIN OXIDE NORMATIVE VERIFICATION POLICY" in prompt
     assert POLICY_PROFILE in prompt
     assert verification_policy_digest() in prompt
@@ -275,6 +324,22 @@ def test_candidate_prompt_uses_the_exact_production_input_context(tmp_path: Path
     assert candidate == _plan_prompt(repository, "docs/specs")
 
 
+def test_existing_roadmap_is_input_only_during_explicit_maintenance(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    (repository / "ROADMAP.md").write_text("APPROVED BASELINE\n", encoding="utf-8")
+
+    fresh_prompt = _plan_prompt(repository, "docs/specs")
+    maintenance_prompt = _plan_prompt(
+        repository,
+        "docs/specs",
+        maintenance_stage_ids=["durable-journal"],
+        maintenance_request="Promote the selected capability.",
+    )
+
+    assert "APPROVED BASELINE" not in fresh_prompt
+    assert "APPROVED BASELINE" in maintenance_prompt
+
+
 def test_planning_prompt_template_injects_maintenance_values(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
 
@@ -285,7 +350,7 @@ def test_planning_prompt_template_injects_maintenance_values(tmp_path: Path) -> 
         maintenance_request="Promote semantic search after its dependency is ready.",
     )
 
-    assert "MAINTENANCE MODE" in prompt
+    assert "## Maintenance mode" in prompt
     assert '["stage-1"]' in prompt
     assert "Promote semantic search after its dependency is ready." in prompt
 

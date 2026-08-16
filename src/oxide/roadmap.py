@@ -87,7 +87,41 @@ def _source_references(value: object, field: str) -> list[dict[str, str]]:
         result.append(
             {"path": normalized[0], "anchor": normalized[1], "requirement": normalized[2]}
         )
-    return result
+    return sorted(
+        result,
+        key=lambda reference: (
+            reference["path"],
+            reference["anchor"],
+            reference["requirement"],
+        ),
+    )
+
+
+def _invariant_order(identifier: str) -> tuple[int, str]:
+    """Keep Oxide's universal policy first, then use stable invariant identity."""
+    return (0 if identifier == "oxide-verification-policy" else 1, identifier)
+
+
+def _canonical_stage_order(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order phases by dependency layer without adding artificial dependencies."""
+    by_id = {stage["id"]: stage for stage in stages}
+    layers: dict[str, int] = {}
+    remaining = set(by_id)
+    while remaining:
+        ready = sorted(
+            identifier
+            for identifier in remaining
+            if set(by_id[identifier]["dependencies"]) <= layers.keys()
+        )
+        if not ready:
+            raise RoadmapError("roadmap stage dependency graph contains a cycle")
+        for identifier in ready:
+            dependencies = by_id[identifier]["dependencies"]
+            layers[identifier] = (
+                1 + max(layers[dependency] for dependency in dependencies) if dependencies else 0
+            )
+            remaining.remove(identifier)
+    return sorted(stages, key=lambda stage: (layers[stage["id"]], stage["id"]))
 
 
 def _roadmap_toml_text(text: str, source: str | Path) -> str:
@@ -165,6 +199,7 @@ def validate_roadmap(value: object, source: str | Path = "ROADMAP.md") -> dict[s
                 ),
             }
         )
+    invariants.sort(key=lambda invariant: _invariant_order(invariant["id"]))
     raw_stages = value.get("stages")
     if not isinstance(raw_stages, list) or not raw_stages:
         raise RoadmapError("roadmap.stages must contain at least one stage")
@@ -201,9 +236,12 @@ def validate_roadmap(value: object, source: str | Path = "ROADMAP.md") -> dict[s
         ):
             raise RoadmapError(f"roadmap stage {ordinal} is malformed or duplicate")
         stage_ids.add(identifier)
-        applicable = _strings(
-            raw.get("applicable_global_invariants"),
-            f"stage {identifier}.applicable_global_invariants",
+        applicable = sorted(
+            _strings(
+                raw.get("applicable_global_invariants"),
+                f"stage {identifier}.applicable_global_invariants",
+            ),
+            key=_invariant_order,
         )
         if not set(applicable) <= invariant_ids:
             raise RoadmapError(f"stage {identifier} names an unknown global invariant")
@@ -220,8 +258,8 @@ def validate_roadmap(value: object, source: str | Path = "ROADMAP.md") -> dict[s
                 "excluded_scope": _strings(
                     raw.get("excluded_scope"), f"stage {identifier}.excluded_scope"
                 ),
-                "dependencies": _strings(
-                    raw.get("dependencies"), f"stage {identifier}.dependencies"
+                "dependencies": sorted(
+                    _strings(raw.get("dependencies"), f"stage {identifier}.dependencies")
                 ),
                 "source_specifications": _source_references(
                     raw.get("source_specifications"),
@@ -246,15 +284,7 @@ def validate_roadmap(value: object, source: str | Path = "ROADMAP.md") -> dict[s
         dependencies = set(stage["dependencies"])
         if stage["id"] in dependencies or not dependencies <= known:
             raise RoadmapError(f"stage {stage['id']} has invalid dependencies")
-    remaining = {stage["id"]: set(stage["dependencies"]) for stage in stages}
-    while remaining:
-        ready = {
-            identifier for identifier, deps in remaining.items() if not deps & remaining.keys()
-        }
-        if not ready:
-            raise RoadmapError("roadmap stage dependency graph contains a cycle")
-        for identifier in ready:
-            remaining.pop(identifier)
+    stages = _canonical_stage_order(stages)
     normalized = {
         "schema": ROADMAP_SCHEMA,
         "title": title.strip(),
@@ -627,48 +657,172 @@ def _restore_markdown_code(value: str, protected: list[str]) -> str:
     return value
 
 
+def _canonical_inline_markdown(value: str) -> str:
+    """Normalize presentation-only inline Markdown around semantic text."""
+    value = re.sub(
+        r"</?(?:b|em|i|mark|small|span|strong|sub|sup|u)(?:\s[^>]*)?>",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Retain link destinations because changing one can change meaning; only
+    # the Markdown punctuation around the label is presentational.
+    value = re.sub(r"!\[([^]]*)\]\(([^)]+)\)", r"\1 \2", value)
+    value = re.sub(r"\[([^]]+)\]\(([^)]+)\)", r"\1 \2", value)
+    for delimiters in (("**", "**"), ("__", "__"), ("*", "*"), ("_", "_")):
+        opening, closing = map(re.escape, delimiters)
+        value = re.sub(
+            rf"(?<!\w){opening}(?=\S)(.+?)(?<=\S){closing}(?!\w)",
+            r"\1",
+            value,
+        )
+    value = re.sub(r"\\([\\`*{}\[\]()#+\-.!_>])", r"\1", value)
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def _blockquote_prefix(value: str) -> tuple[int, str]:
+    """Return Markdown blockquote depth and the text after its markers."""
+    original = value
+    depth = 0
+    leading = re.match(r"^[ \t]{0,3}(?=>)", value)
+    remainder = value[leading.end() :] if leading else value
+    if not remainder.startswith(">"):
+        return 0, original
+    while remainder.startswith(">"):
+        depth += 1
+        remainder = remainder[1:]
+        if remainder.startswith((" ", "\t")):
+            remainder = remainder[1:]
+    return depth, remainder
+
+
+def _list_depth(stack: list[int], indentation: int) -> int:
+    """Normalize arbitrary indentation widths to relative list nesting."""
+    if not stack:
+        stack.append(indentation)
+        return 0
+    if indentation > stack[-1]:
+        stack.append(indentation)
+        return len(stack) - 1
+    while len(stack) > 1 and indentation < stack[-1]:
+        stack.pop()
+    if indentation > stack[-1]:
+        stack.append(indentation)
+    elif indentation < stack[-1]:
+        stack[-1] = indentation
+    return len(stack) - 1
+
+
 def canonical_source_text(value: str) -> str:
     """Canonicalize Markdown presentation while retaining semantic source text.
 
-    Case, words, punctuation, links, and code bytes remain significant. Soft
-    wrapping, indentation, list/heading markers, emphasis, escapes, comments,
-    and table-rule styling do not. This lets exact source citations survive a
-    formatter without allowing a semantic rewrite to retain authority.
+    Case, words, punctuation, links, code bytes, blockquote boundaries, list
+    nesting, ordered-list ordinals, and task-checkbox state remain significant.
+    Soft wrapping, cosmetic indentation widths, equivalent list-marker
+    spellings, heading markers, emphasis, escapes, comments, and table-rule
+    styling do not. This lets exact source citations survive a formatter without
+    allowing a semantic rewrite to retain authority.
     """
     normalized = unicodedata.normalize("NFC", value).replace("\r\n", "\n").replace("\r", "\n")
     normalized, protected = _protect_markdown_code(normalized)
     normalized = re.sub(r"<!--[\s\S]*?-->", "", normalized)
-    lines: list[str] = []
+    blocks: list[dict[str, object]] = []
     table_rule = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$")
     horizontal_rule = re.compile(r"^(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$")
+    list_marker = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d{1,9}[.)])[ \t]+(?P<body>.*)$")
+    list_stack: list[int] = []
+    active_quote_depth: int | None = None
+    separated = True
     for raw_line in normalized.split("\n"):
-        line = raw_line.strip()
+        quote_depth, quoted_line = _blockquote_prefix(raw_line)
+        line = quoted_line.strip()
+        if not line:
+            separated = True
+            list_stack.clear()
+            active_quote_depth = None
+            continue
         if table_rule.fullmatch(line) or horizontal_rule.fullmatch(line):
             continue
-        line = re.sub(r"^(?:>\s*)+", "", line)
-        line = re.sub(r"^#{1,6}[ \t]+", "", line)
-        line = re.sub(r"^(?:[-+*]|\d{1,9}[.)])[ \t]+", "", line)
-        line = re.sub(r"^\[[ xX]\][ \t]+", "", line)
-        line = re.sub(
-            r"</?(?:b|em|i|mark|small|span|strong|sub|sup|u)(?:\s[^>]*)?>",
-            "",
-            line,
-            flags=re.IGNORECASE,
-        )
-        # Retain link destinations because changing one can change meaning; only
-        # the Markdown punctuation around the label is presentational.
-        line = re.sub(r"!\[([^]]*)\]\(([^)]+)\)", r"\1 \2", line)
-        line = re.sub(r"\[([^]]+)\]\(([^)]+)\)", r"\1 \2", line)
-        for delimiters in (("**", "**"), ("__", "__"), ("*", "*"), ("_", "_")):
-            opening, closing = map(re.escape, delimiters)
-            line = re.sub(
-                rf"(?<!\w){opening}(?=\S)(.+?)(?<=\S){closing}(?!\w)",
-                r"\1",
-                line,
+        heading = re.match(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", line)
+        if heading:
+            line = heading.group(1)
+            list_stack.clear()
+            separated = True
+
+        match = list_marker.match(quoted_line)
+        if match:
+            if active_quote_depth != quote_depth:
+                list_stack.clear()
+            active_quote_depth = quote_depth
+            indentation = len(match.group("indent").expandtabs(4))
+            depth = _list_depth(list_stack, indentation)
+            marker = match.group("marker")
+            body = match.group("body")
+            checkbox = re.match(r"^\[([ xX])\][ \t]+(.*)$", body)
+            task_state = ""
+            if checkbox:
+                task_state = "[x] " if checkbox.group(1).lower() == "x" else "[ ] "
+                body = checkbox.group(2)
+            canonical_body = _canonical_inline_markdown(body)
+            if marker[0].isdigit():
+                canonical_marker = f"{int(marker[:-1])}. "
+            else:
+                canonical_marker = "- "
+            prefix = f"{'> ' * quote_depth}{'  ' * depth}{canonical_marker}{task_state}"
+            blocks.append(
+                {
+                    "kind": "list",
+                    "quote_depth": quote_depth,
+                    "prefix": prefix,
+                    "text": canonical_body,
+                }
             )
-        line = re.sub(r"\\([\\`*{}\[\]()#+\-.!_>])", r"\1", line)
-        lines.append(html.unescape(line))
-    canonical = re.sub(r"\s+", " ", " ".join(lines)).strip()
+            separated = False
+            continue
+
+        canonical_line = _canonical_inline_markdown(line)
+        if not canonical_line:
+            continue
+        # A lazily wrapped list item is part of the preceding item regardless of
+        # whether a formatter indents the continuation by two or four spaces.
+        if (
+            not separated
+            and blocks
+            and blocks[-1]["kind"] == "list"
+            and blocks[-1]["quote_depth"] == quote_depth
+        ):
+            blocks[-1]["text"] = f"{blocks[-1]['text']} {canonical_line}".strip()
+            separated = False
+            continue
+        else:
+            prefix = ("> " * quote_depth).rstrip()
+            if (
+                not separated
+                and blocks
+                and blocks[-1]["kind"] == "prose"
+                and blocks[-1]["quote_depth"] == quote_depth
+            ):
+                blocks[-1]["text"] = f"{blocks[-1]['text']} {canonical_line}".strip()
+            else:
+                blocks.append(
+                    {
+                        "kind": "prose",
+                        "quote_depth": quote_depth,
+                        "prefix": prefix,
+                        "text": canonical_line,
+                    }
+                )
+        list_stack.clear()
+        active_quote_depth = None
+        separated = False
+    canonical = "\n".join(
+        (
+            f"{block['prefix']}{block['text']}"
+            if block["kind"] == "list"
+            else f"{block['prefix']} {block['text']}".strip()
+        )
+        for block in blocks
+    ).strip()
     return _restore_markdown_code(canonical, protected)
 
 
@@ -860,6 +1014,7 @@ def stage_set_binding(
             closure[(item["path"], item["anchor"], item["requirement"])] = item
         for invariant in binding["global_invariants"]:
             invariants[invariant["id"]] = invariant
+    invariant_ids = sorted(invariants, key=_invariant_order)
     return {
         "roadmap_path": roadmap_path,
         "roadmap_sha256": digest_bytes(roadmap_raw),
@@ -868,9 +1023,9 @@ def stage_set_binding(
         "stage_set_sha256": digest_bytes(
             canonical_bytes([binding["stage"] for binding in bindings])
         ),
-        "global_invariants": [invariants[key] for key in sorted(invariants)],
+        "global_invariants": [invariants[key] for key in invariant_ids],
         "global_invariants_sha256": digest_bytes(
-            canonical_bytes([invariants[key] for key in sorted(invariants)])
+            canonical_bytes([invariants[key] for key in invariant_ids])
         ),
         "semantic_closure": [closure[key] for key in sorted(closure)],
         "semantic_closure_sha256": digest_bytes(
@@ -940,6 +1095,7 @@ def proposed_stage_set_binding(
             closure[(item["path"], item["anchor"], item["requirement"])] = item
         for invariant in binding["global_invariants"]:
             invariants[invariant["id"]] = invariant
+    invariant_ids = sorted(invariants, key=_invariant_order)
     return {
         "roadmap_path": roadmap_path,
         "roadmap_sha256": digest_bytes(roadmap_raw),
@@ -948,9 +1104,9 @@ def proposed_stage_set_binding(
         "stage_set_sha256": digest_bytes(
             canonical_bytes([binding["stage"] for binding in bindings])
         ),
-        "global_invariants": [invariants[key] for key in sorted(invariants)],
+        "global_invariants": [invariants[key] for key in invariant_ids],
         "global_invariants_sha256": digest_bytes(
-            canonical_bytes([invariants[key] for key in sorted(invariants)])
+            canonical_bytes([invariants[key] for key in invariant_ids])
         ),
         "semantic_closure": [closure[key] for key in sorted(closure)],
         "semantic_closure_sha256": digest_bytes(
