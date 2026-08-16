@@ -25,6 +25,13 @@ DEFAULT_CANDIDATE = REPOSITORY / "src" / "oxide" / "prompts" / "planning.md.j2"
 def _harness(arguments: argparse.Namespace) -> tuple[str, EvaluationHarness]:
     candidate = Path(arguments.candidate).resolve().read_text(encoding="utf-8")
     cases = load_cases()
+    if arguments.case:
+        requested = set(arguments.case)
+        known = {case.identifier for case in cases}
+        unknown = sorted(requested - known)
+        if unknown:
+            raise SystemExit(f"unknown evaluation case(s): {', '.join(unknown)}")
+        cases = [case for case in cases if case.identifier in requested]
     if arguments.runner == "fixture":
         runner = FixturePlannerRunner()
     else:
@@ -33,6 +40,7 @@ def _harness(arguments: argparse.Namespace) -> tuple[str, EvaluationHarness]:
             model=arguments.model,
             reasoning_effort=arguments.reasoning_effort,
             timeout_seconds=arguments.timeout,
+            absolute_timeout_seconds=arguments.absolute_timeout,
         )
     judge = (
         CodexQualityJudge(
@@ -40,11 +48,19 @@ def _harness(arguments: argparse.Namespace) -> tuple[str, EvaluationHarness]:
             model=arguments.model,
             reasoning_effort=arguments.reasoning_effort,
             timeout_seconds=arguments.timeout,
+            absolute_timeout_seconds=arguments.absolute_timeout,
         )
         if arguments.judge == "codex"
         else None
     )
-    return candidate, EvaluationHarness(REPOSITORY, candidate, cases, runner, judge)
+    return candidate, EvaluationHarness(
+        REPOSITORY,
+        candidate,
+        cases,
+        runner,
+        judge,
+        replicates=arguments.replicates,
+    )
 
 
 def _score(arguments: argparse.Namespace) -> int:
@@ -76,6 +92,7 @@ def _optimize(arguments: argparse.Namespace) -> int:
             model=arguments.model,
             reasoning_effort=arguments.reasoning_effort,
             timeout_seconds=arguments.timeout,
+            absolute_timeout_seconds=arguments.absolute_timeout,
         )
         if arguments.proposer == "codex"
         else _noop_proposer
@@ -126,6 +143,24 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning-effort", default="max")
     parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument(
+        "--absolute-timeout",
+        type=float,
+        default=900.0,
+        help="hard wall-clock limit for each Codex turn (default: 900 seconds)",
+    )
+    parser.add_argument(
+        "--replicates",
+        type=int,
+        default=2,
+        help="independent base-corpus planning runs used to measure structural consistency",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        help="evaluate only this example ID; repeat to select multiple examples",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

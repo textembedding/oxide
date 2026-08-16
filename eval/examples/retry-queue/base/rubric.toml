@@ -6,24 +6,28 @@ fixture_unresolved = []
 
 [[requirements]]
 id = "fifo"
+path = "PRODUCT.md"
 anchor = "Queue operations"
 text = "Jobs are dequeued in first-in, first-out order."
 readiness = ["ready"]
 
 [[requirements]]
 id = "ownership"
+path = "PRODUCT.md"
 anchor = "Queue operations"
 text = "At most one worker owns an unacknowledged job at a time."
 readiness = ["ready"]
 
 [[requirements]]
 id = "recovery"
+path = "PRODUCT.md"
 anchor = "Recovery"
 text = "After a worker crash, its unacknowledged job becomes available again during recovery."
 readiness = ["ready"]
 
 [[requirements]]
 id = "retry-policy"
+path = "PRODUCT.md"
 anchor = "Retry policy"
 text = "A failed job is attempted at most three times and is then moved to a dead-letter queue."
 readiness = ["ready"]
@@ -31,4 +35,3 @@ readiness = ["ready"]
 [[dependencies]]
 before = "ownership"
 after = "recovery"
-

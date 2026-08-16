@@ -6,30 +6,35 @@ fixture_unresolved = []
 
 [[requirements]]
 id = "update"
+path = "PRODUCT.md"
 anchor = "Updates"
 text = "A client may add a signed 64-bit delta to a named counter."
 readiness = ["ready"]
 
 [[requirements]]
 id = "overflow"
+path = "PRODUCT.md"
 anchor = "Updates"
 text = "An update that would overflow the signed 64-bit range is rejected without changing the counter."
 readiness = ["ready"]
 
 [[requirements]]
 id = "read"
+path = "PRODUCT.md"
 anchor = "Reads"
 text = "A read returns the current value of the named counter."
 readiness = ["ready"]
 
 [[requirements]]
 id = "durability"
+path = "PRODUCT.md"
 anchor = "Durability"
 text = "Every acknowledged update remains visible after process restart."
 readiness = ["ready"]
 
 [[requirements]]
 id = "http"
+path = "PRODUCT.md"
 anchor = "HTTP adapter"
 text = "An HTTP adapter is deferred until the counter state machine is implemented and proved."
 readiness = ["deferred"]
@@ -37,4 +42,3 @@ readiness = ["deferred"]
 [[dependencies]]
 before = "update"
 after = "http"
-

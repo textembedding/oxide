@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from oxide.planning import PLAN_RESPONSE_SCHEMA, CodexSessionAgent
+from oxide.planning import PLAN_RESPONSE_SCHEMA, CodexSessionAgent, PlanningInfrastructureError
 
 from .cases import EvaluationCase, Scenario
+
+
+def _retry_infrastructure(operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """Retry one transient model turn once; never translate it into a score."""
+    for attempt in range(2):
+        try:
+            return operation()
+        except PlanningInfrastructureError:
+            if attempt == 1:
+                raise
+    raise AssertionError("unreachable")
 
 
 class PlannerRunner(Protocol):
@@ -48,15 +59,19 @@ class CodexPlannerRunner:
     model: str = "gpt-5.6-sol"
     reasoning_effort: str = "max"
     timeout_seconds: float = 900.0
+    absolute_timeout_seconds: float | None = None
 
     def run(self, prompt: str, scenario: Scenario) -> dict[str, Any]:
         del scenario
-        return CodexSessionAgent(
-            self.repository,
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            timeout_seconds=self.timeout_seconds,
-        ).start(prompt, PLAN_RESPONSE_SCHEMA)
+        return _retry_infrastructure(
+            lambda: CodexSessionAgent(
+                self.repository,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                timeout_seconds=self.timeout_seconds,
+                absolute_timeout_seconds=self.absolute_timeout_seconds,
+            ).start(prompt, PLAN_RESPONSE_SCHEMA)
+        )
 
 
 _JUDGE_SCHEMA: dict[str, Any] = {
@@ -97,6 +112,7 @@ class CodexQualityJudge:
     model: str = "gpt-5.6-sol"
     reasoning_effort: str = "high"
     timeout_seconds: float = 600.0
+    absolute_timeout_seconds: float | None = None
 
     def score(
         self,
@@ -105,11 +121,11 @@ class CodexQualityJudge:
         variant_response: dict[str, Any],
     ) -> tuple[float, dict[str, Any]]:
         prompt = f"""\
-You are judging two planning outputs for an Oxide prompt evaluation.
-Deterministic checks have already validated schema, exact source citations, dependency
-acyclicity, and representative requirement oracles. Judge the complete supplied source
-corpus for the qualities that are not
-reliably reducible to string checks:
+You are judging two planning outputs for an Oxide prompt evaluation. Mechanical checks run
+separately and may have rejected either output. Do not assume its schema, citations, or dependency
+graph are valid. Judge the complete supplied source corpus for the qualities that are not reliably
+reducible to string checks, and use the reason field to identify systemic quality defects even
+when an output is mechanically invalid:
 
 1. faithfulness: goals and exclusions do not smuggle in product behavior absent from sources;
 2. coverage: every material requirement, deferral, non-goal, and research question has one
@@ -132,12 +148,15 @@ BASE RESPONSE
 VARIANT RESPONSE
 {json.dumps(variant_response, ensure_ascii=False, sort_keys=True)}
 """
-        result = CodexSessionAgent(
-            self.repository,
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            timeout_seconds=self.timeout_seconds,
-        ).start(prompt, _JUDGE_SCHEMA)
+        result = _retry_infrastructure(
+            lambda: CodexSessionAgent(
+                self.repository,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                timeout_seconds=self.timeout_seconds,
+                absolute_timeout_seconds=self.absolute_timeout_seconds,
+            ).start(prompt, _JUDGE_SCHEMA)
+        )
         values = [
             int(result[key]) for key in ("faithfulness", "coverage", "decomposition", "readability")
         ]
@@ -164,6 +183,7 @@ class CodexPromptProposer:
     model: str = "gpt-5.6-sol"
     reasoning_effort: str = "max"
     timeout_seconds: float = 900.0
+    absolute_timeout_seconds: float | None = None
 
     def __call__(
         self,
@@ -194,10 +214,13 @@ CURRENT TEMPLATE
 GEPA ACTIONABLE FEEDBACK
 {json.dumps(reflective_dataset, ensure_ascii=False, sort_keys=True, default=str)}
 """
-        result = CodexSessionAgent(
-            self.repository,
-            model=self.model,
-            reasoning_effort=self.reasoning_effort,
-            timeout_seconds=self.timeout_seconds,
-        ).start(prompt, _PROPOSAL_SCHEMA)
+        result = _retry_infrastructure(
+            lambda: CodexSessionAgent(
+                self.repository,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                timeout_seconds=self.timeout_seconds,
+                absolute_timeout_seconds=self.absolute_timeout_seconds,
+            ).start(prompt, _PROPOSAL_SCHEMA)
+        )
         return {"planning_prompt": str(result["planning_prompt"])}

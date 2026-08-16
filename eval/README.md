@@ -22,13 +22,16 @@ Layer 2 is metamorphic and adversarial behavior:
 - Markdown-only formatting changes preserve the semantic plan;
 - removing a necessary acceptance criterion makes affected work non-ready;
 - contradictory requirements are surfaced instead of silently reconciled.
+- independent runs over the same frozen corpus preserve capability boundaries,
+  phase identities, source ownership, dependencies, readiness, and field shape.
 
 An optional LLM judge scores faithfulness, full-corpus coverage, decomposition
-quality, and human readability only after deterministic qualification succeeds.
-With the judge enabled, the aggregate score weights deterministic checks at 50%,
-metamorphic checks at 20%, and the judge at 30%. This makes holistic critique
-material to GEPA's search while the mechanical-validity cap prevents a judge from
-turning an invalid source trace into a passing result.
+quality, and human readability after mechanical qualification succeeds.
+With the judge enabled, the aggregate score weights deterministic checks at 40%,
+metamorphic checks at 15%, repeat-run consistency at 15%, and the judge at 30%.
+This makes stability and holistic critique material to GEPA's search while the
+mechanical-validity cap prevents a judge from turning an invalid source trace into
+a passing result.
 
 Each score includes compact diagnostics. [GEPA](https://github.com/gepa-ai/gepa) receives those diagnostics as
 actionable side information and proposes a replacement Jinja template. Candidate
@@ -118,8 +121,11 @@ Score the current prompt with real Codex planning turns:
 uv run python -m eval score --runner codex
 ```
 
-Add `--judge codex` to include the soft quality objective. A score run performs
-two planning turns per case; the judge adds one turn per case.
+Add `--judge codex` to include the soft quality objective. By default, a score run
+performs two independent base-corpus turns and one variant turn per case; the judge
+adds one turn per case. Use `--replicates` to change the number of identical-input
+base samples. Use `--case transactional-reservation` to iterate on one example before
+paying for the complete suite.
 
 Run a bounded hill climb. Both planning evaluations and reflective mutations use
 the signed-in Codex CLI, while GEPA supplies candidate selection and feedback:

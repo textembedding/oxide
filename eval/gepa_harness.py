@@ -7,14 +7,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .identity import qualify_run_directory
 from .scoring import EvaluationHarness
 
 OBJECTIVE = """\
 Improve the general-purpose Oxide planning prompt. Maximize exact source fidelity,
 complete requirement disposition, honest readiness, dependency correctness, meaningful
-verification planning, and robustness to formatting changes, missing acceptance criteria,
-and contradictory specifications. Do not optimize for a fixed roadmap, stage count, product,
-or fixture vocabulary. Preserve the Jinja variable contract and maintenance-mode behavior.
+verification planning, stable capability decomposition across repeated runs, concise canonical
+roadmap structure, and robustness to formatting changes, missing acceptance criteria, and
+contradictory specifications. Do not optimize for a fixed roadmap, stage count, product, or
+fixture vocabulary. Preserve the Jinja variable contract and maintenance-mode behavior.
 """
 
 
@@ -36,7 +38,9 @@ def optimize_prompt(
         optimize_anything,
     )
 
-    run_directory.mkdir(parents=True, exist_ok=True)
+    manifest = evaluator.bind_optimizer(proposer)
+    qualify_run_directory(run_directory, manifest)
+    dataset = evaluator.dataset()
     config = GEPAConfig(
         engine=EngineConfig(
             run_dir=str(run_directory),
@@ -52,7 +56,7 @@ def optimize_prompt(
         reflection=ReflectionConfig(
             skip_perfect_score=True,
             perfect_score=1.0,
-            reflection_minibatch_size=min(3, len(evaluator.dataset())),
+            reflection_minibatch_size=min(3, len(dataset)),
             custom_candidate_proposer=proposer,
             reflection_lm=None if proposer is not None else "openai/gpt-5.1",
         ),
@@ -60,7 +64,7 @@ def optimize_prompt(
     return optimize_anything(
         seed_candidate={"planning_prompt": seed_template},
         evaluator=evaluator,
-        dataset=evaluator.dataset(),
+        dataset=dataset,
         objective=OBJECTIVE,
         config=config,
     )

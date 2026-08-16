@@ -6,78 +6,91 @@ fixture_unresolved = []
 
 [[requirements]]
 id = "durability"
+path = "PRODUCT.md"
 anchor = "Global invariants"
 text = "Every acknowledged operation group remains durable and discoverable after a successful restart under the declared storage assumptions."
 readiness = ["ready"]
 
 [[requirements]]
 id = "convergence"
+path = "PRODUCT.md"
 anchor = "Strong convergence"
 text = "Any two qualified replicas with identical admitted-group sets and identical schema catalogs return identical canonical materialized bytes."
 readiness = ["ready"]
 
 [[requirements]]
 id = "group-atomicity"
+path = "PRODUCT.md"
 anchor = "Atomicity"
 text = "An admitted group publishes all members or none."
 readiness = ["ready"]
 
 [[requirements]]
 id = "conflict-order"
+path = "PRODUCT.md"
 anchor = "Concurrent text insertion"
 text = "Concurrent insertions into the same stable gap are ordered by descending canonical group-dot order and then ascending member-local scalar offset."
 readiness = ["ready"]
 
 [[requirements]]
 id = "revocation"
+path = "PRODUCT.md"
 anchor = "Revoke"
 text = "An operation concurrent with a revocation is authorized by its own causal state and remains valid if the grant was then active."
 readiness = ["ready"]
 
 [[requirements]]
 id = "sync"
+path = "PRODUCT.md"
 anchor = "Reconnect completion"
 text = "If two authorized replicas remain connected, exchange fair delivery, possess compatible schemas, and stop creating new operations, synchronization eventually leaves them with equal admitted-group sets."
 readiness = ["ready"]
 
 [[requirements]]
 id = "schema-quarantine"
+path = "PRODUCT.md"
 anchor = "Unknown-schema admission"
 text = "A group using an unknown schema remains quarantined as `unsupported_schema` and does not enter authoritative document history."
 readiness = ["ready"]
 
 [[requirements]]
 id = "snapshot"
+path = "PRODUCT.md"
 anchor = "Restore"
 text = "Restore then replays retained groups above the frontier through the same abstract transitions used by normal admission."
 readiness = ["ready"]
 
 [[requirements]]
 id = "malformed-isolation"
+path = "PRODUCT.md"
 anchor = "Global invariants"
 text = "Unknown or malformed peer input cannot mutate authoritative state."
 readiness = ["ready"]
 
 [[requirements]]
 id = "composition"
+path = "DEVELOPMENT.md"
 anchor = "Composition theorem"
 text = "The exact production public API refines the PRODUCT abstract transitions for the exact prospective authoritative tree."
 readiness = ["ready"]
 
 [[requirements]]
 id = "storage-boundary"
+path = "DEVELOPMENT.md"
 anchor = "Storage adapter"
 text = "It must not decide authorization, causal readiness, conflict winners, compaction eligibility, or recovery compatibility."
 readiness = ["ready"]
 
 [[requirements]]
 id = "capacity"
+path = "RESEARCH.md"
 anchor = "Service objectives"
 text = "Under the standard connected workload, one reference server must sustain at least 500,000 admitted operation groups per second at 70 percent or less CPU saturation."
 readiness = ["ready"]
 
 [[requirements]]
 id = "recovery-time"
+path = "RESEARCH.md"
 anchor = "Recovery objectives"
 text = "For a 1 TiB retained history with a qualifying snapshot less than ten minutes old, restart to read availability must complete within 60 seconds on the reference target."
 readiness = ["ready"]

@@ -6,24 +6,28 @@ fixture_unresolved = []
 
 [[requirements]]
 id = "create"
+path = "PRODUCT.md"
 anchor = "Core operations"
 text = "An authenticated account can create a note with a title and body."
 readiness = ["ready"]
 
 [[requirements]]
 id = "search"
+path = "PRODUCT.md"
 anchor = "Core operations"
 text = "Exact title search returns matching notes in creation order."
 readiness = ["ready"]
 
 [[requirements]]
 id = "privacy"
+path = "PRODUCT.md"
 anchor = "Access control"
 text = "Only the owning account can read a note body."
 readiness = ["ready"]
 
 [[requirements]]
 id = "semantic"
+path = "PRODUCT.md"
 anchor = "Future retrieval"
 text = "Semantic full-text retrieval is deferred until its relevance and privacy criteria are specified."
 readiness = ["deferred"]
@@ -31,4 +35,3 @@ readiness = ["deferred"]
 [[dependencies]]
 before = "create"
 after = "semantic"
-

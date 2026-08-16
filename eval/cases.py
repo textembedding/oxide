@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -15,6 +15,7 @@ class CaseError(RuntimeError):
 @dataclass(frozen=True)
 class RequirementOracle:
     identifier: str
+    path: str
     anchor: str
     text: str
     readiness: tuple[str, ...]
@@ -97,16 +98,37 @@ def _scenario(case_directory: Path, value: object) -> Scenario:
     requirements_raw = rubric["requirements"]
     if not isinstance(requirements_raw, list) or not requirements_raw:
         raise CaseError(f"{rubric_path}.requirements must not be empty")
+    repository = case_directory.parents[2]
+    specification_root = specs = directory / "specs"
+    if not specs.is_dir() or not list(specs.rglob("*.md")):
+        raise CaseError(f"{directory} has no specification corpus")
+    specification_prefix = specs.relative_to(repository).as_posix()
     requirements: list[RequirementOracle] = []
     for item in requirements_raw:
-        if not isinstance(item, dict) or set(item) != {"id", "anchor", "text", "readiness"}:
+        if not isinstance(item, dict) or set(item) != {
+            "id",
+            "path",
+            "anchor",
+            "text",
+            "readiness",
+        }:
             raise CaseError(f"{rubric_path} has a malformed requirement")
+        source_path = item["path"]
+        if not isinstance(source_path, str) or not source_path:
+            raise CaseError(f"{rubric_path} has an invalid requirement source path")
+        relative_source = PurePosixPath(source_path)
+        if relative_source.is_absolute() or ".." in relative_source.parts:
+            raise CaseError(f"{rubric_path} has an escaped requirement source path")
+        source_file = specification_root.joinpath(*relative_source.parts)
+        if not source_file.is_file():
+            raise CaseError(f"{rubric_path} requirement source is absent: {source_path}")
         readiness = _strings(item["readiness"], f"requirement {item.get('id')}.readiness")
         if not readiness or not set(readiness) <= {"planned", "ready", "deferred", "blocked"}:
             raise CaseError(f"{rubric_path} has invalid requirement readiness")
         requirements.append(
             RequirementOracle(
                 identifier=str(item["id"]),
+                path=f"{specification_prefix}/{relative_source.as_posix()}",
                 anchor=str(item["anchor"]),
                 text=str(item["text"]),
                 readiness=readiness,
@@ -126,13 +148,9 @@ def _scenario(case_directory: Path, value: object) -> Scenario:
         if dependency.before not in identifiers or dependency.after not in identifiers:
             raise CaseError(f"{rubric_path} dependency names an unknown requirement")
         dependencies.append(dependency)
-    specs = directory / "specs"
-    if not specs.is_dir() or not list(specs.rglob("*.md")):
-        raise CaseError(f"{directory} has no specification corpus")
     model_free_output = directory / "model-free-output.md"
     if not model_free_output.is_file():
         raise CaseError(f"{directory} has no model-free planner output")
-    repository = case_directory.parents[2]
     return Scenario(
         identifier=identifier,
         directory=directory,

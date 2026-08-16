@@ -10,7 +10,7 @@ from typing import Any
 
 from jinja2 import Environment, TemplateError, meta
 
-from oxide.planning import planning_prompt_values
+from oxide.planning import PlanningInfrastructureError, planning_prompt_values
 from oxide.prompt_templates import PromptTemplateError, render_prompt_source
 from oxide.roadmap import (
     RoadmapError,
@@ -22,10 +22,12 @@ from oxide.roadmap import (
 )
 
 from .cases import EvaluationCase, Scenario
+from .identity import build_manifest
 from .runners import PlannerRunner, QualityJudge
 
-DETERMINISTIC_WEIGHT = 0.50
-METAMORPHIC_WEIGHT = 0.20
+DETERMINISTIC_WEIGHT = 0.40
+METAMORPHIC_WEIGHT = 0.15
+CONSISTENCY_WEIGHT = 0.15
 JUDGE_WEIGHT = 0.30
 
 
@@ -52,6 +54,56 @@ class ScenarioReport:
             "dependencies": self.dependency_results,
         }
 
+    def structural_signature(self) -> dict[str, Any]:
+        """Return the roadmap decisions whose stability matters across identical runs."""
+        if self.roadmap is None:
+            return {}
+        source_owners: dict[tuple[str, str, str], list[str]] = {}
+        for invariant in self.roadmap["global_invariants"]:
+            for source in invariant["sources"]:
+                identity = (source["path"], source["anchor"], source["requirement"])
+                source_owners.setdefault(identity, []).append(f"invariant:{invariant['id']}")
+        for stage in self.roadmap["stages"]:
+            for source in stage["source_specifications"]:
+                identity = (source["path"], source["anchor"], source["requirement"])
+                source_owners.setdefault(identity, []).append(f"stage:{stage['id']}")
+        return {
+            "stage_ids": tuple(stage["id"] for stage in self.roadmap["stages"]),
+            "dependencies": tuple(
+                (stage["id"], tuple(stage["dependencies"])) for stage in self.roadmap["stages"]
+            ),
+            "readiness": tuple(
+                (stage["id"], stage["readiness"]) for stage in self.roadmap["stages"]
+            ),
+            "invariants": tuple(
+                (
+                    invariant["id"],
+                    tuple(
+                        stage["id"]
+                        for stage in self.roadmap["stages"]
+                        if invariant["id"] in stage["applicable_global_invariants"]
+                    ),
+                )
+                for invariant in self.roadmap["global_invariants"]
+            ),
+            "source_owners": tuple(
+                (identity, tuple(owners)) for identity, owners in sorted(source_owners.items())
+            ),
+            "requirement_stages": tuple(sorted(self.requirement_stages.items())),
+            "semantic_content": tuple(
+                (
+                    stage["id"],
+                    canonical_source_text(stage["outcome"]),
+                    tuple(canonical_source_text(item) for item in stage["included_scope"]),
+                    tuple(canonical_source_text(item) for item in stage["excluded_scope"]),
+                    tuple(canonical_source_text(item) for item in stage["implementation_goals"]),
+                    tuple(canonical_source_text(item) for item in stage["verification_goals"]),
+                )
+                for stage in self.roadmap["stages"]
+            ),
+            "approval": bool(self.response.get("ready_for_approval")),
+        }
+
 
 @dataclass
 class CaseReport:
@@ -59,6 +111,7 @@ class CaseReport:
     score: float
     deterministic_score: float
     metamorphic_score: float
+    consistency_score: float
     judge_score: float | None
     base: ScenarioReport
     variant: ScenarioReport
@@ -72,6 +125,7 @@ class CaseReport:
             "objectives": {
                 "deterministic_correctness": round(self.deterministic_score, 6),
                 "metamorphic_robustness": round(self.metamorphic_score, 6),
+                "repeat_run_consistency": round(self.consistency_score, 6),
                 **(
                     {"llm_quality": round(self.judge_score, 6)}
                     if self.judge_score is not None
@@ -94,6 +148,20 @@ _RESPONSE_FIELDS = {
     "roadmap_markdown",
 }
 _FORMAL_WORDS = ("verus", "prove", "proof", "refinement", "invariant", "contract")
+_EMPIRICAL_WORDS = (
+    "benchmark",
+    "campaign",
+    "characterize",
+    "evaluate",
+    "experiment",
+    "investigate",
+    "measure",
+    "qualify",
+    "research",
+    "study",
+    "test",
+    "validate",
+)
 _VACUOUS_WORDS = ("ensures true", "todo", "tbd", "proof later", "verify later")
 
 
@@ -154,6 +222,8 @@ def evaluate_scenario(
             **planning_prompt_values(repository, scenario.specification_directory),
         )
         response = runner.run(prompt, scenario)
+    except PlanningInfrastructureError:
+        raise
     except (PromptTemplateError, RoadmapError, RuntimeError, OSError) as error:
         return ScenarioReport(
             scenario.identifier,
@@ -174,8 +244,6 @@ def evaluate_scenario(
     try:
         rendered = render_roadmap_document(response["roadmap_markdown"], "ROADMAP.md")
         roadmap = parse_roadmap(rendered, "ROADMAP.md")
-        for stage in roadmap["stages"]:
-            proposed_stage_binding(repository, "ROADMAP.md", rendered, stage["id"], {})
     except RoadmapError as error:
         return ScenarioReport(
             scenario.identifier,
@@ -183,6 +251,21 @@ def evaluate_scenario(
             {"response_shape": 1.0, "mechanical_validity": 0.0},
             [f"roadmap qualification failed: {error}"],
             response,
+        )
+    qualification_errors: list[str] = []
+    for stage in roadmap["stages"]:
+        try:
+            proposed_stage_binding(repository, "ROADMAP.md", rendered, stage["id"], {})
+        except RoadmapError as error:
+            qualification_errors.append(f"phase {stage['id']!r}: {error}")
+    if qualification_errors:
+        return ScenarioReport(
+            scenario.identifier,
+            0.05,
+            {"response_shape": 1.0, "mechanical_validity": 0.0},
+            [f"roadmap qualification failed: {error}" for error in qualification_errors],
+            response,
+            roadmap,
         )
 
     requirement_stages: dict[str, tuple[str, ...]] = {}
@@ -194,7 +277,8 @@ def evaluate_scenario(
         found: list[str] = []
         for stage in roadmap["stages"]:
             if any(
-                canonical_source_anchor(reference["anchor"]) == wanted_anchor
+                reference["path"] == requirement.path
+                and canonical_source_anchor(reference["anchor"]) == wanted_anchor
                 and canonical_source_text(reference["requirement"]) == wanted_text
                 for reference in stage["source_specifications"]
             ):
@@ -285,12 +369,39 @@ def evaluate_scenario(
     policy_values: list[float] = []
     for stage in roadmap["stages"]:
         goals = " ".join(stage["verification_goals"]).lower()
-        passed = any(word in goals for word in _FORMAL_WORDS) and not any(
+        production_logic = "oxide-verification-policy" in stage["applicable_global_invariants"]
+        required_words = _FORMAL_WORDS if production_logic else (*_FORMAL_WORDS, *_EMPIRICAL_WORDS)
+        passed = any(word in goals for word in required_words) and not any(
             word in goals for word in _VACUOUS_WORDS
         )
         policy_values.append(float(passed))
         if not passed:
-            diagnostics.append(f"phase {stage['id']!r} lacks a meaningful formal verification goal")
+            kind = "formal verification" if production_logic else "verification or qualification"
+            diagnostics.append(f"phase {stage['id']!r} lacks a meaningful {kind} goal")
+
+    source_owners: dict[tuple[str, str, str], list[str]] = {}
+    for invariant in roadmap["global_invariants"]:
+        for source in invariant["sources"]:
+            identity = (source["path"], source["anchor"], source["requirement"])
+            source_owners.setdefault(identity, []).append(f"invariant:{invariant['id']}")
+    for stage in roadmap["stages"]:
+        for source in stage["source_specifications"]:
+            identity = (source["path"], source["anchor"], source["requirement"])
+            source_owners.setdefault(identity, []).append(f"phase:{stage['id']}")
+    ownership_values: list[float] = []
+    for identity, owners in source_owners.items():
+        invariant_owners = [owner for owner in owners if owner.startswith("invariant:")]
+        phase_owners = [owner for owner in owners if owner.startswith("phase:")]
+        # A cross-cutting rule may be declared once as an invariant and established by one
+        # implementation phase. What creates unstable duplicate work is more than one invariant
+        # or more than one phase claiming the same source requirement.
+        valid = len(invariant_owners) <= 1 and len(phase_owners) <= 1
+        ownership_values.append(float(valid))
+        if not valid:
+            diagnostics.append(
+                "source requirement has multiple roadmap owners: "
+                + f"{identity[0]}#{identity[1]} -> {', '.join(owners)}"
+            )
 
     metrics = {
         "response_shape": 1.0,
@@ -298,6 +409,7 @@ def evaluate_scenario(
         "requirement_coverage": _mean(coverage_values),
         "readiness_calibration": _mean(readiness_values),
         "single_disposition": _mean(duplicate_values),
+        "source_ownership": _mean(ownership_values),
         "dependency_correctness": _mean([float(value) for value in dependency_results.values()]),
         "approval_alignment": _mean([float(value) for value in alignment_checks]),
         "ambiguity_signals": _mean(signal_values),
@@ -306,14 +418,15 @@ def evaluate_scenario(
     }
     score = (
         0.20 * metrics["mechanical_validity"]
-        + 0.22 * metrics["requirement_coverage"]
-        + 0.13 * metrics["readiness_calibration"]
-        + 0.05 * metrics["single_disposition"]
+        + 0.18 * metrics["requirement_coverage"]
+        + 0.12 * metrics["readiness_calibration"]
+        + 0.04 * metrics["single_disposition"]
+        + 0.08 * metrics["source_ownership"]
         + 0.10 * metrics["dependency_correctness"]
         + 0.10 * metrics["approval_alignment"]
         + 0.07 * metrics["ambiguity_signals"]
-        + 0.08 * metrics["verification_policy"]
-        + 0.05 * metrics["non_invention_guard"]
+        + 0.07 * metrics["verification_policy"]
+        + 0.04 * metrics["non_invention_guard"]
     )
     return ScenarioReport(
         scenario.identifier,
@@ -367,6 +480,41 @@ def _metamorphic(
     return _mean([float(value) for value in checks]), diagnostics
 
 
+def _repeat_consistency(
+    baseline: ScenarioReport, repetitions: list[ScenarioReport]
+) -> tuple[float, list[str]]:
+    """Score planning decisions that should be stable for one identical corpus."""
+    if not repetitions:
+        return 1.0, []
+    diagnostics: list[str] = []
+    wanted = baseline.structural_signature()
+    if not baseline.mechanical or not wanted:
+        return 0.0, ["repeat-run consistency cannot be evaluated because the baseline is invalid"]
+    labels = {
+        "stage_ids": "phase identities or order",
+        "dependencies": "dependency graph",
+        "readiness": "phase readiness",
+        "invariants": "global-invariant placement",
+        "source_owners": "source-requirement ownership",
+        "requirement_stages": "representative requirement disposition",
+        "semantic_content": "outcome, scope, implementation, or verification content",
+        "approval": "approval disposition",
+    }
+    values: list[float] = []
+    for ordinal, repetition in enumerate(repetitions, 2):
+        actual = repetition.structural_signature()
+        if not repetition.mechanical or not actual:
+            values.extend(0.0 for _ in labels)
+            diagnostics.append(f"identical run {ordinal} did not produce a valid roadmap")
+            continue
+        for key, label in labels.items():
+            passed = wanted[key] == actual[key]
+            values.append(float(passed))
+            if not passed:
+                diagnostics.append(f"identical run {ordinal} changed {label}")
+    return _mean(values), diagnostics
+
+
 class EvaluationHarness:
     """GEPA-compatible evaluator returning a score and actionable side information."""
 
@@ -377,17 +525,62 @@ class EvaluationHarness:
         cases: list[EvaluationCase],
         runner: PlannerRunner,
         judge: QualityJudge | None = None,
+        replicates: int = 2,
     ):
         self.repository = repository.resolve()
         self.cases = {case.identifier: case for case in cases}
         self.runner = runner
         self.judge = judge
+        if replicates < 1:
+            raise ValueError("planning evaluation requires at least one replicate")
+        self.replicates = replicates
         self.required_variables = template_variables(seed_template)
-        self._cache: dict[tuple[str, str], ScenarioReport] = {}
+        self.seed_template = seed_template
+        self._cache: dict[tuple[str, str, str, int], ScenarioReport] = {}
+        self._manifest = self._build_manifest(proposer=None)
+        self.evaluation_fingerprint = str(self._manifest["fingerprint"])
 
-    def _scenario(self, candidate: str, scenario: Scenario) -> ScenarioReport:
+    @staticmethod
+    def weights() -> dict[str, float]:
+        return {
+            "deterministic": DETERMINISTIC_WEIGHT,
+            "metamorphic": METAMORPHIC_WEIGHT,
+            "repeat_consistency": CONSISTENCY_WEIGHT,
+            "judge": JUDGE_WEIGHT,
+            "without_judge_deterministic": 0.60,
+            "without_judge_metamorphic": 0.20,
+            "without_judge_repeat_consistency": 0.20,
+            "invalid_mechanical_cap": 0.20,
+        }
+
+    def _build_manifest(self, proposer: object | None) -> dict[str, Any]:
+        return build_manifest(
+            self.repository,
+            cases=self.cases.values(),
+            seed_template=self.seed_template,
+            runner=self.runner,
+            judge=self.judge,
+            proposer=proposer,
+            replicates=self.replicates,
+            weights=self.weights(),
+        )
+
+    def bind_optimizer(self, proposer: object | None) -> dict[str, Any]:
+        """Freeze the exact evaluation identity before GEPA reads cache or state."""
+        manifest = self._build_manifest(proposer)
+        fingerprint = str(manifest["fingerprint"])
+        if fingerprint != self.evaluation_fingerprint:
+            self._cache.clear()
+        self._manifest = manifest
+        self.evaluation_fingerprint = fingerprint
+        return json.loads(json.dumps(manifest))
+
+    def manifest(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._manifest))
+
+    def _scenario(self, candidate: str, scenario: Scenario, replicate: int = 0) -> ScenarioReport:
         digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
-        key = (digest, str(scenario.directory))
+        key = (self.evaluation_fingerprint, digest, str(scenario.directory), replicate)
         if key not in self._cache:
             self._cache[key] = evaluate_scenario(self.repository, candidate, scenario, self.runner)
         return self._cache[key]
@@ -405,34 +598,77 @@ class EvaluationHarness:
                 [diagnostic],
                 {},
             )
-            return CaseReport(case.identifier, 0.0, 0.0, 0.0, None, empty, empty, [diagnostic])
+            return CaseReport(
+                case.identifier,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                None,
+                empty,
+                empty,
+                [diagnostic],
+            )
         base = self._scenario(candidate, case.base)
+        if not base.mechanical:
+            skipped = ScenarioReport(
+                case.variant.identifier,
+                0.0,
+                {"not_run": 1.0},
+                ["skipped because the baseline proposal failed mechanical admission"],
+                {},
+            )
+            diagnostics = [
+                *(f"base: {item}" for item in base.diagnostics),
+                *(f"variant: {item}" for item in skipped.diagnostics),
+                "repeat runs and quality judging were skipped after the fatal baseline failure",
+            ]
+            return CaseReport(
+                case.identifier,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                None,
+                base,
+                skipped,
+                diagnostics,
+            )
         variant = self._scenario(candidate, case.variant)
+        repetitions = [
+            self._scenario(candidate, case.base, replicate)
+            for replicate in range(1, self.replicates)
+        ]
         deterministic = (base.score + variant.score) / 2.0
         metamorphic, relation_diagnostics = _metamorphic(case, base, variant)
+        consistency, consistency_diagnostics = _repeat_consistency(base, repetitions)
         judge_score: float | None = None
         judge_details: dict[str, Any] | None = None
-        if self.judge is not None and base.mechanical and variant.mechanical:
+        if self.judge is not None and base.response and variant.response:
             judge_score, judge_details = self.judge.score(case, base.response, variant.response)
+        if judge_score is not None and base.mechanical and variant.mechanical:
             score = (
                 DETERMINISTIC_WEIGHT * deterministic
                 + METAMORPHIC_WEIGHT * metamorphic
+                + CONSISTENCY_WEIGHT * consistency
                 + JUDGE_WEIGHT * judge_score
             )
         else:
-            score = 0.78 * deterministic + 0.22 * metamorphic
+            score = 0.60 * deterministic + 0.20 * metamorphic + 0.20 * consistency
         if not base.mechanical or not variant.mechanical:
             score = min(score, 0.20)
         diagnostics = [
             *(f"base: {item}" for item in base.diagnostics),
             *(f"variant: {item}" for item in variant.diagnostics),
             *relation_diagnostics,
+            *consistency_diagnostics,
         ]
         return CaseReport(
             case.identifier,
             score,
             deterministic,
             metamorphic,
+            consistency,
             judge_score,
             base,
             variant,
@@ -443,8 +679,15 @@ class EvaluationHarness:
     def __call__(self, candidate: object, example: object) -> tuple[float, dict[str, Any]]:
         if not isinstance(candidate, dict) or set(candidate) != {"planning_prompt"}:
             return 0.0, {"diagnostics": ["candidate must contain only planning_prompt"]}
-        if not isinstance(example, dict) or set(example) != {"case_id"}:
-            return 0.0, {"diagnostics": ["dataset example must contain only case_id"]}
+        if not isinstance(example, dict) or set(example) != {
+            "case_id",
+            "evaluation_fingerprint",
+        }:
+            return 0.0, {
+                "diagnostics": ["dataset example must contain case_id and evaluation_fingerprint"]
+            }
+        if example["evaluation_fingerprint"] != self.evaluation_fingerprint:
+            return 0.0, {"diagnostics": ["dataset evaluation fingerprint is stale or foreign"]}
         case = self.cases.get(str(example["case_id"]))
         if case is None:
             return 0.0, {"diagnostics": ["unknown evaluation case"]}
@@ -455,4 +698,10 @@ class EvaluationHarness:
         return report.score, report.side_info()
 
     def dataset(self) -> list[dict[str, str]]:
-        return [{"case_id": identifier} for identifier in self.cases]
+        return [
+            {
+                "case_id": identifier,
+                "evaluation_fingerprint": self.evaluation_fingerprint,
+            }
+            for identifier in self.cases
+        ]

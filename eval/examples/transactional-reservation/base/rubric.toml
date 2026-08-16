@@ -6,72 +6,84 @@ fixture_unresolved = []
 
 [[requirements]]
 id = "capacity-conservation"
+path = "PRODUCT.md"
 anchor = "1. Purpose"
 text = "For every inventory unit, the sum of active held quantity and confirmed capacity-consuming quantity never exceeds the unit's admitted capacity."
 readiness = ["ready"]
 
 [[requirements]]
 id = "group-atomicity"
+path = "PRODUCT.md"
 anchor = "5. Reservation creation"
 text = "The hold publishes all line allocations atomically. There is no partial hold."
 readiness = ["ready"]
 
 [[requirements]]
 id = "last-unit-race"
+path = "PRODUCT.md"
 anchor = "5. Reservation creation"
 text = "Two concurrent requests for the final available quantity cannot both succeed."
 readiness = ["ready"]
 
 [[requirements]]
 id = "expiration-boundary"
+path = "PRODUCT.md"
 anchor = "6. Hold lifetime"
 text = "At logical time equal to `expires_at`, confirmation is no longer permitted."
 readiness = ["ready"]
 
 [[requirements]]
 id = "authorization-single-use"
+path = "PRODUCT.md"
 anchor = "7. Confirmation"
 text = "One authorization cannot confirm two reservations."
 readiness = ["ready"]
 
 [[requirements]]
 id = "refund-bound"
+path = "PRODUCT.md"
 anchor = "10. Refunds"
 text = "The sum of authoritative refunds cannot exceed the settlement amount."
 readiness = ["ready"]
 
 [[requirements]]
 id = "idempotency-binding"
+path = "PRODUCT.md"
 anchor = "12. Idempotency"
 text = "The first authoritative use binds the qualified identity to the canonical request digest and terminal result."
 readiness = ["ready"]
 
 [[requirements]]
 id = "tenant-isolation"
+path = "PRODUCT.md"
 anchor = "14. Isolation"
 text = "Unauthorized, foreign, and absent identifiers share one public `not_found` result."
 readiness = ["ready"]
 
 [[requirements]]
 id = "durable-ack"
+path = "PRODUCT.md"
 anchor = "18. Durability acknowledgment"
 text = "An acknowledged mutation survives process termination and recovery under the declared trusted-storage assumptions."
 readiness = ["ready"]
 
 [[requirements]]
 id = "recovery-prefix"
+path = "PRODUCT.md"
 anchor = "19. Crash recovery"
 text = "Recovery reconstructs the unique authoritative prefix admitted by durable publication evidence."
 readiness = ["ready"]
 
 [[requirements]]
 id = "storage-guard"
+path = "DEVELOPMENT.md"
 anchor = "17. Publication protocol"
 text = "The storage adapter supports guarded conditional insert or update such that at most one contender succeeds for one guard instance."
 readiness = ["ready"]
 
 [[requirements]]
 id = "empirical-separation"
+path = "RESEARCH.md"
 anchor = "18. Throughput objectives"
 text = "An implementation does not pass by shedding valid load as `invalid_request` or by relaxing durability."
 readiness = ["ready"]
