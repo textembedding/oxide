@@ -22,8 +22,123 @@ class RoadmapError(RuntimeError):
 ROADMAP_MARKER = "<!-- oxide-roadmap-schema:1 -->"
 ROADMAP_VIEW_MARKER = "<!-- oxide-roadmap-view:1 -->"
 ROADMAP_SCHEMA = 1
+OXIDE_VERIFICATION_POLICY_ID = "oxide-verification-policy"
+OXIDE_VERIFICATION_POLICY_STATEMENT = (
+    "Production logic has meaningful contracts, component refinement, complete coverage, "
+    "and exact-tree composition; trusted effects remain narrow and policy-free."
+)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+
+_SOURCE_REFERENCE_VALUE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["path", "anchor", "requirement"],
+    "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "anchor": {"type": "string", "minLength": 1},
+        "requirement": {"type": "string", "minLength": 1},
+    },
+}
+
+_GLOBAL_INVARIANT_VALUE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "statement", "sources"],
+    "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "statement": {"type": "string", "minLength": 1},
+        "sources": {
+            "type": "array",
+            "items": _SOURCE_REFERENCE_VALUE_SCHEMA,
+        },
+    },
+}
+
+_STAGE_VALUE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "id",
+        "outcome",
+        "included_scope",
+        "excluded_scope",
+        "dependencies",
+        "source_specifications",
+        "applicable_global_invariants",
+        "implementation_goals",
+        "verification_goals",
+        "readiness",
+    ],
+    "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "outcome": {"type": "string", "minLength": 1},
+        "included_scope": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "excluded_scope": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+        "dependencies": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+        "source_specifications": {
+            "type": "array",
+            "minItems": 1,
+            "items": _SOURCE_REFERENCE_VALUE_SCHEMA,
+        },
+        "applicable_global_invariants": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "implementation_goals": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "verification_goals": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+        },
+        "readiness": {
+            "type": "string",
+            "enum": ["planned", "ready", "deferred", "blocked"],
+        },
+    },
+}
+
+# This schema governs the transient structured planner response. The authoritative
+# repository artifact remains the canonical ROADMAP.md rendered by this module.
+ROADMAP_VALUE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "schema",
+        "title",
+        "status",
+        "specification_root",
+        "global_invariants",
+        "stages",
+    ],
+    "properties": {
+        "schema": {"type": "integer", "enum": [ROADMAP_SCHEMA]},
+        "title": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "enum": ["draft", "ready"]},
+        "specification_root": {"type": "string", "minLength": 1},
+        "global_invariants": {
+            "type": "array",
+            "minItems": 1,
+            "items": _GLOBAL_INVARIANT_VALUE_SCHEMA,
+        },
+        "stages": {"type": "array", "minItems": 1, "items": _STAGE_VALUE_SCHEMA},
+    },
+}
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -99,7 +214,31 @@ def _source_references(value: object, field: str) -> list[dict[str, str]]:
 
 def _invariant_order(identifier: str) -> tuple[int, str]:
     """Keep Oxide's universal policy first, then use stable invariant identity."""
-    return (0 if identifier == "oxide-verification-policy" else 1, identifier)
+    return (0 if identifier == OXIDE_VERIFICATION_POLICY_ID else 1, identifier)
+
+
+def _validate_verification_policy(roadmap: dict[str, Any]) -> None:
+    policy = [
+        invariant
+        for invariant in roadmap["global_invariants"]
+        if invariant["id"] == OXIDE_VERIFICATION_POLICY_ID
+    ]
+    source_free = [
+        invariant for invariant in roadmap["global_invariants"] if not invariant["sources"]
+    ]
+    if (
+        len(policy) != 1
+        or policy[0]["statement"] != OXIDE_VERIFICATION_POLICY_STATEMENT
+        or policy[0]["sources"] != []
+        or source_free != policy
+    ):
+        raise RoadmapError(
+            "roadmap must declare exactly one source-free oxide-verification-policy "
+            "invariant with the mandated statement"
+        )
+    for stage in roadmap["stages"]:
+        if OXIDE_VERIFICATION_POLICY_ID not in stage["applicable_global_invariants"]:
+            raise RoadmapError(f"phase {stage['id']!r} does not apply oxide-verification-policy")
 
 
 def _canonical_stage_order(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -144,7 +283,7 @@ def _roadmap_toml(text: str, source: str | Path) -> dict[str, Any]:
 
 def validate_roadmap(value: object, source: str | Path = "ROADMAP.md") -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise RoadmapError("roadmap schema must be a TOML table")
+        raise RoadmapError("roadmap schema must be an object")
     allowed = {
         "schema",
         "title",
@@ -583,14 +722,7 @@ def _human_roadmap(roadmap: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
-def render_roadmap_document(text: str, source: str | Path = "ROADMAP.md") -> str:
-    """Create the canonical human view around the authoritative TOML schema.
-
-    Agent-authored prose outside the schema block is intentionally discarded. This
-    leaves one semantic representation: the validated TOML. The readable Markdown
-    is a deterministic projection and therefore cannot drift independently.
-    """
-    roadmap = parse_roadmap(text, source)
+def _render_validated_roadmap(roadmap: dict[str, Any]) -> str:
     toml_text = _canonical_roadmap_toml(roadmap)
     return (
         _human_roadmap(roadmap)
@@ -604,6 +736,21 @@ def render_roadmap_document(text: str, source: str | Path = "ROADMAP.md") -> str
         + toml_text
         + "\n```\n\n</details>\n"
     )
+
+
+def render_roadmap_value(value: object, source: str | Path = "ROADMAP.md") -> str:
+    """Render one structured roadmap value into the canonical repository artifact."""
+    return _render_validated_roadmap(validate_roadmap(value, source))
+
+
+def render_roadmap_document(text: str, source: str | Path = "ROADMAP.md") -> str:
+    """Create the canonical human view around the authoritative TOML schema.
+
+    Agent-authored prose outside the schema block is intentionally discarded. This
+    leaves one semantic representation: the validated TOML. The readable Markdown
+    is a deterministic projection and therefore cannot drift independently.
+    """
+    return _render_validated_roadmap(parse_roadmap(text, source))
 
 
 def load_roadmap(path: str | Path) -> dict[str, Any]:
@@ -627,33 +774,38 @@ def _normalize_heading(value: str) -> str:
     return canonical_source_anchor(value)
 
 
-def _protect_markdown_code(value: str) -> tuple[str, list[str]]:
-    """Remove code delimiters while preserving the delimited bytes exactly."""
-    protected: list[str] = []
+def _protect_markdown_code(value: str) -> tuple[str, list[tuple[str, str]]]:
+    """Protect code spans while preserving their kind and bytes exactly."""
+    protected: list[tuple[str, str]] = []
 
-    def token(content: str) -> str:
+    def token(kind: str, content: str) -> str:
         index = len(protected)
-        protected.append(content)
+        protected.append((kind, content))
         return f"\ue000{index}\ue001"
 
     def fenced(match: re.Match[str]) -> str:
         block = match.group(0)
         lines = block.split("\n")
         content = "\n".join(lines[1:-1]) if len(lines) >= 2 else ""
-        return token(content)
+        return token("fenced", content)
 
     value = re.sub(
         r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*?^[ \t]*(?:```|~~~)[ \t]*$",
         fenced,
         value,
     )
-    value = re.sub(r"(?<!`)`([^`\n]*)`(?!`)", lambda match: token(match.group(1)), value)
+    value = re.sub(
+        r"(?<!`)`([^`\n]*)`(?!`)",
+        lambda match: token("inline", match.group(1)),
+        value,
+    )
     return value, protected
 
 
-def _restore_markdown_code(value: str, protected: list[str]) -> str:
-    for index, content in enumerate(protected):
-        value = value.replace(f"\ue000{index}\ue001", content)
+def _restore_markdown_code(value: str, protected: list[tuple[str, str]]) -> str:
+    for index, (kind, content) in enumerate(protected):
+        canonical = f"```\n{content}\n```" if kind == "fenced" else f"`{content}`"
+        value = value.replace(f"\ue000{index}\ue001", canonical)
     return value
 
 
@@ -713,11 +865,29 @@ def _list_depth(stack: list[int], indentation: int) -> int:
     return len(stack) - 1
 
 
+def _canonical_table_row(value: str) -> tuple[str, int] | None:
+    """Return one normalized Markdown table row and its column count."""
+    if not re.search(r"(?<!\\)\|", value):
+        return None
+    cells = re.split(r"(?<!\\)\|", value.strip())
+    if cells and not cells[0].strip():
+        cells.pop(0)
+    if cells and not cells[-1].strip():
+        cells.pop()
+    if not cells:
+        return None
+    return (
+        "| " + " | ".join(_canonical_inline_markdown(cell) for cell in cells) + " |",
+        len(cells),
+    )
+
+
 def canonical_source_text(value: str) -> str:
     """Canonicalize Markdown presentation while retaining semantic source text.
 
-    Case, words, punctuation, links, code bytes, blockquote boundaries, list
-    nesting, ordered-list ordinals, and task-checkbox state remain significant.
+    Case, words, punctuation, links, code bytes and boundaries, paragraph/table/
+    blockquote boundaries, list nesting, ordered-list ordinals, and
+    task-checkbox state remain significant.
     Soft wrapping, cosmetic indentation widths, equivalent list-marker
     spellings, heading markers, emphasis, escapes, comments, and table-rule
     styling do not. This lets exact source citations survive a formatter without
@@ -733,7 +903,29 @@ def canonical_source_text(value: str) -> str:
     list_stack: list[int] = []
     active_quote_depth: int | None = None
     separated = True
-    for raw_line in normalized.split("\n"):
+    raw_lines = normalized.split("\n")
+    table_rows: set[int] = set()
+    table_headers: set[int] = set()
+    for index in range(len(raw_lines) - 1):
+        quote_depth, candidate = _blockquote_prefix(raw_lines[index])
+        rule_quote_depth, rule = _blockquote_prefix(raw_lines[index + 1])
+        if (
+            quote_depth != rule_quote_depth
+            or _canonical_table_row(candidate.strip()) is None
+            or table_rule.fullmatch(rule.strip()) is None
+        ):
+            continue
+        table_headers.add(index)
+        table_rows.add(index)
+        cursor = index + 2
+        while cursor < len(raw_lines):
+            row_quote_depth, row = _blockquote_prefix(raw_lines[cursor])
+            if row_quote_depth != quote_depth or _canonical_table_row(row.strip()) is None:
+                break
+            table_rows.add(cursor)
+            cursor += 1
+
+    for index, raw_line in enumerate(raw_lines):
         quote_depth, quoted_line = _blockquote_prefix(raw_line)
         line = quoted_line.strip()
         if not line:
@@ -748,6 +940,41 @@ def canonical_source_text(value: str) -> str:
             line = heading.group(1)
             list_stack.clear()
             separated = True
+
+        protected_token = re.fullmatch(r"\ue000(\d+)\ue001", line)
+        if protected_token and protected[int(protected_token.group(1))][0] == "fenced":
+            blocks.append(
+                {
+                    "kind": "code",
+                    "quote_depth": quote_depth,
+                    "prefix": ("> " * quote_depth).rstrip(),
+                    "text": line,
+                    "separated_before": separated,
+                }
+            )
+            list_stack.clear()
+            active_quote_depth = None
+            separated = False
+            continue
+
+        table_row = _canonical_table_row(line) if index in table_rows else None
+        if table_row is not None:
+            row, columns = table_row
+            blocks.append(
+                {
+                    "kind": "table",
+                    "quote_depth": quote_depth,
+                    "prefix": ("> " * quote_depth).rstrip(),
+                    "text": row,
+                    "columns": columns,
+                    "header": index in table_headers,
+                    "separated_before": separated,
+                }
+            )
+            list_stack.clear()
+            active_quote_depth = None
+            separated = False
+            continue
 
         match = list_marker.match(quoted_line)
         if match:
@@ -775,6 +1002,7 @@ def canonical_source_text(value: str) -> str:
                     "quote_depth": quote_depth,
                     "prefix": prefix,
                     "text": canonical_body,
+                    "separated_before": separated,
                 }
             )
             separated = False
@@ -810,20 +1038,272 @@ def canonical_source_text(value: str) -> str:
                         "quote_depth": quote_depth,
                         "prefix": prefix,
                         "text": canonical_line,
+                        "separated_before": separated,
                     }
                 )
         list_stack.clear()
         active_quote_depth = None
         separated = False
-    canonical = "\n".join(
-        (
-            f"{block['prefix']}{block['text']}"
-            if block["kind"] == "list"
-            else f"{block['prefix']} {block['text']}".strip()
-        )
-        for block in blocks
-    ).strip()
+    rendered: list[str] = []
+    for block in blocks:
+        if rendered and block["separated_before"]:
+            rendered.append("")
+        if block["kind"] == "list":
+            rendered.append(f"{block['prefix']}{block['text']}")
+        else:
+            rendered.append(f"{block['prefix']} {block['text']}".strip())
+            if block["kind"] == "table" and block["header"]:
+                delimiter = "| " + " | ".join("---" for _ in range(block["columns"])) + " |"
+                rendered.append(f"{block['prefix']} {delimiter}".strip())
+    canonical = "\n".join(rendered).strip()
     return _restore_markdown_code(canonical, protected)
+
+
+def _citation_markdown_regions(value: str) -> tuple[list[str], bool]:
+    """Split Markdown at headings without mistaking fenced code for headings."""
+    protected_value, protected = _protect_markdown_code(value)
+    regions: list[str] = []
+    current: list[str] = []
+    found_heading = False
+    for line in protected_value.splitlines():
+        if _HEADING.match(line):
+            found_heading = True
+            region = "\n".join(current).strip()
+            if region:
+                regions.append(_restore_markdown_code(region, protected))
+            current = []
+        else:
+            current.append(line)
+    region = "\n".join(current).strip()
+    if region:
+        regions.append(_restore_markdown_code(region, protected))
+    return regions, found_heading
+
+
+def _citation_code_tokens(value: str) -> tuple[str, list[tuple[str, str]]]:
+    """Encode code kind and bytes as whitespace-insensitive comparison tokens."""
+    protected_value, protected = _protect_markdown_code(value)
+    for index, (kind, content) in enumerate(protected):
+        token = f"\ue100{kind}:{content.encode('utf-8').hex()}\ue101"
+        protected_value = protected_value.replace(f"\ue000{index}\ue001", token)
+    return protected_value, protected
+
+
+def _citation_units(value: str) -> list[tuple[tuple[object, ...], str]]:
+    """Project one heading region into semantically scoped citation units."""
+    canonical, _ = _citation_code_tokens(canonical_source_text(value))
+    raw_lines = canonical.splitlines()
+    table_rule = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$")
+    table_rows: set[int] = set()
+    table_headers: set[int] = set()
+    for index in range(len(raw_lines) - 1):
+        quote_depth, candidate = _blockquote_prefix(raw_lines[index])
+        rule_quote_depth, rule = _blockquote_prefix(raw_lines[index + 1])
+        if (
+            quote_depth != rule_quote_depth
+            or _canonical_table_row(candidate.strip()) is None
+            or table_rule.fullmatch(rule.strip()) is None
+        ):
+            continue
+        table_headers.add(index)
+        table_rows.add(index)
+        cursor = index + 2
+        while cursor < len(raw_lines):
+            row_quote_depth, row = _blockquote_prefix(raw_lines[cursor])
+            if row_quote_depth != quote_depth or _canonical_table_row(row.strip()) is None:
+                break
+            table_rows.add(cursor)
+            cursor += 1
+
+    units: list[tuple[tuple[object, ...], str]] = []
+    list_marker = re.compile(r"^(?P<indent>[ \t]*)(?P<marker>-|\d{1,9}\.)[ \t]+(?P<body>.*)$")
+
+    def append(structure: tuple[object, ...], text: str) -> None:
+        text = re.sub(r"[ \t]+", " ", text).strip()
+        if not text:
+            return
+        if structure[0] == "prose" and units and units[-1][0] == structure:
+            units[-1] = (structure, f"{units[-1][1]} {text}")
+        else:
+            units.append((structure, text))
+
+    for index, raw_line in enumerate(raw_lines):
+        quote_depth, quoted_line = _blockquote_prefix(raw_line)
+        line = quoted_line.strip()
+        if not line or table_rule.fullmatch(line):
+            continue
+        fenced = re.fullmatch(r"\ue100fenced:([0-9a-f]*)\ue101", line)
+        if fenced:
+            append(("code", quote_depth, "fenced"), fenced.group(1))
+            continue
+        if index in table_rows:
+            append(
+                ("table", quote_depth, "header" if index in table_headers else "row"),
+                line,
+            )
+            continue
+        match = list_marker.match(quoted_line)
+        if match:
+            indentation = len(match.group("indent").expandtabs(4))
+            if indentation % 2:
+                return []
+            marker = match.group("marker")
+            body = match.group("body")
+            checkbox = re.match(r"^\[([ x])\][ \t]+(.*)$", body)
+            state = None
+            if checkbox:
+                state = "checked" if checkbox.group(1) == "x" else "unchecked"
+                body = checkbox.group(2)
+            structure: tuple[object, ...]
+            if marker == "-":
+                structure = ("list", quote_depth, indentation // 2, "unordered", state)
+            else:
+                structure = (
+                    "list",
+                    quote_depth,
+                    indentation // 2,
+                    "ordered",
+                    int(marker[:-1]),
+                    state,
+                )
+            append(structure, body)
+            continue
+        append(("prose", quote_depth), line)
+    return units
+
+
+def _citation_units_contain(
+    source: list[tuple[tuple[object, ...], str]],
+    requirement: list[tuple[tuple[object, ...], str]],
+) -> bool:
+    """Match one contiguous structured quotation inside a heading region."""
+    if not requirement or len(requirement) > len(source):
+        return False
+    if len(requirement) == 1:
+        structure, text = requirement[0]
+        return any(candidate == structure and text in content for candidate, content in source)
+    for start in range(len(source) - len(requirement) + 1):
+        window = source[start : start + len(requirement)]
+        if any(left[0] != right[0] for left, right in zip(window, requirement, strict=True)):
+            continue
+        if not window[0][1].endswith(requirement[0][1]):
+            continue
+        if not window[-1][1].startswith(requirement[-1][1]):
+            continue
+        if all(
+            left[1] == right[1] for left, right in zip(window[1:-1], requirement[1:-1], strict=True)
+        ):
+            return True
+    return False
+
+
+def _citation_flat_root_stream(value: str) -> str | None:
+    """Flatten only presentation-level prose and root list boundaries.
+
+    Planning agents occasionally quote a root-level Markdown list as one prose
+    paragraph.  That is citation-equivalent when every list item remains in
+    place: unordered glyphs carry no meaning, while ordered ordinals do.  More
+    strongly scoped constructs deliberately have no flat projection, so this
+    fallback cannot erase checkbox state, nesting, blockquotes, tables, or
+    fenced-code boundaries.
+    """
+    rendered: list[str] = []
+    for structure, text in _citation_units(value):
+        kind = structure[0]
+        if kind == "prose" and structure[1] == 0:
+            rendered.append(text)
+            continue
+        if kind != "list" or structure[1] != 0 or structure[2] != 0:
+            return None
+        if structure[3] == "unordered":
+            if structure[4] is not None:
+                return None
+            rendered.append(text)
+            continue
+        if structure[5] is not None:
+            return None
+        rendered.append(f"{structure[4]}. {text}")
+    stream = re.sub(r"\s+", " ", " ".join(rendered)).strip()
+    return stream or None
+
+
+def _citation_scoped_prose_contains(
+    source: list[tuple[tuple[object, ...], str]],
+    requirement: list[tuple[tuple[object, ...], str]],
+) -> bool:
+    """Allow an exact prose citation wholly inside one blockquote scope.
+
+    A blockquote marker may be used as callout presentation in a specification.
+    Its boundary still matters: this fallback considers one quote-scoped prose
+    unit at a time, so a citation cannot flatten text across entry, exit, or
+    sibling quote boundaries.
+    """
+    if len(requirement) != 1 or requirement[0][0] != ("prose", 0):
+        return False
+    wanted = requirement[0][1]
+    return any(
+        structure[0] == "prose" and structure[1] > 0 and wanted in content
+        for structure, content in source
+    )
+
+
+def _citation_isolated_table_row(value: str) -> tuple[int, str] | None:
+    """Return one standalone table row without erasing its semantic cells.
+
+    A row quoted without its table header is still a useful atomic citation.  It
+    cannot be classified as a table by the normal Markdown parser, however,
+    because Markdown establishes table structure with the following delimiter
+    row.  Recognize only one physical row here; multi-row quotations continue
+    through the fully structured matcher.
+    """
+    lines = [
+        line for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()
+    ]
+    if len(lines) != 1:
+        return None
+    quote_depth, line = _blockquote_prefix(lines[0])
+    encoded, _ = _citation_code_tokens(canonical_source_text(line))
+    row = _canonical_table_row(encoded.strip())
+    if row is None:
+        return None
+    return quote_depth, row[0]
+
+
+def _citation_table_row_contains(
+    source: list[tuple[tuple[object, ...], str]],
+    requirement: tuple[int, str] | None,
+) -> bool:
+    """Match an isolated row only to the identical row of a source table."""
+    if requirement is None:
+        return False
+    quote_depth, wanted = requirement
+    return any(
+        structure == ("table", quote_depth, "row") and content == wanted
+        for structure, content in source
+    )
+
+
+def _source_requirement_present(requirement: str, section: str) -> bool:
+    """Match a semantic citation without weakening authoritative source hashes."""
+    requirement_regions, requirement_has_heading = _citation_markdown_regions(requirement)
+    if requirement_has_heading or len(requirement_regions) != 1:
+        return False
+    wanted = _citation_units(requirement_regions[0])
+    wanted_flat = _citation_flat_root_stream(requirement_regions[0])
+    wanted_table_row = _citation_isolated_table_row(requirement_regions[0])
+    source_regions, _ = _citation_markdown_regions(section)
+    for region in source_regions:
+        source_units = _citation_units(region)
+        if _citation_units_contain(source_units, wanted):
+            return True
+        if _citation_table_row_contains(source_units, wanted_table_row):
+            return True
+        if _citation_scoped_prose_contains(source_units, wanted):
+            return True
+        source_flat = _citation_flat_root_stream(region)
+        if wanted_flat is not None and source_flat is not None and wanted_flat in source_flat:
+            return True
+    return False
 
 
 def _roadmap_human_view(text: str) -> str:
@@ -888,31 +1368,12 @@ def _git_reader(repository: Path, commit: str) -> Callable[[str], bytes]:
     return read
 
 
-def _stage_binding(
-    read: Callable[[str], bytes], roadmap_path: str, stage_id: str
-) -> dict[str, Any]:
-    raw_roadmap = read(roadmap_path)
-    try:
-        roadmap_text = raw_roadmap.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise RoadmapError("roadmap is not UTF-8") from error
-    roadmap = parse_roadmap(roadmap_text, roadmap_path)
-    expected_roadmap = render_roadmap_document(roadmap_text, roadmap_path)
-    if canonical_source_text(_roadmap_human_view(roadmap_text)) != canonical_source_text(
-        _roadmap_human_view(expected_roadmap)
-    ):
-        raise RoadmapError(
-            "roadmap human view changes the meaning of its machine data; regenerate it with Oxide"
-        )
-    stage = next((item for item in roadmap["stages"] if item["id"] == stage_id), None)
-    if stage is None:
-        raise RoadmapError(f"roadmap contains no stage {stage_id!r}")
-    by_invariant = {item["id"]: item for item in roadmap["global_invariants"]}
-    invariants = [by_invariant[identifier] for identifier in stage["applicable_global_invariants"]]
-    references = [
-        *stage["source_specifications"],
-        *(source for invariant in invariants for source in invariant["sources"]),
-    ]
+def _source_closure(
+    read: Callable[[str], bytes],
+    roadmap: dict[str, Any],
+    references: Iterable[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Validate and bind every distinct source reference in one roadmap scope."""
     unique: dict[tuple[str, str, str], dict[str, str]] = {}
     for reference in references:
         unique[(reference["path"], reference["anchor"], reference["requirement"])] = reference
@@ -934,7 +1395,7 @@ def _stage_binding(
         except UnicodeDecodeError as error:
             raise RoadmapError(f"source specification is not UTF-8: {reference['path']}") from error
         section = markdown_section(text, reference["anchor"], reference["path"])
-        if canonical_source_text(reference["requirement"]) not in canonical_source_text(section):
+        if not _source_requirement_present(reference["requirement"], section):
             raise RoadmapError(
                 f"source requirement is absent from section {reference['anchor']!r} in "
                 f"{reference['path']}"
@@ -945,6 +1406,66 @@ def _stage_binding(
                 "section_sha256": digest_bytes(canonical_source_text(section).encode("utf-8")),
             }
         )
+    return closure
+
+
+def _roadmap_qualification(read: Callable[[str], bytes], roadmap_path: str) -> dict[str, Any]:
+    """Qualify the complete roadmap, including unreferenced global invariants."""
+    raw_roadmap = read(roadmap_path)
+    try:
+        roadmap_text = raw_roadmap.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RoadmapError("roadmap is not UTF-8") from error
+    roadmap = parse_roadmap(roadmap_text, roadmap_path)
+    _validate_verification_policy(roadmap)
+    expected_roadmap = render_roadmap_document(roadmap_text, roadmap_path)
+    if canonical_source_text(_roadmap_human_view(roadmap_text)) != canonical_source_text(
+        _roadmap_human_view(expected_roadmap)
+    ):
+        raise RoadmapError(
+            "roadmap human view changes the meaning of its machine data; regenerate it with Oxide"
+        )
+    references = [
+        *(source for stage in roadmap["stages"] for source in stage["source_specifications"]),
+        *(source for invariant in roadmap["global_invariants"] for source in invariant["sources"]),
+    ]
+    closure = _source_closure(read, roadmap, references)
+    return {
+        "roadmap": roadmap,
+        "roadmap_path": roadmap_path,
+        "roadmap_sha256": digest_bytes(raw_roadmap),
+        "semantic_closure": closure,
+        "semantic_closure_sha256": digest_bytes(canonical_bytes(closure)),
+    }
+
+
+def _stage_binding(
+    read: Callable[[str], bytes], roadmap_path: str, stage_id: str
+) -> dict[str, Any]:
+    raw_roadmap = read(roadmap_path)
+    try:
+        roadmap_text = raw_roadmap.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RoadmapError("roadmap is not UTF-8") from error
+    roadmap = parse_roadmap(roadmap_text, roadmap_path)
+    _validate_verification_policy(roadmap)
+    expected_roadmap = render_roadmap_document(roadmap_text, roadmap_path)
+    if canonical_source_text(_roadmap_human_view(roadmap_text)) != canonical_source_text(
+        _roadmap_human_view(expected_roadmap)
+    ):
+        raise RoadmapError(
+            "roadmap human view changes the meaning of its machine data; regenerate it with Oxide"
+        )
+    stage = next((item for item in roadmap["stages"] if item["id"] == stage_id), None)
+    if stage is None:
+        raise RoadmapError(f"roadmap contains no stage {stage_id!r}")
+    by_invariant = {item["id"]: item for item in roadmap["global_invariants"]}
+    invariants = [by_invariant[identifier] for identifier in stage["applicable_global_invariants"]]
+    references = [
+        *stage["source_specifications"],
+        *(source for invariant in invariants for source in invariant["sources"]),
+    ]
+    closure = _source_closure(read, roadmap, references)
     return {
         "roadmap_path": roadmap_path,
         "roadmap_sha256": digest_bytes(raw_roadmap),
@@ -1051,6 +1572,23 @@ def proposed_stage_binding(
         return encoded[path] if path in encoded else current(path)
 
     return _stage_binding(read, roadmap_path, stage_id)
+
+
+def proposed_roadmap_qualification(
+    repository: Path,
+    roadmap_path: str,
+    roadmap_content: str,
+    replacements: dict[str, str],
+) -> dict[str, Any]:
+    """Qualify every source and universal-policy obligation before review."""
+    current = _worktree_reader(repository)
+    encoded = {path: content.encode("utf-8") for path, content in replacements.items()}
+    encoded[roadmap_path] = roadmap_content.encode("utf-8")
+
+    def read(path: str) -> bytes:
+        return encoded[path] if path in encoded else current(path)
+
+    return _roadmap_qualification(read, roadmap_path)
 
 
 def proposed_stage_set_binding(

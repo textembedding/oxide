@@ -30,14 +30,16 @@ from .alignment import (
 from .contract import ContractError, contract_payload_digest, validate_contract
 from .prompt_templates import PromptTemplateError, render_prompt
 from .roadmap import (
+    ROADMAP_VALUE_SCHEMA,
     RoadmapError,
     canonical_bytes,
     digest_bytes,
     load_roadmap,
     parse_roadmap,
-    proposed_stage_binding,
+    proposed_roadmap_qualification,
     proposed_stage_set_binding,
     render_roadmap_document,
+    render_roadmap_value,
     roadmap_maintenance_impact,
     specification_corpus,
     stage_set_binding,
@@ -590,7 +592,7 @@ PLAN_RESPONSE_SCHEMA: dict[str, Any] = {
         "complete_specification_corpus",
         "faithful_to_specifications",
         "unresolved",
-        "roadmap_markdown",
+        "roadmap",
     ],
     "properties": {
         "message": {"type": "string"},
@@ -598,7 +600,7 @@ PLAN_RESPONSE_SCHEMA: dict[str, Any] = {
         "complete_specification_corpus": {"type": "boolean"},
         "faithful_to_specifications": {"type": "boolean"},
         "unresolved": {"type": "array", "items": {"type": "string"}},
-        "roadmap_markdown": {"type": "string"},
+        "roadmap": ROADMAP_VALUE_SCHEMA,
     },
 }
 
@@ -870,23 +872,23 @@ def run_plan_session(
         maintenance_impact: dict[str, Any] | None = None
         message = str(response.get("message", "")).strip()
         user.show(message or "The planning agent returned no explanation.")
-        roadmap_text = response.get("roadmap_markdown")
-        if isinstance(roadmap_text, str) and roadmap_text.strip():
+        roadmap_value = response.get("roadmap")
+        if isinstance(roadmap_value, dict):
             try:
-                roadmap_text = render_roadmap_document(roadmap_text, roadmap_path)
+                roadmap_text = render_roadmap_value(roadmap_value, roadmap_path)
                 roadmap = parse_roadmap(roadmap_text, roadmap_path)
             except RoadmapError as error:
                 roadmap = None
                 roadmap_problem = str(error)
                 mechanical_repairs += 1
                 user.show(
-                    "The planning agent returned an invalid ROADMAP.md structure; "
-                    "Oxide is asking it to repair the format before requesting your review. "
+                    "The planning agent returned an invalid roadmap structure; "
+                    "Oxide is asking it to repair the proposal before requesting your review. "
                     f"Nothing has been written. Error: {roadmap_problem}"
                 )
                 if mechanical_repairs > 3:
                     raise PlanningError(
-                        "planning agent could not produce a mechanically valid ROADMAP.md "
+                        "planning agent could not produce a mechanically valid roadmap "
                         f"after 3 automatic repairs: {roadmap_problem}"
                     ) from error
                 response = agent.respond(
@@ -899,14 +901,12 @@ def run_plan_session(
                 )
                 continue
             try:
-                for stage in roadmap["stages"]:
-                    proposed_stage_binding(
-                        repository,
-                        "ROADMAP.md",
-                        roadmap_text,
-                        stage["id"],
-                        {},
-                    )
+                proposed_roadmap_qualification(
+                    repository,
+                    "ROADMAP.md",
+                    roadmap_text,
+                    {},
+                )
                 if baseline is not None:
                     maintenance_impact = roadmap_maintenance_impact(
                         baseline, roadmap, maintenance_ids
@@ -945,15 +945,16 @@ def run_plan_session(
                 continue
         else:
             roadmap = None
-            roadmap_problem = "the planning agent did not return a complete ROADMAP.md"
+            roadmap_problem = "the planning agent did not return a complete structured roadmap"
             mechanical_repairs += 1
             user.show(
-                "The planning agent omitted ROADMAP.md; Oxide is requesting a complete "
+                "The planning agent omitted the structured roadmap; Oxide is requesting a complete "
                 "proposal before asking for your review. Nothing has been written."
             )
             if mechanical_repairs > 3:
                 raise PlanningError(
-                    "planning agent did not return a complete ROADMAP.md after 3 automatic repairs"
+                    "planning agent did not return a complete structured roadmap after "
+                    "3 automatic repairs"
                 )
             response = agent.respond(
                 _render_agent_prompt("planning-follow-up", kind="missing-roadmap"),

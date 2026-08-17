@@ -1,16 +1,19 @@
 {% if kind == "schema-repair" %}
-Your proposed ROADMAP.md failed mechanical schema validation. Exact error: {{ problem }}. Repair
-only the Markdown/TOML structure; preserve all source-derived product semantics and return the
-complete ROADMAP.md again. Do not ask the user to resolve your formatting error.
+Your proposed structured roadmap value failed mechanical schema validation. Exact error:
+{{ problem }}. Repair only the structured `roadmap` object; preserve all source-derived product
+semantics and return the complete response envelope again. Oxide renders the repository artifact;
+return only the structured response. Do not ask the user to resolve your encoding error.
 {% elif kind == "trace-repair" %}
-Your proposed ROADMAP.md failed deterministic source-trace or maintenance qualification. Exact
-error: {{ problem }}. Repair the cited source anchor and exact requirement, dependency, or
-scoped-maintenance change using only the frozen source bundle and approved baseline. Preserve all
-source-derived product semantics and return the complete ROADMAP.md again. Do not ask the user to
-resolve a qualification error that the supplied sources can resolve.
+Your proposed structured roadmap failed deterministic source-trace or maintenance qualification.
+Exact error: {{ problem }}. Repair the cited source anchor and exact requirement, dependency, or
+scoped-maintenance change in the `roadmap` object using only the frozen source bundle and approved
+baseline. Preserve all source-derived product semantics and return the complete response envelope
+again. Oxide renders the repository artifact; return only the structured response. Do not ask the
+user to resolve a qualification error that the supplied sources can resolve.
 {% elif kind == "missing-roadmap" %}
-You omitted the required complete ROADMAP.md. Return the complete mechanically valid artifact
-without changing source-derived product semantics.
+You omitted the required structured `roadmap` object. Return the complete mechanically valid
+response envelope without changing source-derived product semantics. Oxide renders the repository
+artifact; return only the structured response.
 {% elif kind == "user-feedback" %}
 User feedback:
 {{ feedback }}

@@ -11,6 +11,7 @@ from oxide import cli
 from oxide.alignment import AlignmentError, validate_alignment_receipt
 from oxide.contract import load_contract
 from oxide.planning import (
+    PLAN_RESPONSE_SCHEMA,
     CodexSessionAgent,
     PlanningError,
     PlanningInfrastructureError,
@@ -31,6 +32,7 @@ from oxide.roadmap import (
     load_roadmap,
     parse_roadmap,
     render_roadmap_document,
+    render_roadmap_value,
     stage_binding,
 )
 from oxide.verification_policy import POLICY_PROFILE, verification_policy_digest
@@ -146,7 +148,7 @@ def test_codex_progress_extracts_message_from_structured_response() -> None:
             "text": json.dumps(
                 {
                     "message": "Roadmap ready.",
-                    "roadmap_markdown": "# very long proposal",
+                    "roadmap": {"schema": 1, "title": "Roadmap"},
                 }
             ),
         },
@@ -297,6 +299,13 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert "complete source-defined horizon" in prompt
     assert "planned, deferred, or blocked phase" in prompt
     assert "Perform a second coverage pass over every source heading" in prompt
+    assert "normalized title's per-file\n   occurrence count" in prompt
+    assert "explicit source-defined capability or deliverable" in prompt
+    assert "externally observable behavior\nfor a source-mandated input" in prompt
+    assert "source defines an accepted artifact" in prompt
+    assert "do not become production\n  dependencies" in prompt
+    assert "at least two production phase contracts consume it" in prompt
+    assert "must each be nonempty" in prompt
     assert "standardized, human-readable projection" in prompt
     assert "authored narrative lists" in prompt
     assert "use one deterministic source or logical order" in " ".join(prompt.split())
@@ -308,6 +317,14 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert "All production logic is verified by default." in prompt
     assert "The Rust verification landscape" not in prompt
     assert "docs/specs/VERIFICATION.md" not in prompt
+    assert "`roadmap` as the complete structured roadmap value" in prompt
+    assert "deterministically generates the human-readable `ROADMAP.md`" in prompt
+    assert "applies to every\nphase" in prompt
+    assert "universal attachment does not turn empirical claims into formal theorems" in " ".join(
+        prompt.split()
+    )
+    assert "roadmap_markdown" not in prompt
+    assert "fenced `toml`" not in prompt
 
 
 def test_candidate_prompt_uses_the_exact_production_input_context(tmp_path: Path) -> None:
@@ -364,6 +381,20 @@ def test_packaged_prompt_templates_fail_closed_on_missing_values() -> None:
 
     assert "failed mechanical schema validation" in rendered
     assert "missing stage outcome" in rendered
+    assert "structured `roadmap` object" in rendered
+    assert "complete response envelope" in rendered
+    for kind in ("schema-repair", "trace-repair", "missing-roadmap"):
+        follow_up = render_prompt(
+            "planning-follow-up",
+            kind=kind,
+            problem="repair the proposal",
+        )
+        assert "roadmap_markdown" not in follow_up
+        assert "complete ROADMAP.md" not in follow_up
+        assert "Markdown" not in follow_up
+        assert "TOML" not in follow_up
+        assert "Oxide renders the repository" in follow_up
+        assert "structured response" in follow_up
     with pytest.raises(PromptTemplateError, match="cannot render prompt template planning"):
         render_prompt("planning")
     with pytest.raises(PromptTemplateError, match="unknown prompt template"):
@@ -425,21 +456,26 @@ included_scope = ["{requirement}"]
 excluded_scope = ["Capabilities assigned to later phases"]
 dependencies = {json.dumps(dependencies)}
 source_specifications = [{{ path = "docs/specs/PRODUCT.md", anchor = "{anchor}", requirement = "{requirement}" }}]
-applicable_global_invariants = ["durability"]
+applicable_global_invariants = ["oxide-verification-policy", "durability"]
 implementation_goals = ["{requirement}"]
 verification_goals = ["{verification}"]
 readiness = "{readiness}"
 '''
         )
     return f'''\
-# Journal implementation roadmap
+# Roadmap
 
 <!-- oxide-roadmap-schema:1 -->
 ```toml
 schema = 1
-title = "Journal implementation roadmap"
+title = "Roadmap"
 status = "{status}"
 specification_root = "docs/specs"
+
+[[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
 
 [[global_invariants]]
 id = "durability"
@@ -450,15 +486,54 @@ sources = [{{ path = "docs/specs/PRODUCT.md", anchor = "Global invariants", requ
 '''
 
 
-def _plan_response(roadmap: str, *, ready: bool = True, message: str = "Roadmap ready.") -> dict:
+def _plan_response(
+    roadmap: str | dict, *, ready: bool = True, message: str = "Roadmap ready."
+) -> dict:
     return {
         "message": message,
         "ready_for_approval": ready,
         "complete_specification_corpus": ready,
         "faithful_to_specifications": ready,
         "unresolved": [] if ready else ["Capability priority awaits user direction"],
-        "roadmap_markdown": roadmap,
+        "roadmap": parse_roadmap(roadmap) if isinstance(roadmap, str) else roadmap,
     }
+
+
+def test_plan_response_schema_requires_the_exact_nested_roadmap_shape() -> None:
+    assert "roadmap" in PLAN_RESPONSE_SCHEMA["required"]
+    assert "roadmap_markdown" not in PLAN_RESPONSE_SCHEMA["properties"]
+    roadmap_schema = PLAN_RESPONSE_SCHEMA["properties"]["roadmap"]
+    assert roadmap_schema["additionalProperties"] is False
+    assert roadmap_schema["properties"]["title"] == {"type": "string", "minLength": 1}
+    assert roadmap_schema["properties"]["global_invariants"]["minItems"] == 1
+    assert roadmap_schema["properties"]["stages"]["minItems"] == 1
+    stage_schema = roadmap_schema["properties"]["stages"]["items"]
+    assert stage_schema["additionalProperties"] is False
+    assert set(stage_schema["required"]) == {
+        "id",
+        "outcome",
+        "included_scope",
+        "excluded_scope",
+        "dependencies",
+        "source_specifications",
+        "applicable_global_invariants",
+        "implementation_goals",
+        "verification_goals",
+        "readiness",
+    }
+    for field in (
+        "included_scope",
+        "source_specifications",
+        "applicable_global_invariants",
+        "implementation_goals",
+        "verification_goals",
+    ):
+        assert stage_schema["properties"][field]["minItems"] == 1
+    for field in ("excluded_scope", "dependencies"):
+        assert "minItems" not in stage_schema["properties"][field]
+    source_schema = stage_schema["properties"]["source_specifications"]["items"]
+    assert source_schema["additionalProperties"] is False
+    assert set(source_schema["required"]) == {"path", "anchor", "requirement"}
 
 
 def test_roadmap_document_has_one_schema_and_a_deterministic_human_view() -> None:
@@ -480,26 +555,14 @@ def test_roadmap_document_has_one_schema_and_a_deterministic_human_view() -> Non
     assert render_roadmap_document(rendered) == rendered
 
 
-def test_roadmap_accepts_policy_owned_assurance_invariants_without_target_citations() -> None:
-    roadmap = (
-        _roadmap()
-        .replace(
-            '[[global_invariants]]\nid = "durability"',
-            '[[global_invariants]]\nid = "pervasive-verus"\nstatement = "Every production logical component is verified."\nsources = []\n\n[[global_invariants]]\nid = "durability"',
-        )
-        .replace(
-            'applicable_global_invariants = ["durability"]',
-            'applicable_global_invariants = ["durability", "pervasive-verus"]',
-        )
-    )
-
-    value = parse_roadmap(roadmap)
+def test_roadmap_accepts_the_policy_invariant_without_target_citations() -> None:
+    value = parse_roadmap(_roadmap())
 
     policy_invariant = next(
-        item for item in value["global_invariants"] if item["id"] == "pervasive-verus"
+        item for item in value["global_invariants"] if item["id"] == "oxide-verification-policy"
     )
     assert policy_invariant["sources"] == []
-    assert "**Authority:** Governing verification policy" in render_roadmap_document(roadmap)
+    assert "**Authority:** Governing verification policy" in render_roadmap_document(_roadmap())
 
 
 def _contract(
@@ -680,9 +743,37 @@ def test_source_trace_ignores_formatting_but_not_semantic_changes(tmp_path: Path
         stage_binding(repository, "ROADMAP.md", "stage-0")
 
 
+def test_stage_binding_accepts_an_exact_transition_table_row(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    row = "| absent | `PLACE_HOLD` | held | all lines valid and capacity sufficient |"
+    specification = repository / "docs" / "specs" / "PRODUCT.md"
+    specification.write_text(
+        SPEC.replace(
+            "Implement an append-only journal with durable recovery.",
+            """\
+Implement an append-only journal with durable recovery.
+
+| Current | Operation | Next | Additional guard |
+| --- | --- | --- | --- |
+| absent | `PLACE_HOLD` | held | all lines valid and capacity sufficient |""",
+        ),
+        encoding="utf-8",
+    )
+    roadmap = parse_roadmap(_roadmap())
+    stage = next(item for item in roadmap["stages"] if item["id"] == "stage-0")
+    stage["source_specifications"] = [
+        {"path": "docs/specs/PRODUCT.md", "anchor": "Durable journal", "requirement": row}
+    ]
+    (repository / "ROADMAP.md").write_text(render_roadmap_value(roadmap), encoding="utf-8")
+
+    binding = stage_binding(repository, "ROADMAP.md", "stage-0")
+
+    assert binding["semantic_closure"][0]["requirement"] == row
+
+
 def test_source_canonicalization_preserves_code_and_semantics() -> None:
     assert canonical_source_text("Alpha  beta\n gamma") == "Alpha beta gamma"
-    assert canonical_source_text("Alpha `x  y` beta") == "Alpha x  y beta"
+    assert canonical_source_text("Alpha `x  y` beta") == "Alpha `x  y` beta"
     assert canonical_source_text("Every command is **planned**.") == (
         canonical_source_text("Every command is planned.")
     )
@@ -823,11 +914,8 @@ def test_plan_repairs_agent_schema_errors_before_requesting_user_review(
     tmp_path: Path,
 ) -> None:
     repository = _repository(tmp_path)
-    invalid = _roadmap().replace(
-        'id = "stage-0"\n',
-        'id = "stage-0"\npriority = 1\n',
-        1,
-    )
+    invalid = parse_roadmap(_roadmap())
+    invalid["stages"][0]["priority"] = 1
     user = ScriptedUser(["/approve"])
 
     path = run_plan_session(
@@ -845,6 +933,143 @@ def test_plan_repairs_agent_schema_errors_before_requesting_user_review(
     assert path == repository / "ROADMAP.md"
     assert "priority = 1" not in path.read_text(encoding="utf-8")
     assert any("asking it to repair" in item for item in user.transcript)
+    assert user.transcript.count("Feedback, /approve this exact roadmap, or /quit: ") == 1
+
+
+def test_plan_qualifies_unused_global_invariant_sources_before_review(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    invalid = parse_roadmap(_roadmap())
+    invalid["global_invariants"].append(
+        {
+            "id": "unused-bogus-invariant",
+            "statement": "Invented behavior is globally authoritative.",
+            "sources": [
+                {
+                    "path": "docs/specs/PRODUCT.md",
+                    "anchor": "Durable journal",
+                    "requirement": "Invented behavior is globally authoritative.",
+                }
+            ],
+        }
+    )
+    user = ScriptedUser(["/approve"])
+
+    run_plan_session(
+        repository / "docs" / "specs",
+        agent=ScriptedAgent([_plan_response(invalid), _plan_response(_roadmap())]),
+        user=user,
+        user_identity={"name": "Test User", "email": "test@example.com"},
+    )
+
+    assert any("source requirement is absent" in item for item in user.transcript)
+    assert user.transcript.count("Feedback, /approve this exact roadmap, or /quit: ") == 1
+    assert "unused-bogus-invariant" not in (repository / "ROADMAP.md").read_text()
+
+
+def test_plan_requires_the_exact_oxide_policy_invariant_before_review(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    invalid = parse_roadmap(_roadmap())
+    invalid["global_invariants"] = [
+        item for item in invalid["global_invariants"] if item["id"] != "oxide-verification-policy"
+    ]
+    for stage in invalid["stages"]:
+        stage["applicable_global_invariants"].remove("oxide-verification-policy")
+    user = ScriptedUser(["/approve"])
+
+    run_plan_session(
+        repository / "docs" / "specs",
+        agent=ScriptedAgent([_plan_response(invalid), _plan_response(_roadmap())]),
+        user=user,
+        user_identity={"name": "Test User", "email": "test@example.com"},
+    )
+
+    assert any(
+        "exactly one source-free oxide-verification-policy invariant" in item
+        for item in user.transcript
+    )
+    assert user.transcript.count("Feedback, /approve this exact roadmap, or /quit: ") == 1
+
+
+def test_plan_applies_oxide_policy_to_every_phase_before_review(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    invalid = parse_roadmap(_roadmap())
+    invalid["stages"][0]["applicable_global_invariants"].remove("oxide-verification-policy")
+    user = ScriptedUser(["/approve"])
+
+    run_plan_session(
+        repository / "docs" / "specs",
+        agent=ScriptedAgent([_plan_response(invalid), _plan_response(_roadmap())]),
+        user=user,
+        user_identity={"name": "Test User", "email": "test@example.com"},
+    )
+
+    assert any(
+        "phase 'stage-0' does not apply oxide-verification-policy" in item
+        for item in user.transcript
+    )
+    assert user.transcript.count("Feedback, /approve this exact roadmap, or /quit: ") == 1
+
+
+def test_empirical_phase_has_no_policy_attachment_exemption(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    invalid = parse_roadmap(_roadmap())
+    empirical = invalid["stages"][-1]
+    empirical["outcome"] = "Run an empirical research campaign."
+    empirical["included_scope"] = ["Measure an empirical research workload."]
+    empirical["implementation_goals"] = ["Run a reproducible benchmark campaign."]
+    empirical["verification_goals"] = ["Publish source-backed empirical qualification evidence."]
+    empirical["applicable_global_invariants"].remove("oxide-verification-policy")
+    user = ScriptedUser(["/approve"])
+
+    run_plan_session(
+        repository / "docs" / "specs",
+        agent=ScriptedAgent([_plan_response(invalid), _plan_response(_roadmap())]),
+        user=user,
+        user_identity={"name": "Test User", "email": "test@example.com"},
+    )
+
+    assert any(
+        "phase 'stage-3' does not apply oxide-verification-policy" in item
+        for item in user.transcript
+    )
+    assert user.transcript.count("Feedback, /approve this exact roadmap, or /quit: ") == 1
+
+
+def test_stage_binding_fails_closed_after_manual_policy_removal(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    invalid = parse_roadmap(_roadmap())
+    invalid["global_invariants"] = [
+        item for item in invalid["global_invariants"] if item["id"] != "oxide-verification-policy"
+    ]
+    for stage in invalid["stages"]:
+        stage["applicable_global_invariants"].remove("oxide-verification-policy")
+    (repository / "ROADMAP.md").write_text(render_roadmap_value(invalid), encoding="utf-8")
+
+    with pytest.raises(
+        RoadmapError,
+        match="exactly one source-free oxide-verification-policy invariant",
+    ):
+        stage_binding(repository, "ROADMAP.md", "stage-0")
+
+
+def test_plan_rejects_legacy_hand_serialized_roadmap_response(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    legacy = _plan_response(_roadmap())
+    legacy["roadmap_markdown"] = _roadmap()
+    del legacy["roadmap"]
+    user = ScriptedUser(["/approve"])
+
+    path = run_plan_session(
+        repository / "docs" / "specs",
+        agent=ScriptedAgent([legacy, _plan_response(_roadmap())]),
+        user=user,
+        user_identity={"name": "Test User", "email": "test@example.com"},
+    )
+
+    assert path == repository / "ROADMAP.md"
+    assert any("omitted the structured roadmap" in item for item in user.transcript)
     assert user.transcript.count("Feedback, /approve this exact roadmap, or /quit: ") == 1
 
 
@@ -925,15 +1150,19 @@ def test_plan_can_admit_agent_proposed_single_stage_boundary(tmp_path: Path) -> 
         "# Product\n\nReturn the stored value.\n", encoding="utf-8"
     )
     one_stage = """\
-# Small product roadmap
+# Roadmap
 
 <!-- oxide-roadmap-schema:1 -->
 ```toml
 schema = 1
-title = "Small product roadmap"
+title = "Roadmap"
 status = "ready"
 specification_root = "docs/specs"
-global_invariants = []
+
+[[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
 
 [[stages]]
 id = "stage-0"
@@ -942,7 +1171,7 @@ included_scope = ["Return the stored value."]
 excluded_scope = []
 dependencies = []
 source_specifications = [{ path = "docs/specs/PRODUCT.md", anchor = "Product", requirement = "Return the stored value." }]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Return the stored value."]
 verification_goals = ["Prove every input returns its stored value."]
 readiness = "ready"
