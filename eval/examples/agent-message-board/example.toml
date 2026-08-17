@@ -1,6 +1,6 @@
 id = "agent-message-board"
-title = "A coordination conflict must stop an otherwise contractible agent message board plan"
-relation = "must-block"
+title = "A coordination conflict must be isolated without blocking unrelated work"
+relation = "localized-block"
 affected_requirements = ["claim-winner"]
 
 [[scenarios]]

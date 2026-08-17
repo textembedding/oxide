@@ -1,6 +1,6 @@
 id = "transactional-reservation"
-title = "Expiration ambiguity must block a globally safe reservation plan"
-relation = "must-block"
+title = "Expiration ambiguity must be isolated from contractible reservation work"
+relation = "localized-block"
 affected_requirements = ["expiration-boundary"]
 
 [[scenarios]]

@@ -1,8 +1,8 @@
-expected_approval = false
-minimum_unresolved = 1
+expected_approval = true
+minimum_unresolved = 0
 required_signal_groups = [["descending", "smaller", "contradict"]]
 forbidden_terms = ["PostgreSQL", "RocksDB", "Tokio", "QUIC", "Automerge", "Yjs"]
-fixture_unresolved = ["The descending group-dot rule contradicts the smaller-group-dot-first override for concurrent inserts into the same stable gap."]
+fixture_unresolved = []
 
 [[requirements]]
 id = "durability"
@@ -16,7 +16,7 @@ id = "convergence"
 path = "PRODUCT.md"
 anchor = "Strong convergence"
 text = "Any two qualified replicas with identical admitted-group sets and identical schema catalogs return identical canonical materialized bytes."
-readiness = ["blocked", "planned"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "group-atomicity"
@@ -51,7 +51,7 @@ id = "sync"
 path = "PRODUCT.md"
 anchor = "Reconnect completion"
 text = "If two authorized replicas remain connected, exchange fair delivery, possess compatible schemas, and stop creating new operations, synchronization eventually leaves them with equal admitted-group sets."
-readiness = ["planned", "blocked"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "schema-quarantine"
@@ -65,7 +65,7 @@ id = "snapshot"
 path = "PRODUCT.md"
 anchor = "Restore"
 text = "Restore then replays retained groups above the frontier through the same abstract transitions used by normal admission."
-readiness = ["planned", "blocked"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "malformed-isolation"
@@ -79,7 +79,7 @@ id = "composition"
 path = "DEVELOPMENT.md"
 anchor = "Composition theorem"
 text = "The exact production public API refines the PRODUCT abstract transitions for the exact prospective authoritative tree."
-readiness = ["planned", "blocked"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "storage-boundary"
@@ -93,14 +93,14 @@ id = "capacity"
 path = "RESEARCH.md"
 anchor = "Service objectives"
 text = "Under the standard connected workload, one reference server must sustain at least 500,000 admitted operation groups per second at 70 percent or less CPU saturation."
-readiness = ["planned", "blocked"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "recovery-time"
 path = "RESEARCH.md"
 anchor = "Recovery objectives"
 text = "For a 1 TiB retained history with a qualifying snapshot less than ten minutes old, restart to read availability must complete within 60 seconds on the reference target."
-readiness = ["planned", "blocked"]
+readiness = ["ready"]
 
 [[dependencies]]
 before = "group-atomicity"

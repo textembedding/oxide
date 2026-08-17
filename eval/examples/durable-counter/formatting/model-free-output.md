@@ -4,7 +4,10 @@ schema = 1
 title = "Roadmap"
 status = "ready"
 specification_root = "eval/examples/durable-counter/formatting/specs"
-global_invariants = []
+[[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
 
 [[stages]]
 id = "counter-core"
@@ -18,7 +21,7 @@ source_specifications = [
   { path = "eval/examples/durable-counter/formatting/specs/PRODUCT.md", anchor = "Reads", requirement = "A read returns the current value of the named counter." },
   { path = "eval/examples/durable-counter/formatting/specs/PRODUCT.md", anchor = "Durability", requirement = "Every acknowledged update remains visible after process restart." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Implement checked updates, reads, and durable recovery together."]
 verification_goals = ["Use Verus to prove arithmetic safety, state refinement, and restart preservation."]
 readiness = "ready"
@@ -32,7 +35,7 @@ dependencies = ["counter-core"]
 source_specifications = [
   { path = "eval/examples/durable-counter/formatting/specs/PRODUCT.md", anchor = "HTTP adapter", requirement = "An HTTP adapter is deferred until the counter state machine is implemented and proved." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Define and implement the deferred HTTP adapter."]
 verification_goals = ["Prove the adapter refines the counter API once its wire contract is approved."]
 readiness = "deferred"

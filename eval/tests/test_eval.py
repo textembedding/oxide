@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import replace
@@ -24,6 +25,8 @@ from eval.scoring import (
     JUDGE_WEIGHT,
     METAMORPHIC_WEIGHT,
     EvaluationHarness,
+    _repeat_consistency,
+    _source_identity,
     evaluate_scenario,
 )
 from oxide.planning import PlanningInfrastructureError
@@ -36,6 +39,38 @@ def _harness() -> tuple[str, EvaluationHarness]:
     seed = SEED_PATH.read_text(encoding="utf-8")
     cases = load_cases()
     return seed, EvaluationHarness(REPOSITORY, seed, cases, FixturePlannerRunner())
+
+
+def _roadmap_stage(roadmap: dict, phase_id: str) -> dict:
+    matches = [stage for stage in roadmap["stages"] if stage["id"] == phase_id]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _replace_phase_readiness(roadmap: dict, phase_id: str, before: str, after: str) -> dict:
+    phase = _roadmap_stage(roadmap, phase_id)
+    assert phase["readiness"] == before
+    phase["readiness"] = after
+    return roadmap
+
+
+def _replace_roadmap_string(value: object, before: str, after: str) -> int:
+    replacements = 0
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if item == before:
+                value[key] = after
+                replacements += 1
+            else:
+                replacements += _replace_roadmap_string(item, before, after)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            if item == before:
+                value[index] = after
+                replacements += 1
+            else:
+                replacements += _replace_roadmap_string(item, before, after)
+    return replacements
 
 
 BENCHMARK_CASES = {
@@ -52,7 +87,11 @@ def test_suite_contains_smoke_and_journal_scale_cases() -> None:
     assert {case.identifier for case in cases} == SMOKE_CASES | BENCHMARK_CASES
     relations = {case.identifier: case.relation for case in cases}
     assert relations["durable-counter"] == "equivalent"
-    assert all(relations[identifier] == "must-block" for identifier in BENCHMARK_CASES)
+    assert all(
+        relation == "localized-block"
+        for identifier, relation in relations.items()
+        if identifier != "durable-counter"
+    )
 
 
 def test_benchmark_corpora_are_large_domain_specs_without_planning_labels() -> None:
@@ -77,6 +116,29 @@ def test_fixture_outputs_score_every_deterministic_and_metamorphic_objective() -
     assert all(report.score == 1.0 for report in reports)
     assert all(not report.diagnostics for report in reports)
     assert all(report.base.mechanical and report.variant.mechanical for report in reports)
+    assert all(
+        "oxide-verification-policy" in stage["applicable_global_invariants"]
+        for report in reports
+        for scenario in (report.base, report.variant)
+        for stage in scenario.roadmap["stages"]
+    )
+
+
+def test_fixture_runner_uses_the_same_structured_roadmap_transport_as_codex() -> None:
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+
+    response = FixturePlannerRunner().run("rendered prompt", case.base)
+
+    assert "roadmap_markdown" not in response
+    assert isinstance(response["roadmap"], dict)
+    assert response["roadmap"]["schema"] == 1
+    requirements = [
+        source["requirement"]
+        for stage in response["roadmap"]["stages"]
+        for source in stage["source_specifications"]
+    ]
+    assert requirements
+    assert all(not requirement.endswith("'") for requirement in requirements)
 
 
 def test_judge_sees_complete_base_corpus_once_plus_only_variant_delta() -> None:
@@ -88,6 +150,59 @@ def test_judge_sees_complete_base_corpus_once_plus_only_variant_delta() -> None:
     assert bundle.count("# Agent Message Board Development Specification") == 1
     assert bundle.count("# Agent Message Board Research Specification") == 1
     assert "VARIANT SOURCE specs/CLAIM-CONFLICT.md" in bundle
+
+
+def test_judge_is_told_readiness_is_local_and_does_not_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from eval import runners
+
+    captured: dict[str, str] = {}
+
+    class RecordingSession:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def start(self, prompt, schema):
+            del schema
+            captured["prompt"] = prompt
+            return {
+                "faithfulness": 4,
+                "coverage": 4,
+                "decomposition": 4,
+                "readability": 4,
+                "reason": "qualified",
+            }
+
+    monkeypatch.setattr(runners, "CodexSessionAgent", RecordingSession)
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    fixture = FixturePlannerRunner()
+    base_response = fixture.run("rendered prompt", case.base)
+    variant_response = fixture.run("rendered prompt", case.variant)
+
+    CodexQualityJudge(REPOSITORY).score(case, base_response, variant_response)
+
+    prompt = captured["prompt"]
+    assert "Phase readiness describes only" in prompt
+    assert "never propagate readiness" in prompt
+    assert "may remain approval-ready" in prompt
+    assert "Evaluate the BASE response against the base sources only" in prompt
+    assert "exactly one source-free" in prompt
+    assert "apply it to every phase without classifying phases by keywords" in prompt
+    assert "both where a phase mixes those responsibilities" in prompt
+    assert "Measurements must not be" in prompt
+    assert "never lower readability merely because the trace payload is long" in prompt
+    assert "BASE RENDERED HUMAN ROADMAP\n# Roadmap" in prompt
+    assert "BASE REQUIRED TRACE PAYLOAD" in prompt
+    base_human = prompt.split("BASE RENDERED HUMAN ROADMAP\n", 1)[1].split(
+        "\n\nBASE REQUIRED TRACE PAYLOAD", 1
+    )[0]
+    source_requirement = base_response["roadmap"]["stages"][0]["source_specifications"][0][
+        "requirement"
+    ]
+    assert source_requirement not in base_human
+    assert source_requirement in prompt.split("BASE REQUIRED TRACE PAYLOAD", 1)[1]
+    assert 'Affected requirements: ["claim-winner"]' in prompt
 
 
 def test_judge_materially_influences_score_without_displacing_hard_guards() -> None:
@@ -123,9 +238,12 @@ def test_identical_input_replicates_penalize_structural_variance() -> None:
             if scenario.identifier == "base":
                 self.base_calls += 1
                 if self.base_calls % 2 == 0:
-                    response["roadmap_markdown"] = response["roadmap_markdown"].replace(
-                        "A durable checked counter is available through its core API.",
-                        "The core API exposes a durable counter with checked updates.",
+                    stage = _roadmap_stage(response["roadmap"], "counter-core")
+                    assert stage["outcome"] == (
+                        "A durable checked counter is available through its core API."
+                    )
+                    stage["outcome"] = (
+                        "The core API exposes a durable counter with checked updates."
                     )
             return response
 
@@ -145,6 +263,120 @@ def test_identical_input_replicates_penalize_structural_variance() -> None:
     assert report.score < 1.0
     assert any("identical run 2 changed" in item for item in report.diagnostics)
     assert any("outcome, scope" in item for item in report.diagnostics)
+
+
+def test_repeat_consistency_reports_bounded_structural_delta_keys() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+    baseline = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    assert baseline.roadmap is not None
+    repeated_roadmap = copy.deepcopy(baseline.roadmap)
+    core = _roadmap_stage(repeated_roadmap, "counter-core")
+    adapter = _roadmap_stage(repeated_roadmap, "http-adapter")
+    moved_source = next(
+        source for source in core["source_specifications"] if source["anchor"] == "Updates"
+    )
+    core["source_specifications"].remove(moved_source)
+    adapter["source_specifications"].append(moved_source)
+    core["id"] = "counter-v2"
+    adapter["dependencies"] = ["counter-v2"]
+    adapter["readiness"] = "blocked"
+    repetition = replace(baseline, roadmap=repeated_roadmap)
+
+    consistency, diagnostics = _repeat_consistency(baseline, [repetition])
+
+    assert consistency < 1.0
+    assert any(
+        "added phase IDs: [counter-v2]; removed phase IDs: [counter-core]" in item
+        for item in diagnostics
+    )
+    assert any("dependency graph (changed keys: [http-adapter])" in item for item in diagnostics)
+    assert any("phase readiness (changed keys: [http-adapter])" in item for item in diagnostics)
+    owner_diagnostic = next(item for item in diagnostics if "source-requirement ownership" in item)
+    assert "#Updates@" in owner_diagnostic
+    assert all(len(item) < 500 for item in diagnostics)
+
+
+def test_source_identity_ignores_only_cosmetic_markdown_presentation() -> None:
+    canonical = {
+        "path": "docs/specs/PRODUCT.md",
+        "anchor": "Rules",
+        "requirement": "- [x] First requirement wraps across lines.\n  - Nested witness.",
+    }
+    cosmetic = {
+        "path": "docs/specs/PRODUCT.md",
+        "anchor": "## Rules ##",
+        "requirement": "* [X] **First** requirement wraps\n    across lines.\n    + Nested witness.",
+    }
+
+    assert _source_identity(canonical) == _source_identity(cosmetic)
+    assert _source_identity(canonical) != _source_identity(
+        {**cosmetic, "path": "docs/specs/DEVELOPMENT.md"}
+    )
+    assert _source_identity(canonical) != _source_identity(
+        {
+            **cosmetic,
+            "requirement": "- [ ] First requirement wraps across lines.\n  - Nested witness.",
+        }
+    )
+    assert _source_identity(canonical) != _source_identity(
+        {
+            **cosmetic,
+            "requirement": "- [x] First requirement wraps across lines.\n- Nested witness.",
+        }
+    )
+    assert _source_identity(canonical) != _source_identity(
+        {**cosmetic, "requirement": "> First requirement wraps across lines. Nested witness."}
+    )
+
+
+def test_cosmetic_source_formatting_does_not_create_repeat_run_drift() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+    baseline = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    assert baseline.roadmap is not None
+    repeated_roadmap = copy.deepcopy(baseline.roadmap)
+    source = next(
+        item
+        for item in repeated_roadmap["stages"][0]["source_specifications"]
+        if item["anchor"] == "Updates" and item["requirement"].startswith("A client may add")
+    )
+    source["anchor"] = "## Updates ##"
+    source["requirement"] = "A client may add a signed 64-bit delta\nto a named counter."
+    repetition = replace(baseline, roadmap=repeated_roadmap)
+
+    consistency, diagnostics = _repeat_consistency(baseline, [repetition])
+
+    assert consistency == 1.0
+    assert diagnostics == []
+
+
+def test_semantic_global_invariant_statement_drift_loses_repeat_consistency() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+    baseline = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    assert baseline.roadmap is not None
+    repeated_roadmap = copy.deepcopy(baseline.roadmap)
+    invariant = next(
+        item
+        for item in repeated_roadmap["global_invariants"]
+        if item["id"] == "oxide-verification-policy"
+    )
+    invariant["statement"] = (
+        "Production logic has meaningful contracts, component refinement, complete coverage, "
+        "and exact-tree composition; trusted effects may contain product policy."
+    )
+    repetition = replace(baseline, roadmap=repeated_roadmap)
+
+    consistency, diagnostics = _repeat_consistency(baseline, [repetition])
+
+    assert consistency < 1.0
+    assert diagnostics == [
+        (
+            "identical run 2 changed global-invariant statement or placement "
+            "(changed keys: [oxide-verification-policy])"
+        )
+    ]
 
 
 def test_requirement_oracle_requires_source_path_anchor_and_text() -> None:
@@ -170,6 +402,330 @@ def test_requirement_oracle_requires_source_path_anchor_and_text() -> None:
     )
 
 
+def test_requirement_oracle_accepts_a_longer_valid_source_span() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+
+    class LongerCitationRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "base":
+                stage = _roadmap_stage(response["roadmap"], "counter-core")
+                path = "eval/examples/durable-counter/base/specs/PRODUCT.md"
+                first = {
+                    "path": path,
+                    "anchor": "Updates",
+                    "requirement": "A client may add a signed 64-bit delta to a named counter.",
+                }
+                second = {
+                    "path": path,
+                    "anchor": "Updates",
+                    "requirement": (
+                        "An update that would overflow the signed 64-bit range is rejected "
+                        "without changing the counter."
+                    ),
+                }
+                assert first in stage["source_specifications"]
+                assert second in stage["source_specifications"]
+                stage["source_specifications"] = [
+                    source
+                    for source in stage["source_specifications"]
+                    if source != first and source != second
+                ]
+                stage["source_specifications"].append(
+                    {
+                        "path": path,
+                        "anchor": "Updates",
+                        "requirement": (
+                            "A client may add a signed 64-bit delta to a named counter.\n\n"
+                            "An update that would overflow the signed 64-bit range is rejected "
+                            "without changing the counter."
+                        ),
+                    }
+                )
+            return response
+
+    report = evaluate_scenario(REPOSITORY, seed, case.base, LongerCitationRunner())
+
+    assert report.mechanical
+    assert report.requirement_stages["update"] == ("counter-core",)
+    assert report.requirement_stages["overflow"] == ("counter-core",)
+    assert report.metrics["requirement_coverage"] == 1.0
+
+
+def test_requirement_oracle_rejects_wrong_anchor_and_partial_source_span() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+    update, overflow = case.base.requirements[:2]
+    wrong_anchor = replace(update, anchor="Reads")
+    broader_than_citation = replace(
+        update,
+        text=f"{update.text}\n\n{overflow.text}",
+    )
+
+    for oracle in (wrong_anchor, broader_than_citation):
+        scenario = replace(
+            case.base,
+            requirements=(oracle, *case.base.requirements[2:]),
+        )
+        report = evaluate_scenario(REPOSITORY, seed, scenario, FixturePlannerRunner())
+
+        assert report.mechanical
+        assert not report.requirement_stages[update.identifier]
+        assert report.metrics["requirement_coverage"] < 1.0
+        assert any(
+            "requirement 'update' has no stage disposition" in item for item in report.diagnostics
+        )
+
+
+def test_verbatim_phase_ownership_collision_loses_output_economy_only() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+
+    class DuplicatedNarrativeRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "base":
+                replacements = _replace_roadmap_string(
+                    response["roadmap"],
+                    "Define and implement the deferred HTTP adapter.",
+                    "Implement checked updates, reads, and durable recovery together.",
+                )
+                assert replacements == 1
+            return response
+
+    baseline = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    repeated = evaluate_scenario(REPOSITORY, seed, case.base, DuplicatedNarrativeRunner())
+
+    assert repeated.mechanical
+    assert repeated.metrics["requirement_coverage"] == baseline.metrics["requirement_coverage"]
+    assert repeated.metrics["source_ownership"] == baseline.metrics["source_ownership"]
+    assert baseline.metrics["output_economy"] == 1.0
+    assert repeated.metrics["output_economy"] < 1.0
+    assert repeated.score < baseline.score
+    assert any(
+        "phase-owned implementation_goals narrative is duplicated" in item
+        for item in repeated.diagnostics
+    )
+
+
+def test_every_phase_goal_requires_source_grounded_non_vacuous_assurance() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+
+    class GoalRunner(FixturePlannerRunner):
+        def __init__(self, replacement: str):
+            self.replacement = replacement
+
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "base":
+                replacements = _replace_roadmap_string(
+                    response["roadmap"],
+                    "Use Verus to prove arithmetic safety, state refinement, and restart preservation.",
+                    self.replacement,
+                )
+                assert replacements == 1
+            return response
+
+    formal = evaluate_scenario(
+        REPOSITORY,
+        seed,
+        case.base,
+        GoalRunner("Prove acknowledged updates remain visible after process restart."),
+    )
+    grounded_without_lexical_intent = evaluate_scenario(
+        REPOSITORY,
+        seed,
+        case.base,
+        GoalRunner("Confirm acknowledged updates remain visible after process restart."),
+    )
+    boilerplate = evaluate_scenario(
+        REPOSITORY,
+        seed,
+        case.base,
+        GoalRunner("Perform verification."),
+    )
+
+    assert formal.mechanical
+    assert formal.metrics["verification_policy"] == 1.0
+    assert grounded_without_lexical_intent.mechanical
+    assert grounded_without_lexical_intent.metrics["verification_policy"] == 1.0
+    assert not any(
+        "verification or qualification goal" in item
+        for item in grounded_without_lexical_intent.diagnostics
+    )
+    assert boilerplate.mechanical
+    assert boilerplate.metrics["verification_policy"] < 1.0
+    assert any("verification or qualification goal" in item for item in boilerplate.diagnostics)
+
+
+@pytest.mark.parametrize(
+    "before,after,diagnostic,mechanically_admissible",
+    [
+        (
+            (
+                "Production logic has meaningful contracts, component refinement, complete "
+                "coverage, and exact-tree composition; trusted effects remain narrow and "
+                "policy-free."
+            ),
+            "Production verification is recommended.",
+            "exactly one source-free oxide-verification-policy",
+            False,
+        ),
+        (
+            'applicable_global_invariants = ["oxide-verification-policy"]',
+            "applicable_global_invariants = []",
+            "does not apply oxide-verification-policy",
+            False,
+        ),
+        (
+            "Use Verus to prove arithmetic safety, state refinement, and restart preservation.",
+            "Perform verification.",
+            "verification or qualification goal",
+            True,
+        ),
+    ],
+)
+def test_verification_policy_failure_is_a_hard_score_guard(
+    before: str, after: str, diagnostic: str, mechanically_admissible: bool
+) -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class PolicyMutationRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if before == 'applicable_global_invariants = ["oxide-verification-policy"]':
+                stage = _roadmap_stage(response["roadmap"], "counter-core")
+                assert stage["applicable_global_invariants"] == ["oxide-verification-policy"]
+                stage["applicable_global_invariants"] = []
+            else:
+                replacements = _replace_roadmap_string(response["roadmap"], before, after)
+                assert replacements == 1
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, PolicyMutationRunner())
+    report = harness.evaluate(seed, harness.cases["durable-counter"])
+
+    if mechanically_admissible:
+        assert report.base.mechanical and report.variant.mechanical
+        assert report.base.metrics["verification_policy"] < 1.0
+        assert report.score == 0.20
+    else:
+        assert not report.base.mechanical
+        assert report.score == 0.0
+    assert any(diagnostic in item for item in report.diagnostics)
+
+
+def test_goal_type_appropriateness_is_not_lexically_hard_capped() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+    before = (
+        "Deterministically validate sealed campaign identities and report schemas, enforce that "
+        "runners have no direct authority path, and treat all capacity and fault outcomes as "
+        "empirical evidence rather than proof."
+    )
+
+    class FakeProofRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            replacements = _replace_roadmap_string(
+                response["roadmap"],
+                before,
+                "Use Verus to prove capacity and recovery behavior.",
+            )
+            assert replacements == 1
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, FakeProofRunner())
+    report = harness.evaluate(seed, harness.cases["collaborative-document"])
+
+    assert report.base.mechanical and report.variant.mechanical
+    assert report.base.metrics["verification_policy"] == 1.0
+    assert report.variant.metrics["verification_policy"] == 1.0
+    assert not any("verification or qualification goal" in item for item in report.diagnostics)
+
+
+def test_study_plan_like_evidence_phase_cannot_omit_universal_policy() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class PolicyOmissionRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            stage = _roadmap_stage(response["roadmap"], "empirical-qualification")
+            assert "evidence" in " ".join(stage["verification_goals"])
+            assert "oxide-verification-policy" in stage["applicable_global_invariants"]
+            stage["applicable_global_invariants"].remove("oxide-verification-policy")
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, PolicyOmissionRunner())
+    report = harness.evaluate(seed, harness.cases["collaborative-document"])
+
+    assert not report.base.mechanical
+    assert report.score == 0.0
+    assert any("does not apply oxide-verification-policy" in item for item in report.diagnostics)
+
+
+def test_variant_localizes_ambiguity_without_propagating_readiness() -> None:
+    seed, harness = _harness()
+    case = harness.cases["agent-message-board"]
+
+    report = harness.evaluate(seed, case)
+
+    assert report.variant.response["ready_for_approval"] is True
+    assert report.variant.response["unresolved"] == []
+    assert report.variant.roadmap is not None
+    assert report.variant.roadmap["status"] == "ready"
+    assert report.variant.requirement_readiness["claim-winner"] == ("blocked",)
+    assert report.variant.requirement_readiness["semantic-nonauthority"] == ("ready",)
+    assert report.metamorphic_score == 1.0
+
+
+def test_approval_ready_response_requires_empty_top_level_unresolved() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+
+    class StrayUnresolvedRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            response["unresolved"] = ["A phase-local deferral was incorrectly promoted."]
+            return response
+
+    report = evaluate_scenario(REPOSITORY, seed, case.base, StrayUnresolvedRunner())
+
+    assert report.mechanical
+    assert report.metrics["approval_alignment"] < 1.0
+    assert any("approval/readiness flags" in item for item in report.diagnostics)
+
+
+def test_dependency_readiness_propagation_loses_metamorphic_score() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class PropagatingRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "variant":
+                response["roadmap"] = _replace_phase_readiness(
+                    response["roadmap"],
+                    "bounded-context-recovery",
+                    "ready",
+                    "blocked",
+                )
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, PropagatingRunner())
+    report = harness.evaluate(seed, harness.cases["agent-message-board"])
+
+    assert report.metamorphic_score < 1.0
+    assert any(
+        "unaffected requirement 'semantic-nonauthority' changed readiness" in item
+        for item in report.diagnostics
+    )
+
+
 def test_fatal_baseline_failure_skips_remaining_model_turns() -> None:
     seed = SEED_PATH.read_text(encoding="utf-8")
     cases = load_cases()
@@ -186,7 +742,7 @@ def test_fatal_baseline_failure_skips_remaining_model_turns() -> None:
                 "complete_specification_corpus": True,
                 "faithful_to_specifications": True,
                 "unresolved": [],
-                "roadmap_markdown": "# Roadmap\n",
+                "roadmap": {},
             }
 
     class RecordingJudge:
@@ -422,7 +978,7 @@ def test_malformed_candidate_fails_before_a_planning_turn() -> None:
     assert "added=['missing_eval_value']" in side_info["diagnostics"][0]
 
 
-def test_silent_contractibility_inference_loses_score() -> None:
+def test_ambiguous_requirement_cannot_be_silently_marked_ready() -> None:
     seed = SEED_PATH.read_text(encoding="utf-8")
     cases = load_cases()
 
@@ -430,8 +986,12 @@ def test_silent_contractibility_inference_loses_score() -> None:
         def run(self, prompt, scenario):
             response = super().run(prompt, scenario)
             if scenario.identifier == "variant":
-                response["ready_for_approval"] = True
-                response["unresolved"] = []
+                response["roadmap"] = _replace_phase_readiness(
+                    response["roadmap"],
+                    "retry-policy",
+                    "blocked",
+                    "ready",
+                )
             return response
 
     harness = EvaluationHarness(REPOSITORY, seed, cases, RecklessRunner())
@@ -439,7 +999,7 @@ def test_silent_contractibility_inference_loses_score() -> None:
 
     assert report.score < 1.0
     assert report.metamorphic_score < 1.0
-    assert any("silently treated as contractible" in item for item in report.diagnostics)
+    assert any("did not move from ready to non-ready" in item for item in report.diagnostics)
 
 
 def test_gepa_executes_the_real_evaluator_contract_model_free(tmp_path: Path) -> None:

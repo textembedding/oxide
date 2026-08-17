@@ -1,6 +1,6 @@
 id = "private-notes"
-title = "Contradictory access semantics must be surfaced"
-relation = "must-block"
+title = "Contradictory access semantics must be surfaced in their owning phase"
+relation = "localized-block"
 affected_requirements = ["privacy"]
 
 [[scenarios]]
@@ -10,4 +10,3 @@ directory = "base"
 [[scenarios]]
 id = "variant"
 directory = "contradiction"
-

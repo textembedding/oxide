@@ -1,8 +1,8 @@
-expected_approval = false
-minimum_unresolved = 1
+expected_approval = true
+minimum_unresolved = 0
 required_signal_groups = [["retry", "maximum", "terminal"]]
 forbidden_terms = ["Kafka", "Redis", "Kubernetes"]
-fixture_unresolved = ["The retry maximum and terminal disposition require product decisions."]
+fixture_unresolved = []
 
 [[requirements]]
 id = "fifo"

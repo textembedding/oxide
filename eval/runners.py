@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from oxide.planning import PLAN_RESPONSE_SCHEMA, CodexSessionAgent, PlanningInfrastructureError
+from oxide.roadmap import (
+    ROADMAP_MARKER,
+    ROADMAP_VIEW_MARKER,
+    RoadmapError,
+    parse_roadmap,
+    render_roadmap_value,
+)
 
 from .cases import EvaluationCase, Scenario
 
@@ -43,13 +50,17 @@ class FixturePlannerRunner:
     def run(self, prompt: str, scenario: Scenario) -> dict[str, Any]:
         if not prompt.strip():
             raise RuntimeError("rendered planning prompt is empty")
+        roadmap = parse_roadmap(
+            scenario.model_free_output.read_text(encoding="utf-8"),
+            scenario.model_free_output,
+        )
         return {
             "message": "Fixture planning response.",
             "ready_for_approval": scenario.expected_approval,
             "complete_specification_corpus": True,
             "faithful_to_specifications": True,
             "unresolved": list(scenario.fixture_unresolved),
-            "roadmap_markdown": scenario.model_free_output.read_text(encoding="utf-8"),
+            "roadmap": roadmap,
         }
 
 
@@ -106,6 +117,21 @@ def _judge_source_bundle(case: EvaluationCase) -> str:
     return "\n\n".join(blocks)
 
 
+def _judge_human_roadmap(response: dict[str, Any], label: str) -> str:
+    """Render only the generated view that a roadmap reader actually sees."""
+    roadmap = response.get("roadmap")
+    if not isinstance(roadmap, dict):
+        return f"({label} response has no structured roadmap value)"
+    try:
+        rendered = render_roadmap_value(roadmap, f"{label.lower()}-judge-roadmap")
+    except RoadmapError as error:
+        return f"({label} roadmap could not be rendered: {error})"
+    human_view, marker, _machine_data = rendered.partition(ROADMAP_MARKER)
+    if not marker:
+        return f"({label} roadmap has no machine-data boundary)"
+    return human_view.replace(ROADMAP_VIEW_MARKER, "").strip()
+
+
 @dataclass
 class CodexQualityJudge:
     repository: Path
@@ -127,9 +153,36 @@ graph are valid. Judge the complete supplied source corpus for the qualities tha
 reducible to string checks, and use the reason field to identify systemic quality defects even
 when an output is mechanically invalid:
 
+Interpret roadmap state with these rules:
+- Phase readiness describes only whether that phase's own source semantics are sufficiently precise
+  to contract. It does not describe implementation progress or dependency completion.
+- A blocked, planned, or deferred phase does not make its dependents non-ready. Dependencies encode
+  execution order; never propagate readiness through them.
+- A complete faithful roadmap may remain approval-ready while it localizes ambiguity or future
+  contractibility work in one or more non-ready phases. Top-level unresolved decisions are required
+  only when no faithful phase decomposition or dependency graph can be produced without them.
+- Evaluate the BASE response against the base sources only. Evaluate the VARIANT response against
+  the base sources plus the variant delta; do not fault the base for omitting a variant-only change.
+- For a localized-block relation, only the listed affected requirements must move from ready to
+  non-ready. Unaffected requirements retain their own local readiness, including downstream work.
+- Oxide's assurance policy is source-independent. A roadmap must declare exactly one source-free
+  `oxide-verification-policy` invariant with the mandated statement from the planning prompt and
+  apply it to every phase without classifying phases by keywords. Judge whether each phase chooses
+  the assurance treatment appropriate to its actual deliverable: meaningful formal contracts or
+  refinement for production logic, concrete empirical qualification for non-authoritative capacity
+  or research work, and both where a phase mixes those responsibilities. Measurements must not be
+  presented as proof. Product sources remain the sole authority for product behavior, so policy
+  obligations never become source citations or invented semantics.
+- The RENDERED HUMAN ROADMAP sections below are the views people read. Score readability from those
+  views. The REQUIRED TRACE PAYLOAD sections contain mandatory verbatim source citations and
+  structured provenance for mechanical qualification. Use that payload to judge faithfulness and
+  coverage, but never lower readability merely because the trace payload is long or repeats source
+  language that is absent from the rendered human view.
+
 1. faithfulness: goals and exclusions do not smuggle in product behavior absent from sources;
 2. coverage: every material requirement, deferral, non-goal, and research question has one
-   visible disposition rather than disappearing behind the representative oracles;
+   visible disposition rather than disappearing behind the representative oracles, and every
+   phase has the assurance treatment appropriate to its role;
 3. decomposition: boundaries are cohesive, useful, and no more serial than real dependencies;
 4. readability: a human can understand outcomes, deferrals, and sequencing quickly.
 
@@ -138,14 +191,21 @@ stages. Do not waive a semantic defect because the prose sounds polished.
 
 Case: {case.identifier} — {case.title}
 Expected relation: {case.relation}
+Affected requirements: {json.dumps(case.affected_requirements)}
 
 SOURCE CORPUS
 {_judge_source_bundle(case)}
 
-BASE RESPONSE
+BASE RENDERED HUMAN ROADMAP
+{_judge_human_roadmap(base_response, "BASE")}
+
+BASE REQUIRED TRACE PAYLOAD
 {json.dumps(base_response, ensure_ascii=False, sort_keys=True)}
 
-VARIANT RESPONSE
+VARIANT RENDERED HUMAN ROADMAP
+{_judge_human_roadmap(variant_response, "VARIANT")}
+
+VARIANT REQUIRED TRACE PAYLOAD
 {json.dumps(variant_response, ensure_ascii=False, sort_keys=True)}
 """
         result = _retry_infrastructure(

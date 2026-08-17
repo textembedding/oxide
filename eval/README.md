@@ -12,18 +12,26 @@ Layer 1 is deterministic correctness:
 - the response and roadmap schemas are valid;
 - every cited requirement resolves against exact source semantics;
 - every rubric requirement receives a disposition;
-- readiness and approval reflect whether the source is contractible;
+- each phase's readiness reflects its own source contractibility without inheriting dependency
+  completion or another phase's readiness;
+- a complete, faithful roadmap can remain approval-ready with localized non-ready phases and has
+  no top-level unresolved decision unless faithful decomposition itself is impossible;
 - dependency ordering preserves stated prerequisites without fixing a stage count;
-- each phase includes a meaningful formal-verification goal;
+- each phase includes a source-grounded, non-vacuous verification or qualification goal;
 - fixture-specific unsupported concepts do not appear.
 
 Layer 2 is metamorphic and adversarial behavior:
 
 - Markdown-only formatting changes preserve the semantic plan;
-- removing a necessary acceptance criterion makes affected work non-ready;
-- contradictory requirements are surfaced instead of silently reconciled.
+- removing a necessary acceptance criterion makes exactly the affected work non-ready;
+- contradictory requirements are surfaced in their smallest owning phase instead of silently
+  reconciled or propagated through dependency readiness;
 - independent runs over the same frozen corpus preserve capability boundaries,
   phase identities, source ownership, dependencies, readiness, and field shape.
+
+The `localized-block` relation requires each affected requirement to move from
+`ready` to non-ready while every unaffected requirement keeps its local readiness.
+It does not make the roadmap draft or propagate non-readiness through dependencies.
 
 An optional LLM judge scores faithfulness, full-corpus coverage, decomposition
 quality, and human readability after mechanical qualification succeeds.
@@ -37,6 +45,11 @@ Each score includes compact diagnostics. [GEPA](https://github.com/gepa-ai/gepa)
 actionable side information and proposes a replacement Jinja template. Candidate
 templates must preserve the production variable contract. The best result is
 written under `eval/runs/` for review; it is never installed automatically.
+
+Planner turns return the roadmap as a schema-constrained JSON object. Oxide validates that object
+and renders canonical `ROADMAP.md` itself, so model-authored TOML quoting cannot corrupt source
+citations. Model-free fixtures remain readable Markdown files but are parsed through the same
+structured roadmap value before scoring.
 
 ## Smoke examples
 

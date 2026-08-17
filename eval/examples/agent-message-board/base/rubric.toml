@@ -28,8 +28,8 @@ readiness = ["ready"]
 [[requirements]]
 id = "claim-winner"
 path = "PRODUCT.md"
-anchor = "7.2 Claim winner"
-text = "The earliest valid Claim by BoardSeq is the unique winner for its claim key and generation."
+anchor = "4.4 Claim"
+text = "For one claim key and generation, the valid Claim with the lowest BoardSeq is the winner."
 readiness = ["ready"]
 
 [[requirements]]

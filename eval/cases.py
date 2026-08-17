@@ -184,7 +184,7 @@ def load_case(path: Path) -> EvaluationCase:
     if [item.identifier for item in scenarios] != ["base", "variant"]:
         raise CaseError(f"{case_path} scenarios must be base then variant")
     relation = value["relation"]
-    if relation not in {"equivalent", "must-block"}:
+    if relation not in {"equivalent", "localized-block"}:
         raise CaseError(f"{case_path}.relation is invalid")
     affected = _strings(value["affected_requirements"], "affected_requirements")
     known = {item.identifier for scenario in scenarios for item in scenario.requirements}

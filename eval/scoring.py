@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,10 @@ from oxide.roadmap import (
     canonical_source_text,
     parse_roadmap,
     proposed_stage_binding,
-    render_roadmap_document,
+    render_roadmap_value,
 )
 
-from .cases import EvaluationCase, Scenario
+from .cases import EvaluationCase, RequirementOracle, Scenario
 from .identity import build_manifest
 from .runners import PlannerRunner, QualityJudge
 
@@ -61,11 +62,11 @@ class ScenarioReport:
         source_owners: dict[tuple[str, str, str], list[str]] = {}
         for invariant in self.roadmap["global_invariants"]:
             for source in invariant["sources"]:
-                identity = (source["path"], source["anchor"], source["requirement"])
+                identity = _source_identity(source)
                 source_owners.setdefault(identity, []).append(f"invariant:{invariant['id']}")
         for stage in self.roadmap["stages"]:
             for source in stage["source_specifications"]:
-                identity = (source["path"], source["anchor"], source["requirement"])
+                identity = _source_identity(source)
                 source_owners.setdefault(identity, []).append(f"stage:{stage['id']}")
         return {
             "stage_ids": tuple(stage["id"] for stage in self.roadmap["stages"]),
@@ -78,6 +79,7 @@ class ScenarioReport:
             "invariants": tuple(
                 (
                     invariant["id"],
+                    canonical_source_text(invariant["statement"]),
                     tuple(
                         stage["id"]
                         for stage in self.roadmap["stages"]
@@ -87,7 +89,8 @@ class ScenarioReport:
                 for invariant in self.roadmap["global_invariants"]
             ),
             "source_owners": tuple(
-                (identity, tuple(owners)) for identity, owners in sorted(source_owners.items())
+                (identity, tuple(sorted(owners)))
+                for identity, owners in sorted(source_owners.items())
             ),
             "requirement_stages": tuple(sorted(self.requirement_stages.items())),
             "semantic_content": tuple(
@@ -145,24 +148,55 @@ _RESPONSE_FIELDS = {
     "complete_specification_corpus",
     "faithful_to_specifications",
     "unresolved",
-    "roadmap_markdown",
+    "roadmap",
 }
-_FORMAL_WORDS = ("verus", "prove", "proof", "refinement", "invariant", "contract")
-_EMPIRICAL_WORDS = (
-    "benchmark",
-    "campaign",
-    "characterize",
-    "evaluate",
-    "experiment",
-    "investigate",
-    "measure",
-    "qualify",
-    "research",
-    "study",
-    "test",
-    "validate",
-)
 _VACUOUS_WORDS = ("ensures true", "todo", "tbd", "proof later", "verify later")
+_OXIDE_POLICY_ID = "oxide-verification-policy"
+_OXIDE_POLICY_STATEMENT = (
+    "Production logic has meaningful contracts, component refinement, complete coverage, "
+    "and exact-tree composition; trusted effects remain narrow and policy-free."
+)
+_PHASE_OWNED_NARRATIVE_FIELDS = ("outcome", "included_scope", "implementation_goals")
+_GOAL_TOKEN = re.compile(r"[a-z0-9]+")
+_GENERIC_GOAL_TOKENS = {
+    "acceptance",
+    "check",
+    "checks",
+    "confirm",
+    "contract",
+    "demonstrate",
+    "ensure",
+    "formal",
+    "goal",
+    "goals",
+    "proof",
+    "prove",
+    "qualification",
+    "qualify",
+    "test",
+    "tests",
+    "validate",
+    "verification",
+    "verify",
+    "verus",
+}
+
+
+def _source_identity(reference: dict[str, str]) -> tuple[str, str, str]:
+    """Return the strict semantic identity of one source citation.
+
+    Source paths name authority and therefore remain byte-for-byte exact. Heading
+    and requirement presentation use the same canonical Markdown projection as
+    roadmap qualification: wrapping and unordered-list glyphs are cosmetic, while
+    nesting, ordered ordinals, checkbox state, quotes, tables, and code remain
+    semantic. Citation containment is deliberately broader than identity and must
+    not be used here.
+    """
+    return (
+        reference["path"],
+        canonical_source_anchor(reference["anchor"]),
+        canonical_source_text(reference["requirement"]),
+    )
 
 
 def template_variables(source: str) -> frozenset[str]:
@@ -181,7 +215,7 @@ def _response_shape(response: object) -> str | None:
         or not isinstance(response["ready_for_approval"], bool)
         or not isinstance(response["complete_specification_corpus"], bool)
         or not isinstance(response["faithful_to_specifications"], bool)
-        or not isinstance(response["roadmap_markdown"], str)
+        or not isinstance(response["roadmap"], dict)
         or not isinstance(response["unresolved"], list)
         or any(not isinstance(item, str) for item in response["unresolved"])
     ):
@@ -207,6 +241,152 @@ def _reachability(roadmap: dict[str, Any]) -> dict[str, set[str]]:
 
 def _mean(values: list[float], empty: float = 1.0) -> float:
     return sum(values) / len(values) if values else empty
+
+
+def _output_economy(roadmap: dict[str, Any]) -> tuple[float, list[str]]:
+    """Detect only unambiguous verbatim duplication of phase-owned narrative.
+
+    Absolute length and phase count are deliberately excluded: both can grow for
+    faithful reasons, and rewarding smaller values would reward semantic omission.
+    Verification goals are also excluded because one cross-cutting proof obligation
+    can legitimately apply to several components.  An outcome, scope item, or
+    implementation goal repeated verbatim across phases, however, has multiple
+    owners and is actionable without a ground-truth roadmap.
+    """
+    claims: list[tuple[str, str, str]] = []
+    owners: dict[tuple[str, str], set[str]] = {}
+    for stage in roadmap["stages"]:
+        for field_name in _PHASE_OWNED_NARRATIVE_FIELDS:
+            value = stage[field_name]
+            values = [value] if isinstance(value, str) else value
+            for item in values:
+                key = (field_name, canonical_source_text(item))
+                claims.append((field_name, key[1], stage["id"]))
+                owners.setdefault(key, set()).add(stage["id"])
+
+    values = [float(len(owners[(field_name, text)]) == 1) for field_name, text, _ in claims]
+    collisions = [
+        (field_name, sorted(stage_ids))
+        for (field_name, _text), stage_ids in sorted(owners.items())
+        if len(stage_ids) > 1
+    ]
+    diagnostics = [
+        f"phase-owned {field_name} narrative is duplicated across {', '.join(stage_ids)}"
+        for field_name, stage_ids in collisions[:5]
+    ]
+    if len(collisions) > 5:
+        diagnostics.append(
+            f"{len(collisions) - 5} additional phase-owned narrative duplications were omitted"
+        )
+    return _mean(values), diagnostics
+
+
+def _reference_supports_requirement(
+    reference: dict[str, str], requirement: RequirementOracle
+) -> bool:
+    """Match a representative oracle to an exact or enclosing source citation.
+
+    Roadmap qualification has already established that the emitted citation is a
+    contiguous span of the named source section.  A longer span can therefore
+    own a representative requirement it wholly contains.  The inverse is not
+    sufficient: a shorter citation may omit a condition or exception carried by
+    the oracle.
+    """
+    return (
+        reference["path"] == requirement.path
+        and canonical_source_anchor(reference["anchor"])
+        == canonical_source_anchor(requirement.anchor)
+        and canonical_source_text(requirement.text)
+        in canonical_source_text(reference["requirement"])
+    )
+
+
+def _goal_grounding(stage: dict[str, Any]) -> tuple[set[str], set[str]]:
+    source_text = " ".join(reference["requirement"] for reference in stage["source_specifications"])
+    owned_text = " ".join(
+        [stage["outcome"], *stage["included_scope"], *stage["implementation_goals"]]
+    )
+    source_tokens = {
+        token
+        for token in _GOAL_TOKEN.findall(canonical_source_text(source_text).lower())
+        if token not in _GENERIC_GOAL_TOKENS
+    }
+    copied_narrative = {
+        canonical_source_text(item)
+        for item in [
+            stage["outcome"],
+            *stage["included_scope"],
+            *stage["excluded_scope"],
+            *stage["implementation_goals"],
+        ]
+    }
+    owned_tokens = {
+        token
+        for token in _GOAL_TOKEN.findall(canonical_source_text(owned_text).lower())
+        if token not in _GENERIC_GOAL_TOKENS
+    }
+    return source_tokens | owned_tokens, copied_narrative
+
+
+def _goal_is_meaningful(goal: str, grounding_tokens: set[str], copied_narrative: set[str]) -> bool:
+    canonical = canonical_source_text(goal)
+    lowered = canonical.lower()
+    tokens = _GOAL_TOKEN.findall(lowered)
+    return (
+        len(tokens) >= 3
+        and canonical not in copied_narrative
+        and not any(marker in lowered for marker in _VACUOUS_WORDS)
+        and any(token in grounding_tokens for token in tokens)
+    )
+
+
+def _has_meaningful_assurance_goal(stage: dict[str, Any]) -> bool:
+    """Require a non-vacuous assurance goal grounded in the phase's owned semantics.
+
+    Mechanical scoring deliberately does not infer whether a phase is production,
+    empirical, or mixed from its prose.  The LLM judge assesses whether the chosen
+    formal, empirical, or mixed assurance treatment is appropriate.
+    """
+    grounding_tokens, copied_narrative = _goal_grounding(stage)
+    return any(
+        _goal_is_meaningful(goal, grounding_tokens, copied_narrative)
+        for goal in stage["verification_goals"]
+    )
+
+
+def _verification_policy_checks(roadmap: dict[str, Any], diagnostics: list[str]) -> list[float]:
+    """Enforce universal policy coverage and meaningful phase-local assurance."""
+    policy = [
+        invariant
+        for invariant in roadmap["global_invariants"]
+        if invariant["id"] == _OXIDE_POLICY_ID
+    ]
+    exact_policy = (
+        len(policy) == 1
+        and policy[0]["statement"] == _OXIDE_POLICY_STATEMENT
+        and policy[0]["sources"] == []
+        and sum(not invariant["sources"] for invariant in roadmap["global_invariants"]) == 1
+    )
+    values = [float(exact_policy)]
+    if not exact_policy:
+        diagnostics.append(
+            "roadmap must declare exactly one source-free oxide-verification-policy invariant "
+            "with the mandated statement"
+        )
+
+    for stage in roadmap["stages"]:
+        applies_policy = _OXIDE_POLICY_ID in stage["applicable_global_invariants"]
+        values.append(float(applies_policy))
+        if not applies_policy:
+            diagnostics.append(f"phase {stage['id']!r} does not apply oxide-verification-policy")
+        meaningful_goal = _has_meaningful_assurance_goal(stage)
+        values.append(float(meaningful_goal))
+        if not meaningful_goal:
+            diagnostics.append(
+                f"phase {stage['id']!r} lacks a source-grounded, non-vacuous "
+                "verification or qualification goal"
+            )
+    return values
 
 
 def evaluate_scenario(
@@ -242,7 +422,7 @@ def evaluate_scenario(
             response if isinstance(response, dict) else {},
         )
     try:
-        rendered = render_roadmap_document(response["roadmap_markdown"], "ROADMAP.md")
+        rendered = render_roadmap_value(response["roadmap"], "ROADMAP.md")
         roadmap = parse_roadmap(rendered, "ROADMAP.md")
     except RoadmapError as error:
         return ScenarioReport(
@@ -272,14 +452,10 @@ def evaluate_scenario(
     requirement_readiness: dict[str, tuple[str, ...]] = {}
     stage_by_id = {stage["id"]: stage for stage in roadmap["stages"]}
     for requirement in scenario.requirements:
-        wanted_anchor = canonical_source_anchor(requirement.anchor)
-        wanted_text = canonical_source_text(requirement.text)
         found: list[str] = []
         for stage in roadmap["stages"]:
             if any(
-                reference["path"] == requirement.path
-                and canonical_source_anchor(reference["anchor"]) == wanted_anchor
-                and canonical_source_text(reference["requirement"]) == wanted_text
+                _reference_supports_requirement(reference, requirement)
                 for reference in stage["source_specifications"]
             ):
                 found.append(stage["id"])
@@ -332,11 +508,16 @@ def evaluate_scenario(
             diagnostics.append(f"required ordering {key} is absent")
 
     unresolved = response["unresolved"]
+    unresolved_aligned = (
+        not unresolved
+        if scenario.expected_approval
+        else len(unresolved) >= scenario.minimum_unresolved
+    )
     alignment_checks = [
         response["ready_for_approval"] is scenario.expected_approval,
         response["complete_specification_corpus"] is True,
         response["faithful_to_specifications"] is True,
-        len(unresolved) >= scenario.minimum_unresolved,
+        unresolved_aligned,
         roadmap["status"] == ("ready" if scenario.expected_approval else "draft"),
     ]
     if not all(alignment_checks):
@@ -366,27 +547,16 @@ def evaluate_scenario(
         if not passed:
             diagnostics.append(f"unsupported product concept appeared: {term}")
 
-    policy_values: list[float] = []
-    for stage in roadmap["stages"]:
-        goals = " ".join(stage["verification_goals"]).lower()
-        production_logic = "oxide-verification-policy" in stage["applicable_global_invariants"]
-        required_words = _FORMAL_WORDS if production_logic else (*_FORMAL_WORDS, *_EMPIRICAL_WORDS)
-        passed = any(word in goals for word in required_words) and not any(
-            word in goals for word in _VACUOUS_WORDS
-        )
-        policy_values.append(float(passed))
-        if not passed:
-            kind = "formal verification" if production_logic else "verification or qualification"
-            diagnostics.append(f"phase {stage['id']!r} lacks a meaningful {kind} goal")
+    policy_values = _verification_policy_checks(roadmap, diagnostics)
 
     source_owners: dict[tuple[str, str, str], list[str]] = {}
     for invariant in roadmap["global_invariants"]:
         for source in invariant["sources"]:
-            identity = (source["path"], source["anchor"], source["requirement"])
+            identity = _source_identity(source)
             source_owners.setdefault(identity, []).append(f"invariant:{invariant['id']}")
     for stage in roadmap["stages"]:
         for source in stage["source_specifications"]:
-            identity = (source["path"], source["anchor"], source["requirement"])
+            identity = _source_identity(source)
             source_owners.setdefault(identity, []).append(f"phase:{stage['id']}")
     ownership_values: list[float] = []
     for identity, owners in source_owners.items():
@@ -403,6 +573,9 @@ def evaluate_scenario(
                 + f"{identity[0]}#{identity[1]} -> {', '.join(owners)}"
             )
 
+    output_economy, economy_diagnostics = _output_economy(roadmap)
+    diagnostics.extend(economy_diagnostics)
+
     metrics = {
         "response_shape": 1.0,
         "mechanical_validity": 1.0,
@@ -410,6 +583,7 @@ def evaluate_scenario(
         "readiness_calibration": _mean(readiness_values),
         "single_disposition": _mean(duplicate_values),
         "source_ownership": _mean(ownership_values),
+        "output_economy": output_economy,
         "dependency_correctness": _mean([float(value) for value in dependency_results.values()]),
         "approval_alignment": _mean([float(value) for value in alignment_checks]),
         "ambiguity_signals": _mean(signal_values),
@@ -421,13 +595,15 @@ def evaluate_scenario(
         + 0.18 * metrics["requirement_coverage"]
         + 0.12 * metrics["readiness_calibration"]
         + 0.04 * metrics["single_disposition"]
-        + 0.08 * metrics["source_ownership"]
+        + 0.06 * metrics["source_ownership"]
+        + 0.02 * metrics["output_economy"]
         + 0.10 * metrics["dependency_correctness"]
         + 0.10 * metrics["approval_alignment"]
         + 0.07 * metrics["ambiguity_signals"]
         + 0.07 * metrics["verification_policy"]
         + 0.04 * metrics["non_invention_guard"]
     )
+    score = min(1.0, max(0.0, score))
     return ScenarioReport(
         scenario.identifier,
         score,
@@ -467,15 +643,31 @@ def _metamorphic(
             diagnostics.append(
                 f"affected requirement {identifier!r} did not move from ready to non-ready"
             )
+    unaffected_checks: list[bool] = []
+    for identifier in sorted(set(base.requirement_readiness) - set(case.affected_requirements)):
+        passed = base.requirement_readiness.get(
+            identifier, ()
+        ) == variant.requirement_readiness.get(identifier, ())
+        unaffected_checks.append(passed)
+        if not passed:
+            diagnostics.append(
+                f"unaffected requirement {identifier!r} changed readiness; "
+                "phase contractibility must not propagate through dependencies"
+            )
     checks = [
         *affected_checks,
-        variant.response.get("ready_for_approval") is False,
-        len(variant.response.get("unresolved", [])) >= case.variant.minimum_unresolved,
+        *unaffected_checks,
+        variant.response.get("ready_for_approval") is case.variant.expected_approval,
+        (
+            not variant.response.get("unresolved", [])
+            if case.variant.expected_approval
+            else len(variant.response.get("unresolved", [])) >= case.variant.minimum_unresolved
+        ),
         variant.metrics.get("ambiguity_signals") == 1.0,
     ]
     if not all(checks):
         diagnostics.append(
-            "missing or contradictory semantics were silently treated as contractible"
+            "the semantic gap was not isolated to its smallest affected readiness unit"
         )
     return _mean([float(value) for value in checks]), diagnostics
 
@@ -494,7 +686,7 @@ def _repeat_consistency(
         "stage_ids": "phase identities or order",
         "dependencies": "dependency graph",
         "readiness": "phase readiness",
-        "invariants": "global-invariant placement",
+        "invariants": "global-invariant statement or placement",
         "source_owners": "source-requirement ownership",
         "requirement_stages": "representative requirement disposition",
         "semantic_content": "outcome, scope, implementation, or verification content",
@@ -511,8 +703,69 @@ def _repeat_consistency(
             passed = wanted[key] == actual[key]
             values.append(float(passed))
             if not passed:
-                diagnostics.append(f"identical run {ordinal} changed {label}")
+                diagnostics.append(
+                    f"identical run {ordinal} changed {label}"
+                    + _repeat_signature_detail(key, wanted, actual)
+                )
     return _mean(values), diagnostics
+
+
+_REPEAT_DETAIL_LIMIT = 5
+
+
+def _bounded_repeat_keys(values: set[str]) -> str:
+    ordered = sorted(values)
+    shown = ordered[:_REPEAT_DETAIL_LIMIT]
+    suffix = (
+        f", +{len(ordered) - _REPEAT_DETAIL_LIMIT} more"
+        if len(ordered) > _REPEAT_DETAIL_LIMIT
+        else ""
+    )
+    return "[" + ", ".join(shown) + suffix + "]"
+
+
+def _changed_tuple_map_keys(
+    wanted: tuple[Any, ...], actual: tuple[Any, ...], *, common_only: bool = False
+) -> set[Any]:
+    wanted_map = {item[0]: item[1:] for item in wanted}
+    actual_map = {item[0]: item[1:] for item in actual}
+    keys = set(wanted_map) & set(actual_map) if common_only else set(wanted_map) | set(actual_map)
+    return {key for key in keys if wanted_map.get(key) != actual_map.get(key)}
+
+
+def _source_owner_key(identity: tuple[str, str, str]) -> str:
+    path, anchor, requirement = identity
+    digest = hashlib.sha256(requirement.encode("utf-8")).hexdigest()[:8]
+    return f"{path}#{anchor}@{digest}"
+
+
+def _repeat_signature_detail(key: str, wanted: dict[str, Any], actual: dict[str, Any]) -> str:
+    """Describe one structural drift compactly without copying roadmap prose."""
+    if key == "stage_ids":
+        wanted_ids = set(wanted[key])
+        actual_ids = set(actual[key])
+        added = _bounded_repeat_keys(actual_ids - wanted_ids)
+        removed = _bounded_repeat_keys(wanted_ids - actual_ids)
+        order = (
+            "; order changed" if not (actual_ids - wanted_ids or wanted_ids - actual_ids) else ""
+        )
+        return f" (added phase IDs: {added}; removed phase IDs: {removed}{order})"
+    if key in {"dependencies", "readiness"}:
+        changed = {
+            str(item)
+            for item in _changed_tuple_map_keys(wanted[key], actual[key], common_only=True)
+        }
+        return f" (changed keys: {_bounded_repeat_keys(changed)})"
+    if key == "source_owners":
+        changed = {
+            _source_owner_key(identity)
+            for identity in _changed_tuple_map_keys(wanted[key], actual[key])
+        }
+        return f" (changed keys: {_bounded_repeat_keys(changed)})"
+    if key in {"invariants", "requirement_stages", "semantic_content"}:
+        changed = {str(item) for item in _changed_tuple_map_keys(wanted[key], actual[key])}
+        return f" (changed keys: {_bounded_repeat_keys(changed)})"
+    return ""
 
 
 class EvaluationHarness:
@@ -551,6 +804,9 @@ class EvaluationHarness:
             "without_judge_metamorphic": 0.20,
             "without_judge_repeat_consistency": 0.20,
             "invalid_mechanical_cap": 0.20,
+            "invalid_verification_policy_cap": 0.20,
+            "scenario_output_economy": 0.02,
+            "scenario_source_ownership": 0.06,
         }
 
     def _build_manifest(self, proposer: object | None) -> dict[str, Any]:
@@ -656,6 +912,11 @@ class EvaluationHarness:
         else:
             score = 0.60 * deterministic + 0.20 * metamorphic + 0.20 * consistency
         if not base.mechanical or not variant.mechanical:
+            score = min(score, 0.20)
+        if (
+            base.metrics.get("verification_policy", 0.0) < 1.0
+            or variant.metrics.get("verification_policy", 0.0) < 1.0
+        ):
             score = min(score, 0.20)
         diagnostics = [
             *(f"base: {item}" for item in base.diagnostics),

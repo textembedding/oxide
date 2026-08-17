@@ -1,6 +1,6 @@
 id = "retry-queue"
-title = "An underspecified retry policy must stop contractibility"
-relation = "must-block"
+title = "An underspecified retry policy must not block contractible queue work"
+relation = "localized-block"
 affected_requirements = ["retry-policy"]
 
 [[scenarios]]
@@ -10,4 +10,3 @@ directory = "base"
 [[scenarios]]
 id = "variant"
 directory = "missing-criterion"
-

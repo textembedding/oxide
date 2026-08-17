@@ -4,7 +4,10 @@ schema = 1
 title = "Roadmap"
 status = "ready"
 specification_root = "eval/examples/private-notes/base/specs"
-global_invariants = []
+[[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
 
 [[stages]]
 id = "private-note-core"
@@ -17,7 +20,7 @@ source_specifications = [
   { path = "eval/examples/private-notes/base/specs/PRODUCT.md", anchor = "Core operations", requirement = "Exact title search returns matching notes in creation order." },
   { path = "eval/examples/private-notes/base/specs/PRODUCT.md", anchor = "Access control", requirement = "Only the owning account can read a note body." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Implement note creation, ordered exact search, and owner checks."]
 verification_goals = ["Use Verus to prove owner isolation and creation-order refinement."]
 readiness = "ready"
@@ -31,9 +34,8 @@ dependencies = ["private-note-core"]
 source_specifications = [
   { path = "eval/examples/private-notes/base/specs/PRODUCT.md", anchor = "Future retrieval", requirement = "Semantic full-text retrieval is deferred until its relevance and privacy criteria are specified." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Define the deferred semantic retrieval behavior."]
 verification_goals = ["Prove semantic retrieval refines the approved privacy contract before implementation is admitted."]
 readiness = "deferred"
 ```
-

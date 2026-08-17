@@ -2,8 +2,13 @@
 ```toml
 schema = 1
 title = "Roadmap"
-status = "draft"
+status = "ready"
 specification_root = "eval/examples/transactional-reservation/deadline-contradiction/specs"
+
+[[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
 
 [[global_invariants]]
 id = "capacity-conservation"
@@ -26,11 +31,6 @@ sources = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "17. Concurrency and linearization", requirement = "Every successful mutating operation has exactly one linearization point." },
 ]
 
-[[global_invariants]]
-id = "uniform-formal-coverage"
-statement = "Every production logical component participates in meaningful Verus refinement and exact-tree composition, with only narrow policy-free effect adapters trusted."
-sources = []
-
 [[stages]]
 id = "verified-foundations"
 outcome = "A public abstract reservation model and canonical value domain define the conflict-independent state and proof architecture."
@@ -40,7 +40,7 @@ dependencies = []
 source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/DEVELOPMENT.md", anchor = "3. Abstract state", requirement = "All successful public mutations are abstract transitions. All stable errors are explicit stuttering transitions." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Define canonical value types, conflict-independent abstract state, and stable component views."]
 verification_goals = ["Use Verus to prove canonical encoding, checked arithmetic, initial-state validity, and conflict-independent invariant preservation without choosing deadline semantics."]
 readiness = "ready"
@@ -55,7 +55,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/DEVELOPMENT.md", anchor = "17. Publication protocol", requirement = "The storage adapter supports guarded conditional insert or update such that at most one contender succeeds for one guard instance." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "24. Trusted effects", requirement = "Adapters cannot decide reservation state, capacity sufficiency, error precedence, idempotency, isolation, or publication order." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement policy-free effect traits and qualify every trusted premise at its real boundary."]
 verification_goals = ["Prove adapter observations cannot acquire product authority and reject last-writer-wins publication, fabricated durability, clock regression, and cross-tenant effect observations."]
 readiness = "ready"
@@ -70,7 +70,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "12. Idempotency", requirement = "The first authoritative use binds the qualified identity to the canonical request digest and terminal result." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "18. Durability acknowledgment", requirement = "An acknowledged mutation survives process termination and recovery under the declared trusted-storage assumptions." },
 ]
-applicable_global_invariants = ["tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement scoped idempotency, canonical validation, guarded publication, and stable results."]
 verification_goals = ["Prove deterministic error precedence, one qualified binding, contiguous audit order, and durable publication refinement."]
 readiness = "ready"
@@ -86,7 +86,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "5. Reservation creation", requirement = "The hold publishes all line allocations atomically. There is no partial hold." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "5. Reservation creation", requirement = "Two concurrent requests for the final available quantity cannot both succeed." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement a deadlock-free canonical multi-key allocation protocol and proved derived counters."]
 verification_goals = ["Prove capacity conservation, canonical duplicate-free lines, all-or-nothing group allocation, one last-unit winner, and safe capacity revision."]
 readiness = "ready"
@@ -101,7 +101,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "At logical time equal to `expires_at`, confirmation is no longer permitted." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/BOUNDARY-CONFLICT.md", anchor = "Confirmation at the deadline", requirement = "At logical time equal to `expires_at`, confirmation remains permitted when the payment authorization was issued before `expires_at`." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Ask the user to resolve the direct contradiction, persist the approved semantics in the human-readable specification, and regenerate dependent planning artifacts."]
 verification_goals = ["After approval, state one non-vacuous exact-boundary transition and prove confirm/cancel/expire mutual exclusion against it; no proof is admissible while both rules remain authoritative."]
 readiness = "blocked"
@@ -116,10 +116,10 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "7. Confirmation", requirement = "One authorization cannot confirm two reservations." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "10. Refunds", requirement = "The sum of authoritative refunds cannot exceed the settlement amount." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement authorization, settlement, refund, and recoverable effect-attempt state after the confirmation guard is authoritative."]
 verification_goals = ["Prove authorization single use, one settlement, bounded refunds, one effect executor, and recovery under every adapter observation after the blocked semantic dependency is resolved."]
-readiness = "blocked"
+readiness = "ready"
 
 [[stages]]
 id = "reads-and-isolation"
@@ -131,7 +131,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "14. Isolation", requirement = "Unauthorized, foreign, and absent identifiers share one public `not_found` result." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "13. Reads", requirement = "A page is internally consistent at its bound snapshot frontier." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement bounded snapshot reads, authoritative filtering, scoped cursor tokens, and approved telemetry."]
 verification_goals = ["Prove projection correctness, pagination order and scope, cursor binding, and absent-versus-foreign public observational equivalence for specified states."]
 readiness = "ready"
@@ -146,7 +146,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "19. Crash recovery", requirement = "Recovery reconstructs the unique authoritative prefix admitted by durable publication evidence." },
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "20. Checkpoints", requirement = "A checkpoint cannot omit a live allocation, idempotency binding, payment fact, capacity revision needed for the current projection, or audit commitment." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement canonical checkpoint construction, guarded installation, retained-frontier planning, and deterministic replay for the approved transition subset."]
 verification_goals = ["Prove checkpoint equivalence, protected-retention safety, no invented state, acknowledged-prefix preservation, and deterministic reconstruction without silently selecting deadline behavior."]
 readiness = "ready"
@@ -160,10 +160,10 @@ dependencies = ["payment-settlement", "reads-and-isolation", "checkpoint-and-rec
 source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/PRODUCT.md", anchor = "25. Formal correctness boundary", requirement = "The exact production tree must pass the complete composition theorem before release." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Compose all public paths only after one approved deadline rule regenerates affected contracts and proofs."]
 verification_goals = ["Run complete Verus composition and deterministic integrity checks against the exact prospective tree after semantic alignment."]
-readiness = "blocked"
+readiness = "ready"
 
 [[stages]]
 id = "empirical-capacity"
@@ -174,8 +174,8 @@ dependencies = ["exact-tree-composition"]
 source_specifications = [
   { path = "eval/examples/transactional-reservation/deadline-contradiction/specs/RESEARCH.md", anchor = "18. Throughput objectives", requirement = "An implementation does not pass by shedding valid load as `invalid_request` or by relaxing durability." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Run immutable workload and fault campaigns only after the exact formal subject exists."]
 verification_goals = ["Require exact formal evidence first, then independently measure all preregistered capacity and fault slices without turning finite observations into proof."]
-readiness = "blocked"
+readiness = "ready"
 ```

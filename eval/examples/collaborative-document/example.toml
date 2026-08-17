@@ -1,6 +1,6 @@
 id = "collaborative-document"
-title = "Contradictory concurrent-insertion semantics must block planning"
-relation = "must-block"
+title = "Contradictory concurrent-insertion semantics must be isolated locally"
+relation = "localized-block"
 affected_requirements = ["conflict-order"]
 
 [[scenarios]]

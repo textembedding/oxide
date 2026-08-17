@@ -1,8 +1,8 @@
-expected_approval = false
-minimum_unresolved = 1
+expected_approval = true
+minimum_unresolved = 0
 required_signal_groups = [["expiration", "contradiction", "equal"]]
 forbidden_terms = ["Ethereum", "OAuth", "Apache Kafka"]
-fixture_unresolved = ["The specification contradicts itself at the exact expiration boundary and requires an approved semantic decision."]
+fixture_unresolved = []
 
 [[requirements]]
 id = "capacity-conservation"
@@ -33,18 +33,25 @@ text = "At logical time equal to `expires_at`, confirmation is no longer permitt
 readiness = ["blocked"]
 
 [[requirements]]
+id = "expiration-conflict-override"
+path = "BOUNDARY-CONFLICT.md"
+anchor = "Confirmation at the deadline"
+text = "At logical time equal to `expires_at`, confirmation remains permitted when the payment authorization was issued before `expires_at`."
+readiness = ["blocked"]
+
+[[requirements]]
 id = "authorization-single-use"
 path = "PRODUCT.md"
 anchor = "7. Confirmation"
 text = "One authorization cannot confirm two reservations."
-readiness = ["blocked", "ready"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "refund-bound"
 path = "PRODUCT.md"
 anchor = "10. Refunds"
 text = "The sum of authoritative refunds cannot exceed the settlement amount."
-readiness = ["blocked", "ready"]
+readiness = ["ready"]
 
 [[requirements]]
 id = "idempotency-binding"
@@ -86,7 +93,7 @@ id = "empirical-separation"
 path = "RESEARCH.md"
 anchor = "18. Throughput objectives"
 text = "An implementation does not pass by shedding valid load as `invalid_request` or by relaxing durability."
-readiness = ["ready", "blocked"]
+readiness = ["ready"]
 
 [[dependencies]]
 before = "storage-guard"

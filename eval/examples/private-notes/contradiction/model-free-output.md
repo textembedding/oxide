@@ -2,9 +2,12 @@
 ```toml
 schema = 1
 title = "Roadmap"
-status = "draft"
+status = "ready"
 specification_root = "eval/examples/private-notes/contradiction/specs"
-global_invariants = []
+[[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
 
 [[stages]]
 id = "note-core"
@@ -16,7 +19,7 @@ source_specifications = [
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Core operations", requirement = "An authenticated account can create a note with a title and body." },
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Core operations", requirement = "Exact title search returns matching notes in creation order." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Implement note creation and ordered exact title search without choosing body-access semantics."]
 verification_goals = ["Use Verus to prove creation-order refinement for the conflict-independent core."]
 readiness = "ready"
@@ -31,7 +34,7 @@ source_specifications = [
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Access control", requirement = "Only the owning account can read a note body." },
   { path = "eval/examples/private-notes/contradiction/specs/PUBLIC-CATALOG.md", anchor = "Body access", requirement = "Every note body is readable without authentication." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Obtain an approved body-access rule before implementation."]
 verification_goals = ["Define one non-vacuous access-control contract after the contradiction is resolved."]
 readiness = "blocked"
@@ -45,7 +48,7 @@ dependencies = ["note-core", "body-access-resolution"]
 source_specifications = [
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Future retrieval", requirement = "Semantic full-text retrieval is deferred until its relevance and privacy criteria are specified." },
 ]
-applicable_global_invariants = []
+applicable_global_invariants = ["oxide-verification-policy"]
 implementation_goals = ["Define the deferred semantic retrieval behavior."]
 verification_goals = ["Prove semantic retrieval refines the approved privacy contract before implementation is admitted."]
 readiness = "deferred"

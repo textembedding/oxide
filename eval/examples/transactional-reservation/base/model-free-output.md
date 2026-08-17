@@ -6,6 +6,11 @@ status = "ready"
 specification_root = "eval/examples/transactional-reservation/base/specs"
 
 [[global_invariants]]
+id = "oxide-verification-policy"
+statement = "Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free."
+sources = []
+
+[[global_invariants]]
 id = "capacity-conservation"
 statement = "Held and confirmed capacity-consuming quantities never exceed admitted capacity for any inventory unit."
 sources = [
@@ -26,11 +31,6 @@ sources = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "17. Concurrency and linearization", requirement = "Every successful mutating operation has exactly one linearization point." },
 ]
 
-[[global_invariants]]
-id = "uniform-formal-coverage"
-statement = "Every production logical component participates in meaningful Verus refinement and exact-tree composition, with only narrow policy-free effect adapters trusted."
-sources = []
-
 [[stages]]
 id = "verified-foundations"
 outcome = "A public abstract reservation model, canonical value domain, and non-vacuous verification architecture define every reachable success and failure transition."
@@ -42,7 +42,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "5. Canonical types", requirement = "Canonical request digests cover the operation kind and every semantically relevant field in a length-delimited encoding." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "26. Verification coverage", requirement = "Simple components may have automatically discharged proofs, but their contracts must still state meaningful behavior." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Define executable canonical value types and the public abstract state before broad runtime implementation.", "Establish stable component views, transition contracts, and complete production coverage metadata."]
 verification_goals = ["Use Verus to prove initial-state validity, constructive reachability, canonical encoding, checked arithmetic, and preservation of every global invariant for the abstract transitions.", "Qualify deterministic checks that reject vacuous contracts, undeclared trust, disconnected proofs, and production/proof divergence."]
 readiness = "ready"
@@ -58,7 +58,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "24. Trusted effects", requirement = "Adapters cannot decide reservation state, capacity sufficiency, error precedence, idempotency, isolation, or publication order." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "30. Real adapter qualification", requirement = "Exactly one contender may succeed for each shared guard instance." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement policy-free adapter traits and exact typed observation boundaries.", "Build real-boundary fixtures for every declared trusted premise and failure class."]
 verification_goals = ["Prove verified logic consumes adapter observations only through declared contracts and preserves authority for every permitted failure.", "Require real-database and adapter campaigns to reject last-writer-wins guards, fabricated durability, cross-tenant observations, clock regressions, and ambiguous payment retries."]
 readiness = "ready"
@@ -74,7 +74,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "18. Durability acknowledgment", requirement = "An acknowledged mutation survives process termination and recovery under the declared trusted-storage assumptions." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "7. Operation validation pipeline", requirement = "If a step rejects, later steps do not execute." },
 ]
-applicable_global_invariants = ["tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement canonical validation, scoped idempotency resolution, mutation preparation, guarded publication, audit sequencing, and stable results.", "Ensure uncertain storage outcomes enter recovery rather than unguarded retry."]
 verification_goals = ["Prove error precedence, stuttering failures, one binding per qualified idempotency identity, contiguous audit order, and durability-frontier refinement.", "Use concurrent claim and crash fixtures to show one physical publication becomes authoritative for each guard instance."]
 readiness = "ready"
@@ -91,7 +91,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "5. Reservation creation", requirement = "Two concurrent requests for the final available quantity cannot both succeed." },
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "4. Inventory admission", requirement = "A capacity decrease is accepted only when the new capacity is at least the sum of live held quantity and confirmed capacity-consuming quantity at the operation's linearization point." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement checked capacity revisions and a deadlock-free canonical multi-inventory allocation protocol.", "Maintain only proved derived counters and indexes over authoritative reservation facts."]
 verification_goals = ["Use Verus linear authority and atomic specifications to prove capacity conservation, duplicate-free canonical lines, all-or-nothing group allocation, one last-unit winner, and safe capacity decreases.", "Run rejecting mutants for partial group publication, counter drift, reversed lock order, and last-writer-wins capacity guards."]
 readiness = "ready"
@@ -107,7 +107,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "Exactly one effective terminal transition may leave `held` for a reservation." },
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "8. Cancellation", requirement = "Cancellation releases all capacity-consuming lines atomically." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement admitted logical time and ordinary expiration commands over revalidated index candidates.", "Implement confirmation and cancellation as guarded whole-reservation transitions."]
 verification_goals = ["Prove monotone logical time, the strict expiration boundary, mutual exclusion of confirm/cancel/expire, and exact movement or release of every line aggregate.", "Exercise deterministic races one tick before, at, and after expiration and reject a deadline index treated as authority."]
 readiness = "ready"
@@ -123,7 +123,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "10. Refunds", requirement = "The sum of authoritative refunds cannot exceed the settlement amount." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "13. Payment effect protocol", requirement = "Exactly one live process authority may execute one prepared attempt." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement checked authorization, settlement, refund, and effect-attempt state with stable external idempotency identities.", "Reconcile unknown effects before replacement and keep payment facts distinct from inventory release."]
 verification_goals = ["Prove authorization single use, one settlement, bounded cumulative refunds, one authoritative effect executor, and safe recovery from every effect outcome.", "Qualify duplicate, conflicting, delayed, reordered, declined, not-performed, unknown, and cross-tenant adapter observations."]
 readiness = "ready"
@@ -139,7 +139,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "13. Reads", requirement = "A page is internally consistent at its bound snapshot frontier." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "15. Read model", requirement = "Derived read indexes may return candidates only. Verified filtering validates identity, scope, frontier, and authoritative state." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement bounded snapshot projections, authenticated cursor encodings, and authoritative filtering over derived candidates.", "Constrain logs, metrics, traces, and side effects to the approved isolation surface."]
 verification_goals = ["Prove projection correctness, page order and scope, cursor binding, checked availability arithmetic, and absent-versus-foreign public observational equivalence.", "Run statistical timing and content-canary campaigns as supplementary isolation evidence without presenting them as proof."]
 readiness = "ready"
@@ -155,7 +155,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "20. Checkpoints", requirement = "A checkpoint cannot omit a live allocation, idempotency binding, payment fact, capacity revision needed for the current projection, or audit commitment." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "21. Compaction implementation", requirement = "Recovery from the post-compaction image must refine the same abstract retained state as recovery immediately before deletion." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Implement content-addressed checkpoints, guarded frontier installation, verified retention planning, and deterministic durable-tail replay.", "Restore all logical authority and reconcile uncertain effects before publishing readiness."]
 verification_goals = ["Prove checkpoint view equivalence, protected-retention safety, deterministic recovery, acknowledged-prefix preservation, no invented state, and post-recovery global invariants.", "Exercise every storage cut, corrupt image, stale checkpoint, tail conflict, compaction boundary, and repeated recovery in real fault campaigns."]
 readiness = "ready"
@@ -170,7 +170,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "25. Formal correctness boundary", requirement = "The exact production tree must pass the complete composition theorem before release." },
   { path = "eval/examples/transactional-reservation/base/specs/DEVELOPMENT.md", anchor = "31. Prospective-tree acceptance", requirement = "Evidence from a similar commit, rebased tree, different feature set, different toolchain, or different adapter profile cannot satisfy the gate." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Compose the actual public kernel from verified components and declared effect contracts.", "Bind all exact source, proof, toolchain, target, feature, adapter, and evidence inputs into release identity."]
 verification_goals = ["Run the complete Verus composition theorem and deterministic integrity checker against the exact prospective authoritative tree.", "Require controlled negative mutations for every critical authority, isolation, recovery, and coverage invariant."]
 readiness = "ready"
@@ -186,7 +186,7 @@ source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/RESEARCH.md", anchor = "15. Recovery objectives", requirement = "The reference objective is 30 seconds at the 99th percentile with a checkpoint tail of ten million publication records." },
   { path = "eval/examples/transactional-reservation/base/specs/RESEARCH.md", anchor = "28. Capacity recommendation rules", requirement = "It must pass the steady workload, burst workload, last-unit race, crash campaign, recovery objective, resource-exhaustion campaign, and trusted-adapter qualification." },
 ]
-applicable_global_invariants = ["capacity-conservation", "tenant-noninterference", "single-linearization", "uniform-formal-coverage"]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
 implementation_goals = ["Build reproducible workload, adapter, crash, benchmark, and proof-maintenance harnesses with immutable identities and bounded artifacts.", "Characterize saturation, headroom, and failure by preregistered workload slice."]
 verification_goals = ["Require the exact-tree proof receipt before capacity qualification, then independently validate real boundary oracles and empirical objectives without weakening product semantics.", "Reject reports that hide valid load, relax durability, omit invalidity, condition exclusions on outcomes, or generalize beyond tested scope."]
 readiness = "ready"
