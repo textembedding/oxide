@@ -129,6 +129,204 @@ def test_ambiguity_cannot_be_silently_admitted(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("anchor", "specification"),
+    [
+        (
+            "oxide://document",
+            "REQ-1: Return the root value.\n\n# Later\n\nA later contract.\n",
+        ),
+        (
+            "oxide://heading/2/Requirements",
+            "# Requirements\n\nFirst contract.\n\n# Requirements\n\nREQ-1: Return the second value.\n",
+        ),
+        (
+            "oxide://literal/oxide%3A%2F%2Fdocument",
+            "# oxide://document\n\nREQ-1: Return the literal heading value.\n",
+        ),
+        (
+            "oxide://heading/1/",
+            "#\n\nREQ-1: Return the empty-heading value.\n",
+        ),
+    ],
+)
+def test_explicit_roadmap_source_anchors_survive_legacy_contract_admission(
+    tmp_path: Path,
+    anchor: str,
+    specification: str,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor=anchor), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(specification, encoding="utf-8")
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "use explicit specification anchors")
+
+    result = _approve(target, contract)
+
+    assert result["source_commit"]
+
+
+def test_document_locator_does_not_fall_back_to_colliding_literal_heading(
+    tmp_path: Path,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="oxide://document"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# oxide://document\n\nREQ-1: Return the literal heading value.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "add colliding literal heading")
+
+    with pytest.raises(AlignmentError, match="cites text absent"):
+        write_alignment_receipt(
+            target,
+            contract,
+            load_contract(contract),
+            source_commit=_git(target, "rev-parse", "HEAD"),
+            agent_identity="contract-agent/test",
+            user_identity={"name": "Test User", "email": "test@example.com"},
+        )
+
+
+def test_malformed_reserved_locator_fails_during_contract_loading(tmp_path: Path) -> None:
+    _, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="oxide://document/"), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="anchor is malformed"):
+        load_contract(contract)
+
+
+def test_legacy_contract_c_anchor_accepts_an_unambiguous_csharp_heading(
+    tmp_path: Path,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="C"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# C#\n\nREQ-1: Return the C-sharp value.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "retain legacy C anchor")
+
+    assert _approve(target, contract)["source_commit"]
+
+
+@pytest.mark.parametrize("anchor", ["C", "**C**"])
+def test_legacy_contract_c_anchor_rejects_c_and_csharp_heading_ambiguity(
+    tmp_path: Path,
+    anchor: str,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor=anchor), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# C\n\nC contract.\n\n# C#\n\nREQ-1: Return the C-sharp value.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "add ambiguous C headings")
+
+    with pytest.raises(AlignmentError, match="cites text absent"):
+        write_alignment_receipt(
+            target,
+            contract,
+            load_contract(contract),
+            source_commit=_git(target, "rev-parse", "HEAD"),
+            agent_identity="contract-agent/test",
+            user_identity={"name": "Test User", "email": "test@example.com"},
+        )
+
+
+def test_canonical_ordinary_anchor_resolves_semantic_heading_title(tmp_path: Path) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="A&B"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# A&amp;B\n\nREQ-1: Return the entity-decoded value.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "use canonical semantic heading title")
+
+    assert _approve(target, contract)["source_commit"]
+
+
+def test_punctuation_only_canonical_heading_is_present_for_contract_admission(
+    tmp_path: Path,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="---"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "REQ-1: Root contract.\n\n# ---\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "use punctuation-only heading title")
+
+    assert _approve(target, contract)["source_commit"]
+
+
+def test_contract_preserves_exact_canonical_title_that_looks_like_atx(tmp_path: Path) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="# Rules"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# # Rules\n\nREQ-1: Return the first value.\n\n# Rules\n\nSecond contract.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "use an ATX-shaped canonical title")
+
+    stage = load_contract(contract)
+
+    assert stage["tasks"][0]["sources"][0]["anchor"] == "# Rules"
+    assert _approve(target, contract)["source_commit"]
+
+
+def test_repeated_atx_shaped_canonical_title_never_retargets_legacy_heading(
+    tmp_path: Path,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="# Rules"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# # Rules\n\nREQ-1: Shared.\n\n# # Rules\n\nREQ-1: Shared.\n\n# Rules\n\nREQ-1: Shared.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "add ambiguous ATX-shaped canonical headings")
+
+    with pytest.raises(AlignmentError, match="cites text absent"):
+        write_alignment_receipt(
+            target,
+            contract,
+            load_contract(contract),
+            source_commit=_git(target, "rev-parse", "HEAD"),
+            agent_identity="contract-agent/test",
+            user_identity={"name": "Test User", "email": "test@example.com"},
+        )
+
+
+def test_repeated_ordinary_heading_does_not_fall_back_to_raw_substring(
+    tmp_path: Path,
+) -> None:
+    target, contract = _repository(tmp_path)
+    contract.write_text(_contract(anchor="Rules"), encoding="utf-8")
+    (target / "docs" / "SPECIFICATION.md").write_text(
+        "# Rules\n\nFirst contract.\n\n# Rules\n\nREQ-1: Return the second value.\n",
+        encoding="utf-8",
+    )
+    _git(target, "add", "docs/SPECIFICATION.md", "verification/contract.toml")
+    _git(target, "commit", "-qm", "add ambiguous ordinary headings")
+
+    with pytest.raises(AlignmentError, match="cites text absent"):
+        write_alignment_receipt(
+            target,
+            contract,
+            load_contract(contract),
+            source_commit=_git(target, "rev-parse", "HEAD"),
+            agent_identity="contract-agent/test",
+            user_identity={"name": "Test User", "email": "test@example.com"},
+        )
+
+
 def test_approved_refinement_requires_persisted_spec_and_regenerated_contract(
     tmp_path: Path,
 ) -> None:

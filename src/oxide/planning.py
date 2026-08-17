@@ -716,9 +716,12 @@ def _proposal_diff(path: Path, proposed: str) -> str:
 
 def _maintenance_impact_text(impact: dict[str, Any]) -> str:
     lines = ["Maintenance impact:"]
-    lines.extend(
-        f"- {change['stage_id']}: {', '.join(change['fields'])}" for change in impact["changes"]
-    )
+    if impact["changes"]:
+        lines.extend(
+            f"- {change['stage_id']}: {', '.join(change['fields'])}" for change in impact["changes"]
+        )
+    else:
+        lines.append("- no selected phase fields changed")
     dependent = impact["dependent_stage_ids"]
     if dependent:
         lines.append("- dependent phase approvals invalidated: " + ", ".join(dependent))
@@ -984,6 +987,7 @@ def run_plan_session(
             or response.get("faithful_to_specifications") is not True
             or unresolved != []
             or roadmap["status"] != "ready"
+            or (maintenance_impact is not None and not maintenance_impact["changes"])
         ):
             user.show("Approval denied: the roadmap is not aligned and mechanically ready.")
             response = agent.respond(

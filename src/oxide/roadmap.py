@@ -10,9 +10,10 @@ import subprocess
 import tomllib
 import unicodedata
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote_to_bytes
 
 
 class RoadmapError(RuntimeError):
@@ -27,8 +28,36 @@ OXIDE_VERIFICATION_POLICY_STATEMENT = (
     "Production logic has meaningful contracts, component refinement, complete coverage, "
     "and exact-tree composition; trusted effects remain narrow and policy-free."
 )
+DOCUMENT_ROOT_ANCHOR = "oxide://document"
+HEADING_LINEAGE_ANCHOR_PREFIX = "oxide://heading/"
+LITERAL_HEADING_ANCHOR_PREFIX = "oxide://literal/"
+_RESERVED_ANCHOR_PREFIX = "oxide://"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkdownHeading:
+    line_index: int
+    level: int
+    displayed_title: str
+    canonical_title: str
+    lineage: tuple[tuple[int, str], ...]
+
+
+def _atx_heading(line: str) -> tuple[int, str] | None:
+    """Parse one unquoted ATX heading line using Oxide's ATX-only contract."""
+    match = re.fullmatch(r" {0,3}(#{1,6})(?P<rest>(?:[ \t].*)?)", line)
+    if match is None:
+        return None
+    rest = match.group("rest")
+    if not rest:
+        return len(match.group(1)), ""
+    trimmed = rest.rstrip(" \t")
+    closing = re.search(r"[ \t]+#+$", trimmed)
+    if closing is not None:
+        trimmed = trimmed[: closing.start()]
+    return len(match.group(1)), trimmed.strip(" \t")
+
 
 _SOURCE_REFERENCE_VALUE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -50,6 +79,7 @@ _GLOBAL_INVARIANT_VALUE_SCHEMA: dict[str, Any] = {
         "statement": {"type": "string", "minLength": 1},
         "sources": {
             "type": "array",
+            "uniqueItems": True,
             "items": _SOURCE_REFERENCE_VALUE_SCHEMA,
         },
     },
@@ -76,34 +106,41 @@ _STAGE_VALUE_SCHEMA: dict[str, Any] = {
         "included_scope": {
             "type": "array",
             "minItems": 1,
+            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "excluded_scope": {
             "type": "array",
+            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "dependencies": {
             "type": "array",
+            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "source_specifications": {
             "type": "array",
             "minItems": 1,
+            "uniqueItems": True,
             "items": _SOURCE_REFERENCE_VALUE_SCHEMA,
         },
         "applicable_global_invariants": {
             "type": "array",
             "minItems": 1,
+            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "implementation_goals": {
             "type": "array",
             "minItems": 1,
+            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "verification_goals": {
             "type": "array",
             "minItems": 1,
+            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "readiness": {
@@ -134,9 +171,15 @@ ROADMAP_VALUE_SCHEMA: dict[str, Any] = {
         "global_invariants": {
             "type": "array",
             "minItems": 1,
+            "uniqueItems": True,
             "items": _GLOBAL_INVARIANT_VALUE_SCHEMA,
         },
-        "stages": {"type": "array", "minItems": 1, "items": _STAGE_VALUE_SCHEMA},
+        "stages": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": True,
+            "items": _STAGE_VALUE_SCHEMA,
+        },
     },
 }
 
@@ -195,19 +238,30 @@ def _source_references(value: object, field: str) -> list[dict[str, str]]:
             or "\x00" in requirement
         ):
             raise RoadmapError(f"{field}[{ordinal}] has malformed source text")
-        normalized = (path, canonical_source_anchor(anchor), canonical_source_text(requirement))
+        try:
+            normalized_anchor = validate_source_anchor(anchor)
+        except ValueError as error:
+            raise RoadmapError(f"{field}[{ordinal}] has malformed source text") from error
+        preserved_requirement = (
+            unicodedata.normalize("NFC", requirement).replace("\r\n", "\n").replace("\r", "\n")
+        )
+        normalized = (path, normalized_anchor, canonical_source_text(preserved_requirement))
         if normalized in seen:
             raise RoadmapError(f"{field} contains duplicate source requirements")
         seen.add(normalized)
         result.append(
-            {"path": normalized[0], "anchor": normalized[1], "requirement": normalized[2]}
+            {
+                "path": normalized[0],
+                "anchor": normalized[1],
+                "requirement": preserved_requirement,
+            }
         )
     return sorted(
         result,
         key=lambda reference: (
             reference["path"],
             reference["anchor"],
-            reference["requirement"],
+            canonical_source_text(reference["requirement"]),
         ),
     )
 
@@ -482,8 +536,6 @@ def roadmap_maintenance_impact(
         changes.append({"stage_id": identifier, "fields": changed_fields})
         if set(changed_fields) - {"readiness"}:
             semantic_changes.add(identifier)
-    if not changes:
-        raise RoadmapError("maintenance proposal makes no change to the selected phases")
 
     def descendants(stages: list[dict[str, Any]], roots: set[str]) -> set[str]:
         found = set(roots)
@@ -525,10 +577,14 @@ def _table_text(value: object) -> str:
     return _plain_markdown(value).replace("|", "\\|")
 
 
-def _heading_slug(value: str) -> str:
-    normalized = _normalize_heading(value).lower()
+def _canonical_heading_slug(value: str) -> str:
+    normalized = value.lower()
     normalized = re.sub(r"[^\w\s-]", "", normalized)
     return re.sub(r"[\s-]+", "-", normalized).strip("-")
+
+
+def _heading_slug(value: str) -> str:
+    return _canonical_heading_slug(_normalize_heading(value))
 
 
 def _source_links(references: Iterable[dict[str, str]]) -> list[str]:
@@ -541,10 +597,31 @@ def _source_links(references: Iterable[dict[str, str]]) -> list[str]:
         seen.add(identity)
         path, anchor = identity
         target = quote(path, safe="/._-~")
-        slug = _heading_slug(anchor)
-        if slug:
-            target += "#" + quote(slug, safe="-_")
-        label = f"{Path(path).name} — {_normalize_heading(anchor)}"
+        if anchor == DOCUMENT_ROOT_ANCHOR:
+            anchor_label = "document root"
+        else:
+            lineage = _parse_heading_lineage_anchor(anchor)
+            literal_title = _parse_literal_heading_anchor(anchor)
+            if literal_title is not None:
+                anchor_label = literal_title or "(empty heading)"
+                slug = _heading_slug(literal_title)
+                if slug:
+                    target += "#" + quote(slug, safe="-_")
+            elif lineage is None:
+                anchor_label = anchor
+                slug = _canonical_heading_slug(anchor)
+                if slug:
+                    target += "#" + quote(slug, safe="-_")
+            else:
+                anchor_label = " › ".join(
+                    (
+                        f"{title or '(empty heading)'} [{occurrence}]"
+                        if occurrence > 1
+                        else title or "(empty heading)"
+                    )
+                    for occurrence, title in lineage
+                )
+        label = f"{Path(path).name} — {anchor_label}"
         links.append(f"[{_plain_markdown(label)}]({target})")
     return links
 
@@ -761,17 +838,126 @@ def load_roadmap(path: str | Path) -> dict[str, Any]:
         raise RoadmapError(f"cannot read roadmap {source}: {error}") from error
 
 
-def canonical_source_anchor(value: str) -> str:
+def _canonical_heading_title(value: str) -> str:
     """Normalize Markdown heading presentation while preserving its title."""
-    value = value.strip().lstrip("#").strip().rstrip("#").strip()
+    value = value.strip()
+    if not value:
+        return ""
     # Prefix with a non-list token so a numeric heading such as ``14.3`` is not
     # mistaken for ordered-list presentation by the general Markdown normalizer.
     sentinel = "\ue002"
-    return canonical_source_text(f"{sentinel} {value}").removeprefix(f"{sentinel} ")
+    canonical = canonical_source_text(f"{sentinel} {value}")
+    if canonical == sentinel:
+        return ""
+    return canonical.removeprefix(f"{sentinel} ")
+
+
+def _canonical_legacy_anchor(value: str) -> str:
+    """Retain compatibility with callers that supplied a complete ATX line."""
+    stripped = value.strip()
+    heading = _atx_heading(stripped)
+    return _canonical_heading_title(heading[1] if heading is not None else stripped)
+
+
+def _decode_canonical_anchor_segment(value: str) -> str:
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ValueError("source anchor has malformed URL encoding")
+    try:
+        decoded = unquote_to_bytes(value).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("source anchor must be valid UTF-8") from error
+    if any(character in decoded for character in "\x00\r\n"):
+        raise ValueError("source anchor contains an invalid character")
+    if quote(decoded, safe="-._~") != value:
+        raise ValueError("source anchor must use canonical URL encoding")
+    return decoded
+
+
+def _parse_heading_lineage_anchor(value: str) -> tuple[tuple[int, str], ...] | None:
+    """Decode an explicit, occurrence-qualified root-to-heading lineage."""
+    if not value.startswith(HEADING_LINEAGE_ANCHOR_PREFIX):
+        return None
+    parts = value.removeprefix(HEADING_LINEAGE_ANCHOR_PREFIX).split("/")
+    if len(parts) < 2 or len(parts) % 2:
+        raise ValueError("heading lineage must contain occurrence/title pairs")
+    lineage: list[tuple[int, str]] = []
+    for index in range(0, len(parts), 2):
+        occurrence_text, encoded_title = parts[index : index + 2]
+        if re.fullmatch(r"[1-9][0-9]{0,8}", occurrence_text) is None:
+            raise ValueError("heading occurrence must be a positive decimal")
+        decoded_title = _decode_canonical_anchor_segment(encoded_title)
+        if unicodedata.normalize("NFC", decoded_title) != decoded_title:
+            raise ValueError("heading lineage titles must use canonical Unicode")
+        # A lineage segment is already a canonical semantic title. Applying
+        # the Markdown projection again would corrupt valid titles such as
+        # ``&amp;`` (the one-pass projection of ``&amp;amp;``).
+        lineage.append((int(occurrence_text), decoded_title))
+    parsed = tuple(lineage)
+    if _format_heading_lineage_anchor(parsed) != value:
+        raise ValueError("heading lineage must use its canonical URL encoding")
+    return parsed
+
+
+def _format_heading_lineage_anchor(lineage: Iterable[tuple[int, str]]) -> str:
+    components = [
+        component
+        for occurrence, title in lineage
+        for component in (str(occurrence), quote(title, safe="-._~"))
+    ]
+    return HEADING_LINEAGE_ANCHOR_PREFIX + "/".join(components)
+
+
+def _parse_literal_heading_anchor(value: str) -> str | None:
+    """Decode a collision-free escape for one unique literal heading title."""
+    if not value.startswith(LITERAL_HEADING_ANCHOR_PREFIX):
+        return None
+    encoded_title = value.removeprefix(LITERAL_HEADING_ANCHOR_PREFIX)
+    return _decode_canonical_anchor_segment(encoded_title)
+
+
+def validate_source_anchor(value: str) -> str:
+    """Validate locator syntax while preserving an ordinary canonical title."""
+    if any(character in value for character in "\x00\r\n"):
+        raise ValueError("source anchor contains an invalid character")
+    if value == DOCUMENT_ROOT_ANCHOR:
+        return value
+    if value.startswith(HEADING_LINEAGE_ANCHOR_PREFIX):
+        _parse_heading_lineage_anchor(value)
+        return value
+    if value.startswith(LITERAL_HEADING_ANCHOR_PREFIX):
+        _parse_literal_heading_anchor(value)
+        return value
+    if value.startswith(_RESERVED_ANCHOR_PREFIX) or value.strip().startswith(
+        _RESERVED_ANCHOR_PREFIX
+    ):
+        raise ValueError("source anchor uses a malformed reserved Oxide locator")
+    ordinary = unicodedata.normalize("NFC", value.strip())
+    if not ordinary:
+        raise ValueError("empty heading titles require an explicit Oxide locator")
+    return ordinary
+
+
+def canonical_source_anchor(value: str) -> str:
+    """Project legacy Markdown presentation to a source-title comparison key.
+
+    Production resolution first treats an ordinary anchor as already-canonical
+    data and calls this projection only as a source-aware compatibility fallback.
+    Keeping the projection separate prevents a canonical title such as
+    ``# Rules`` or ``&amp;`` from being interpreted twice.
+    """
+    anchor = validate_source_anchor(value)
+    if anchor.startswith(_RESERVED_ANCHOR_PREFIX):
+        return anchor
+    legacy_anchor = _canonical_legacy_anchor(anchor)
+    if not legacy_anchor:
+        raise ValueError("empty heading titles require an explicit Oxide locator")
+    if legacy_anchor.startswith(_RESERVED_ANCHOR_PREFIX):
+        raise ValueError("source anchor canonicalizes into the reserved Oxide namespace")
+    return legacy_anchor
 
 
 def _normalize_heading(value: str) -> str:
-    return canonical_source_anchor(value)
+    return _canonical_heading_title(value)
 
 
 def _protect_markdown_code(value: str) -> tuple[str, list[tuple[str, str]]]:
@@ -783,17 +969,24 @@ def _protect_markdown_code(value: str) -> tuple[str, list[tuple[str, str]]]:
         protected.append((kind, content))
         return f"\ue000{index}\ue001"
 
-    def fenced(match: re.Match[str]) -> str:
-        block = match.group(0)
-        lines = block.split("\n")
-        content = "\n".join(lines[1:-1]) if len(lines) >= 2 else ""
-        return token("fenced", content)
-
-    value = re.sub(
-        r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*?^[ \t]*(?:```|~~~)[ \t]*$",
-        fenced,
-        value,
-    )
+    lines = value.split("\n")
+    rendered: list[str] = []
+    index = 0
+    while index < len(lines):
+        opener = _opening_markdown_fence(lines[index].removesuffix("\r"))
+        if opener is None:
+            rendered.append(lines[index])
+            index += 1
+            continue
+        closing = index + 1
+        while closing < len(lines) and not _closes_markdown_fence(
+            lines[closing].removesuffix("\r"), opener
+        ):
+            closing += 1
+        content_end = min(len(lines), closing)
+        rendered.append(token("fenced", "\n".join(lines[index + 1 : content_end])))
+        index = min(len(lines), closing + 1)
+    value = "\n".join(rendered)
     value = re.sub(
         r"(?<!`)`([^`\n]*)`(?!`)",
         lambda match: token("inline", match.group(1)),
@@ -927,7 +1120,8 @@ def canonical_source_text(value: str) -> str:
 
     for index, raw_line in enumerate(raw_lines):
         quote_depth, quoted_line = _blockquote_prefix(raw_line)
-        line = quoted_line.strip()
+        heading = _atx_heading(quoted_line.rstrip(" \t"))
+        line = heading[1] if heading is not None else quoted_line.strip()
         if not line:
             separated = True
             list_stack.clear()
@@ -935,9 +1129,7 @@ def canonical_source_text(value: str) -> str:
             continue
         if table_rule.fullmatch(line) or horizontal_rule.fullmatch(line):
             continue
-        heading = re.match(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", line)
-        if heading:
-            line = heading.group(1)
+        if heading is not None:
             list_stack.clear()
             separated = True
 
@@ -1061,23 +1253,22 @@ def canonical_source_text(value: str) -> str:
 
 def _citation_markdown_regions(value: str) -> tuple[list[str], bool]:
     """Split Markdown at headings without mistaking fenced code for headings."""
-    protected_value, protected = _protect_markdown_code(value)
+    lines = value.splitlines()
+    heading_lines = {entry.line_index for entry in _markdown_heading_entries(lines)}
     regions: list[str] = []
     current: list[str] = []
-    found_heading = False
-    for line in protected_value.splitlines():
-        if _HEADING.match(line):
-            found_heading = True
+    for index, line in enumerate(lines):
+        if index in heading_lines:
             region = "\n".join(current).strip()
             if region:
-                regions.append(_restore_markdown_code(region, protected))
+                regions.append(region)
             current = []
         else:
             current.append(line)
     region = "\n".join(current).strip()
     if region:
-        regions.append(_restore_markdown_code(region, protected))
-    return regions, found_heading
+        regions.append(region)
+    return regions, bool(heading_lines)
 
 
 def _citation_code_tokens(value: str) -> tuple[str, list[tuple[str, str]]]:
@@ -1089,9 +1280,11 @@ def _citation_code_tokens(value: str) -> tuple[str, list[tuple[str, str]]]:
     return protected_value, protected
 
 
-def _citation_units(value: str) -> list[tuple[tuple[object, ...], str]]:
+def _citation_units(
+    value: str, *, canonical_input: bool = False
+) -> list[tuple[tuple[object, ...], str]]:
     """Project one heading region into semantically scoped citation units."""
-    canonical, _ = _citation_code_tokens(canonical_source_text(value))
+    canonical, _ = _citation_code_tokens(value if canonical_input else canonical_source_text(value))
     raw_lines = canonical.splitlines()
     table_rule = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$")
     table_rows: set[int] = set()
@@ -1197,7 +1390,7 @@ def _citation_units_contain(
     return False
 
 
-def _citation_flat_root_stream(value: str) -> str | None:
+def _citation_flat_root_stream(value: str, *, canonical_input: bool = False) -> str | None:
     """Flatten only presentation-level prose and root list boundaries.
 
     Planning agents occasionally quote a root-level Markdown list as one prose
@@ -1208,7 +1401,7 @@ def _citation_flat_root_stream(value: str) -> str | None:
     fenced-code boundaries.
     """
     rendered: list[str] = []
-    for structure, text in _citation_units(value):
+    for structure, text in _citation_units(value, canonical_input=canonical_input):
         kind = structure[0]
         if kind == "prose" and structure[1] == 0:
             rendered.append(text)
@@ -1247,7 +1440,9 @@ def _citation_scoped_prose_contains(
     )
 
 
-def _citation_isolated_table_row(value: str) -> tuple[int, str] | None:
+def _citation_isolated_table_row(
+    value: str, *, canonical_input: bool = False
+) -> tuple[int, str] | None:
     """Return one standalone table row without erasing its semantic cells.
 
     A row quoted without its table header is still a useful atomic citation.  It
@@ -1262,11 +1457,11 @@ def _citation_isolated_table_row(value: str) -> tuple[int, str] | None:
     if len(lines) != 1:
         return None
     quote_depth, line = _blockquote_prefix(lines[0])
-    encoded, _ = _citation_code_tokens(canonical_source_text(line))
+    encoded, _ = _citation_code_tokens(line if canonical_input else canonical_source_text(line))
     row = _canonical_table_row(encoded.strip())
     if row is None:
         return None
-    return quote_depth, row[0]
+    return quote_depth, encoded.strip() if canonical_input else row[0]
 
 
 def _citation_table_row_contains(
@@ -1283,14 +1478,26 @@ def _citation_table_row_contains(
     )
 
 
-def _source_requirement_present(requirement: str, section: str) -> bool:
+def _source_requirement_present(
+    requirement: str,
+    section: str,
+    *,
+    requirement_is_canonical: bool = False,
+) -> bool:
     """Match a semantic citation without weakening authoritative source hashes."""
-    requirement_regions, requirement_has_heading = _citation_markdown_regions(requirement)
+    if requirement_is_canonical:
+        requirement_regions, requirement_has_heading = [requirement], False
+    else:
+        requirement_regions, requirement_has_heading = _citation_markdown_regions(requirement)
     if requirement_has_heading or len(requirement_regions) != 1:
         return False
-    wanted = _citation_units(requirement_regions[0])
-    wanted_flat = _citation_flat_root_stream(requirement_regions[0])
-    wanted_table_row = _citation_isolated_table_row(requirement_regions[0])
+    wanted = _citation_units(requirement_regions[0], canonical_input=requirement_is_canonical)
+    wanted_flat = _citation_flat_root_stream(
+        requirement_regions[0], canonical_input=requirement_is_canonical
+    )
+    wanted_table_row = _citation_isolated_table_row(
+        requirement_regions[0], canonical_input=requirement_is_canonical
+    )
     source_regions, _ = _citation_markdown_regions(section)
     for region in source_regions:
         source_units = _citation_units(region)
@@ -1310,33 +1517,276 @@ def _roadmap_human_view(text: str) -> str:
     if ROADMAP_VIEW_MARKER not in text:
         raise RoadmapError("roadmap is missing its generated human view marker")
     lines = text.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        match = _HEADING.match(line.rstrip("\r\n"))
-        if match and _normalize_heading(match.group(2)) == "Machine-readable roadmap data":
-            return "".join(lines[:index])
+    for entry in _markdown_heading_entries(lines):
+        if entry.canonical_title == "Machine-readable roadmap data":
+            return "".join(lines[: entry.line_index])
     raise RoadmapError("roadmap is missing its machine-readable data heading")
 
 
-def markdown_section(text: str, anchor: str, source: str) -> str:
-    wanted = _normalize_heading(anchor)
-    lines = text.splitlines(keepends=True)
-    matches: list[tuple[int, int]] = []
+def _opening_markdown_fence(line: str) -> tuple[str, int] | None:
+    match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+    if match is None:
+        return None
+    marker, remainder = match.groups()
+    if marker[0] == "`" and "`" in remainder:
+        return None
+    return marker[0], len(marker)
+
+
+def _closes_markdown_fence(line: str, fence: tuple[str, int]) -> bool:
+    match = re.fullmatch(r" {0,3}(`+|~+)[ \t]*", line)
+    if match is None:
+        return False
+    marker = match.group(1)
+    return marker[0] == fence[0] and len(marker) >= fence[1]
+
+
+def _markdown_heading_entries(
+    lines: list[str],
+) -> list[_MarkdownHeading]:
+    """Index ATX headings outside fences with occurrence-qualified lineages."""
+    entries: list[_MarkdownHeading] = []
+    ancestors: list[tuple[int, tuple[tuple[int, str], ...]]] = []
+    occurrences: dict[tuple[tuple[tuple[int, str], ...], str], int] = {}
+    fence: tuple[str, int] | None = None
     for index, line in enumerate(lines):
-        match = _HEADING.match(line.rstrip("\r\n"))
-        if match and _normalize_heading(match.group(2)) == wanted:
-            matches.append((index, len(match.group(1))))
-    if len(matches) != 1:
-        raise RoadmapError(
-            f"source anchor must name exactly one Markdown heading in {source}: {anchor!r}"
+        source_line = line.rstrip("\r\n")
+        if fence is not None:
+            if _closes_markdown_fence(source_line, fence):
+                fence = None
+            continue
+        fence = _opening_markdown_fence(source_line)
+        if fence is not None:
+            continue
+        heading = _atx_heading(source_line)
+        if heading is None:
+            continue
+        level, complete_title = heading
+        title = _normalize_heading(complete_title)
+        while ancestors and ancestors[-1][0] >= level:
+            ancestors.pop()
+        parent = ancestors[-1][1] if ancestors else ()
+        identity = (parent, title)
+        occurrence = occurrences.get(identity, 0) + 1
+        occurrences[identity] = occurrence
+        lineage = (*parent, (occurrence, title))
+        entries.append(
+            _MarkdownHeading(
+                line_index=index,
+                level=level,
+                displayed_title=complete_title,
+                canonical_title=title,
+                lineage=lineage,
+            )
         )
-    start, level = matches[0]
+        ancestors.append((level, lineage))
+    return entries
+
+
+def _canonical_anchor_for_heading(
+    heading: _MarkdownHeading,
+    entries: list[_MarkdownHeading],
+) -> str:
+    count = sum(candidate.canonical_title == heading.canonical_title for candidate in entries)
+    if heading.canonical_title and count == 1:
+        if not heading.canonical_title.startswith(_RESERVED_ANCHOR_PREFIX):
+            return heading.canonical_title
+        return LITERAL_HEADING_ANCHOR_PREFIX + quote(heading.displayed_title, safe="-._~")
+    return _format_heading_lineage_anchor(heading.lineage)
+
+
+def _markdown_heading_section(
+    lines: list[str],
+    entries: list[_MarkdownHeading],
+    selected: _MarkdownHeading,
+) -> str:
     end = len(lines)
-    for index in range(start + 1, len(lines)):
-        match = _HEADING.match(lines[index].rstrip("\r\n"))
-        if match and len(match.group(1)) <= level:
-            end = index
+    for candidate in entries:
+        if candidate.line_index > selected.line_index and candidate.level <= selected.level:
+            end = candidate.line_index
             break
-    return "".join(lines[start:end]).rstrip() + "\n"
+    return "".join(lines[selected.line_index : end]).rstrip() + "\n"
+
+
+def _anchor_resolution_error(source: str, anchor: str) -> RoadmapError:
+    return RoadmapError(
+        f"source anchor must name exactly one Markdown heading using its canonical "
+        f"representation in {source}: {anchor!r}"
+    )
+
+
+def _resolve_markdown_section(
+    text: str,
+    anchor: str,
+    source: str,
+    *,
+    requirement: str | None = None,
+    requirement_is_canonical: bool = False,
+) -> tuple[str, str]:
+    try:
+        source_anchor = validate_source_anchor(anchor)
+    except ValueError as error:
+        raise _anchor_resolution_error(source, anchor) from error
+    lines = text.splitlines(keepends=True)
+    entries = _markdown_heading_entries(lines)
+
+    if source_anchor == DOCUMENT_ROOT_ANCHOR:
+        end = entries[0].line_index if entries else len(lines)
+        return "".join(lines[:end]).rstrip() + "\n", DOCUMENT_ROOT_ANCHOR
+
+    lineage = _parse_heading_lineage_anchor(source_anchor)
+    if lineage is not None:
+        matches = [entry for entry in entries if entry.lineage == lineage]
+        if len(matches) != 1 or _canonical_anchor_for_heading(matches[0], entries) != anchor:
+            raise _anchor_resolution_error(source, anchor)
+        return _markdown_heading_section(lines, entries, matches[0]), anchor
+
+    literal_title = _parse_literal_heading_anchor(source_anchor)
+    if literal_title is not None:
+        matches = [entry for entry in entries if entry.displayed_title == literal_title]
+        if len(matches) != 1 or _canonical_anchor_for_heading(matches[0], entries) != anchor:
+            raise _anchor_resolution_error(source, anchor)
+        return _markdown_heading_section(lines, entries, matches[0]), anchor
+
+    if requirement is not None and source_anchor in {"C", "F"}:
+        exact = [
+            entry
+            for entry in entries
+            if _canonical_anchor_for_heading(entry, entries) == source_anchor
+        ]
+        if len(exact) == 1:
+            exact_section = _markdown_heading_section(lines, entries, exact[0])
+            if _source_requirement_present(
+                requirement,
+                exact_section,
+                requirement_is_canonical=requirement_is_canonical,
+            ):
+                return exact_section, source_anchor
+        candidates = [
+            entry
+            for entry in entries
+            if entry.canonical_title in {source_anchor, source_anchor + "#"}
+        ]
+        supported = [
+            entry
+            for entry in candidates
+            if _source_requirement_present(
+                requirement,
+                _markdown_heading_section(lines, entries, entry),
+                requirement_is_canonical=requirement_is_canonical,
+            )
+        ]
+        if len(supported) != 1:
+            raise _anchor_resolution_error(source, anchor)
+        selected = supported[0]
+        resolved = _canonical_anchor_for_heading(selected, entries)
+        return _markdown_heading_section(lines, entries, selected), resolved
+
+    # Ordinary planner anchors are already canonical semantic titles.  Resolve
+    # that identity before considering legacy Markdown presentation so a valid
+    # title such as ``# Rules`` cannot be retargeted to ``Rules``.
+    direct = [
+        entry for entry in entries if _canonical_anchor_for_heading(entry, entries) == source_anchor
+    ]
+    if len(direct) == 1:
+        resolved = _canonical_anchor_for_heading(direct[0], entries)
+        return _markdown_heading_section(lines, entries, direct[0]), resolved
+    if any(entry.canonical_title == source_anchor for entry in entries):
+        raise _anchor_resolution_error(source, anchor)
+
+    legacy_anchor = _canonical_legacy_anchor(source_anchor)
+    if not legacy_anchor or legacy_anchor.startswith(_RESERVED_ANCHOR_PREFIX):
+        raise _anchor_resolution_error(source, anchor)
+    if requirement is not None and legacy_anchor in {"C", "F"}:
+        candidates = [
+            entry
+            for entry in entries
+            if entry.canonical_title in {legacy_anchor, legacy_anchor + "#"}
+        ]
+        supported = [
+            entry
+            for entry in candidates
+            if _source_requirement_present(
+                requirement,
+                _markdown_heading_section(lines, entries, entry),
+                requirement_is_canonical=requirement_is_canonical,
+            )
+        ]
+        if len(supported) != 1:
+            raise _anchor_resolution_error(source, anchor)
+        selected = supported[0]
+        resolved = _canonical_anchor_for_heading(selected, entries)
+        return _markdown_heading_section(lines, entries, selected), resolved
+    legacy = [
+        entry for entry in entries if _canonical_anchor_for_heading(entry, entries) == legacy_anchor
+    ]
+    if len(legacy) != 1:
+        raise _anchor_resolution_error(source, anchor)
+    resolved = _canonical_anchor_for_heading(legacy[0], entries)
+    return _markdown_heading_section(lines, entries, legacy[0]), resolved
+
+
+def markdown_section(text: str, anchor: str, source: str) -> str:
+    section, _ = _resolve_markdown_section(text, anchor, source)
+    return section
+
+
+def source_anchor_present(text: str, anchor: str, source: str) -> bool:
+    """Check a contract anchor while safely migrating legacy C#/F# title aliases."""
+    source_anchor = validate_source_anchor(anchor)
+    lines = text.splitlines(keepends=True)
+    entries = _markdown_heading_entries(lines)
+    if source_anchor.startswith(_RESERVED_ANCHOR_PREFIX):
+        section, resolved_anchor = _resolve_markdown_section(text, source_anchor, source)
+        if resolved_anchor == DOCUMENT_ROOT_ANCHOR:
+            return bool(canonical_source_text(section))
+        selected = next(
+            entry
+            for entry in entries
+            if _canonical_anchor_for_heading(entry, entries) == resolved_anchor
+        )
+        return bool(selected.canonical_title or canonical_source_text(section))
+    if source_anchor in {"C", "F"}:
+        candidates = [
+            entry
+            for entry in entries
+            if entry.canonical_title in {source_anchor, source_anchor + "#"}
+        ]
+        if len(candidates) > 1:
+            raise _anchor_resolution_error(source, anchor)
+        if candidates:
+            return True
+    direct = [
+        entry for entry in entries if _canonical_anchor_for_heading(entry, entries) == source_anchor
+    ]
+    if direct:
+        return True
+    if any(entry.canonical_title == source_anchor for entry in entries):
+        raise _anchor_resolution_error(source, anchor)
+    legacy_anchor = _canonical_legacy_anchor(source_anchor)
+    if not legacy_anchor or legacy_anchor.startswith(_RESERVED_ANCHOR_PREFIX):
+        raise _anchor_resolution_error(source, anchor)
+    if legacy_anchor in {"C", "F"}:
+        candidates = [
+            entry
+            for entry in entries
+            if entry.canonical_title in {legacy_anchor, legacy_anchor + "#"}
+        ]
+        if len(candidates) > 1:
+            raise _anchor_resolution_error(source, anchor)
+        if candidates:
+            return True
+    exact_or_legacy_titles = {source_anchor, legacy_anchor}
+    heading_candidates = [
+        entry for entry in entries if entry.canonical_title in exact_or_legacy_titles
+    ]
+    if heading_candidates:
+        markdown_section(text, source_anchor, source)
+        return True
+    # Historical contracts also used stable prose identifiers rather than
+    # Markdown headings. Preserve that fallback only when the value cannot name
+    # any heading under either the canonical or legacy projection.
+    return source_anchor in text
 
 
 def _worktree_reader(repository: Path) -> Callable[[str], bytes]:
@@ -1374,13 +1824,11 @@ def _source_closure(
     references: Iterable[dict[str, str]],
 ) -> list[dict[str, str]]:
     """Validate and bind every distinct source reference in one roadmap scope."""
-    unique: dict[tuple[str, str, str], dict[str, str]] = {}
-    for reference in references:
-        unique[(reference["path"], reference["anchor"], reference["requirement"])] = reference
-    closure: list[dict[str, str]] = []
+    resolved: dict[tuple[str, str, str], dict[str, str]] = {}
+    texts: dict[str, str] = {}
     specification_root = roadmap["specification_root"].rstrip("/")
     for reference in sorted(
-        unique.values(), key=lambda item: (item["path"], item["anchor"], item["requirement"])
+        references, key=lambda item: (item["path"], item["anchor"], item["requirement"])
     ):
         if not (
             reference["path"] == specification_root
@@ -1389,24 +1837,34 @@ def _source_closure(
             raise RoadmapError(
                 f"stage source must live under {roadmap['specification_root']}: {reference['path']}"
             )
-        raw = read(reference["path"])
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise RoadmapError(f"source specification is not UTF-8: {reference['path']}") from error
-        section = markdown_section(text, reference["anchor"], reference["path"])
+        if reference["path"] not in texts:
+            raw = read(reference["path"])
+            try:
+                texts[reference["path"]] = raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise RoadmapError(
+                    f"source specification is not UTF-8: {reference['path']}"
+                ) from error
+        section, resolved_anchor = _resolve_markdown_section(
+            texts[reference["path"]],
+            reference["anchor"],
+            reference["path"],
+            requirement=reference["requirement"],
+        )
         if not _source_requirement_present(reference["requirement"], section):
             raise RoadmapError(
                 f"source requirement is absent from section {reference['anchor']!r} in "
                 f"{reference['path']}"
             )
-        closure.append(
-            {
-                **reference,
-                "section_sha256": digest_bytes(canonical_source_text(section).encode("utf-8")),
-            }
-        )
-    return closure
+        canonical_requirement = canonical_source_text(reference["requirement"])
+        identity = (reference["path"], resolved_anchor, canonical_requirement)
+        resolved[identity] = {
+            "path": reference["path"],
+            "anchor": resolved_anchor,
+            "requirement": canonical_requirement,
+            "section_sha256": digest_bytes(canonical_source_text(section).encode("utf-8")),
+        }
+    return [resolved[identity] for identity in sorted(resolved)]
 
 
 def _roadmap_qualification(read: Callable[[str], bytes], roadmap_path: str) -> dict[str, Any]:

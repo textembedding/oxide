@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .roadmap import canonical_source_anchor, canonical_source_text
+from .roadmap import validate_source_anchor
 from .verification_policy import verification_policy_digest
 
 
@@ -104,9 +104,12 @@ def _source_refs(
             or "\x00" in requirement
         ):
             raise ContractError(f"{field}[{ordinal}].requirement is malformed")
-        normalized_anchor = canonical_source_anchor(anchor)
+        try:
+            normalized_anchor = validate_source_anchor(anchor)
+        except ValueError as error:
+            raise ContractError(f"{field}[{ordinal}].anchor is malformed") from error
         identity = (
-            (specification, normalized_anchor, canonical_source_text(requirement))
+            (specification, normalized_anchor, requirement)
             if exact_requirements
             else (specification, normalized_anchor)
         )
@@ -115,7 +118,7 @@ def _source_refs(
         identities.add(identity)
         citation = {"specification": specification, "anchor": normalized_anchor}
         if exact_requirements:
-            citation["requirement"] = canonical_source_text(requirement)
+            citation["requirement"] = requirement
         normalized.append(citation)
     return normalized
 

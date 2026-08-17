@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .roadmap import RoadmapError, stage_set_binding
+from .roadmap import RoadmapError, source_anchor_present, stage_set_binding
 from .verification_policy import verification_policy_digest
 
 
@@ -155,10 +155,15 @@ def _specification_entries(
         texts[path] = text
     for unit in alignment["semantic_units"]:
         for source in unit["sources"]:
-            if source["anchor"] not in texts[source["specification"]]:
+            anchor = source["anchor"]
+            specification = source["specification"]
+            try:
+                anchor_present = source_anchor_present(texts[specification], anchor, specification)
+            except (RoadmapError, ValueError):
+                anchor_present = False
+            if not anchor_present:
                 raise AlignmentError(
-                    f"semantic unit {unit['id']} cites text absent from "
-                    f"{source['specification']}: {source['anchor']!r}"
+                    f"semantic unit {unit['id']} cites text absent from {specification}: {anchor!r}"
                 )
     return entries, texts
 

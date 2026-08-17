@@ -3,6 +3,10 @@ source-traced implementation roadmap: a standardized, human-readable projection 
 parseable, consistently structured, and precise enough to expose real boundaries, dependencies,
 readiness, and gaps.
 
+Faithfulness, coverage, and structural determinism are quality criteria. Compactness, concision,
+output size, phase count, and list length are not quality inputs. Never omit, merge, split, or
+rewrite source-authorized work to optimize them.
+
 ## Authority
 
 The frozen bundle contains every Markdown file under {{ specification_directory_json }}{% if maintenance_mode %}
@@ -10,74 +14,160 @@ and the existing approved roadmap{% endif %}; its manifest is {{ corpus_json }}.
 Do not use shell, file, Git,
 network, or other tools to reread it.
 
-Specifications alone authorize product behavior and success semantics. The Oxide policy authorizes
-assurance work only: it may require proof, coverage, composition, and empirical qualification, but
-never fill a semantic gap or promote an example, possibility, question, or recommendation.
+Specifications alone authorize product behavior, success semantics, and source-backed product
+invariants. The Oxide policy authorizes the mandated universal invariant, its application to every
+phase, and assurance goals such as proof, coverage, composition, and empirical qualification. It
+never authorizes a product result, threshold, exception, or semantic-gap resolution, and never
+promotes an example, possibility, question, or recommendation into product behavior.
 
-## Private planning procedure
+## Private deterministic procedure
 
 Complete these steps privately before producing the response:
 
-1. Build a heading index from the frozen bundle, including each normalized title's per-file
-   occurrence count. Copy paths and complete displayed heading titles exactly, preserving
-   numbering, case, punctuation, and wording. When a title repeats, use its nearest containing
-   ancestor whose title occurs exactly once; never infer or modernize titles.
-2. Build an atomic semantic-requirement ledger covering behavior, constraints, failures,
-   quantitative targets, future capabilities, deferrals, non-goals, and open research questions.
-   Headings organize sources; they are not themselves coverage obligations.
-3. Preserve every distinct requirement's modality, horizon, conditions, prerequisites, conflicts,
-   and readiness effect. Collapse exact semantic duplicates into one obligation while retaining
-   their occurrences privately for conflict detection.
-4. Give every distinct requirement exactly one phase owner. Use a source-backed global invariant
-   only as a reusable cross-cutting reference whose establishing work still has one phase owner.
-5. Partition requirements with the deterministic boundary precedence below. Keep implementation,
-   contracts, proofs, and checks with the behavior they establish.
-6. Add only direct producer-consumer dependencies. Determine each phase's readiness from its own
-   source contract; dependency completion and another phase's readiness never propagate through
-   the graph.
-7. Perform a second coverage pass over every source heading only to find missed semantic
-   requirements; headings are not disposition units. Reverse-check every distinct material
-   requirement for one visible disposition, then check every roadmap claim for source or
-   verification-policy authority.
+1. Build the exact ATX heading index defined below, including empty headings, every displayed and
+   canonical semantic title, per-file title counts, full root-to-target lineage, conventional
+   section extent, and 1-based same-title sibling occurrence. Also index the bytes before the first
+   ATX heading and whole files without ATX headings. Choose an anchor with the exact rules below; no
+   unique ancestor is required.
+2. Build an atomic semantic-requirement ledger covering behavior, constraints, failures, bounds,
+   ordering, authority, horizons, deferrals, non-goals, requested studies, evidence obligations,
+   contradictions, and open decisions. Headings locate authority; they are not obligations.
+   Give each retained source occurrence a canonical source key consisting of its relative manifest
+   path, ATX heading-tree preorder index (document root is zero), and zero-based `[start, end)`
+   Unicode-scalar offsets in the decoded file. Compare paths lexicographically and integers
+   numerically; canonical source order is ascending key order.
+3. Give each atomic requirement a canonical semantic key containing only its source-authorized
+   subject, predicate, modality, horizon, conditions, exceptions, observable input, result or
+   failure, bound, ordering relation, and authority scope. Formatting, citation-span choice,
+   drafted prose, and eventual phase names are not part of this key. Collapse only identical keys,
+   while retaining every source occurrence privately for precedence and conflict detection.
+4. Build the requirement-level producer-consumer and ordering graph. Determine any candidate
+   product invariant's source-defined contract subjects and consumers before phase grouping.
+5. Derive capability clusters without using gaps or readiness, isolate only eligible local gaps,
+   assign every requirement one owner, allocate IDs, project direct dependencies, classify
+   readiness, and place product invariants in that order. Freeze these decisions before prose.
+6. Perform a second coverage pass over every source heading only to find missed semantic
+   requirements. Reverse-check every ledger row for one visible disposition and every roadmap
+   product claim for source authority.
+7. After drafting, recompute ownership, phase signatures and IDs, direct dependencies, readiness,
+   and product-invariant promotion, establishment, and applicability from the ledger without
+   consulting the draft. Repair every difference before responding.
 
-Do not emit the private ledger or heading index.
+Do not emit the private ledger, heading index, semantic keys, graph, or alternate projection.
+
+For every candidate-span tie-break below, first NFC-normalize the candidate without otherwise
+rewriting it. Its span length is its number of Unicode scalar values. Its position is its canonical
+source key followed by its zero-based `[start, end)` Unicode-scalar offsets within that occurrence.
+Compare positions tuple-wise and compare lexical values by Unicode code-point order. “Earlier,”
+“shorter,” and “lexical” below refer only to these definitions and are identity or citation
+tie-breaks, never quality, concision, list-length, phase-count, or output-size criteria.
 
 ## Canonical decomposition
 
-Derive the justified capability phases. Never assume a particular stage count, maturity model,
-numbering scheme, domain, or boundary from filenames. Preserve only source-defined boundaries.
+Derive source-defined capability clusters before considering whether their clauses are
+contradictory, incomplete, ready, planned, deferred, or blocked. Drafted prose, implementation
+progress, desired narrative flow, and structural size are never boundary inputs.
 
-Use these rules so repeated runs over the same corpus converge:
+Derive a capability key for every requirement before grouping. If the source explicitly names its
+capability, deliverable, transition, decision result, or accepted artifact, use that source term
+and horizon as the tuple `(term, horizon)`; use `""` for an absent horizon. Code formatting may
+identify a term as a name but does not itself win a tie. Use the earliest canonical occurrence that
+explicitly names it, then rank candidates at that occurrence by earlier position, shorter span
+length, and lexical order. This selects key identity only. A condition, failure, bound, authority
+rule, or evidence obligation
+inherits the key of the observable behavior it governs. If no explicit term or governed behavior
+exists, use `(subject, result-or-failure, horizon)` from the canonical semantic key, including the
+predicate in `result-or-failure` when the result is implicit and using `""` for every absent
+component. Headings, filenames, drafted labels, readiness, and implementation progress never supply
+a capability key.
 
-- Resolve boundaries in this order: (1) an explicit source-defined capability or deliverable with
-  its own acceptance boundary; (2) a genuine local readiness difference whose isolation leaves the
-  remainder complete and non-vacuous; (3) a direct producer-consumer artifact boundary; then
-  (4) merge work sharing authoritative state. A later rule never overrides an earlier one, and
-  headings, APIs, modules, or independently executable work alone do not force a split.
-- Keep implementation, contracts, proofs, fixtures, and checks with the behavior they establish.
-  Separate cross-system evidence or assurance only when the source defines an accepted artifact,
-  report, or gate consumed across multiple capabilities. Collapse generic checker,
-  preregistration, and reference-deployment work into behavior owners. Every phase owns at least
-  one source-backed outcome; policy alone cannot create a phase.
-- Group open studies by their source-defined outcome and parallelism. They do not become production
-  dependencies unless the source explicitly requires production to wait for their result.
-- Never create one phase per heading, type, error, fixture, proof, or check.
-- IDs are short lower-kebab-case nouns taken from the capability's first defining source occurrence.
-  Use the shortest unique capability name consistently; no ordinal or `stage`, `phase`, `formal`,
-  or `verified` prefix. Add the shortest containing source capability noun only to resolve a
-  collision.
-- List only direct dependencies. Shared vocabulary, file order, policy obligations, and a desire
-  for a linear narrative are not dependencies. Independent capabilities remain independent.
-- Keep graph and IDs stable. Oxide canonicalizes phase topological order, global invariants by ID,
-  direct dependencies by ID, applicable global invariants by ID, and source records by canonical
-  source key. For authored narrative lists (`included_scope`, `excluded_scope`,
-  `implementation_goals`, and `verification_goals`), use one deterministic source or logical
-  order; Oxide preserves that order.
-- Use one-sentence outcomes and non-overlapping scope and goal lists. Each item states one distinct
-  claim in deterministic source or logical order. Do not impose an arbitrary phase-count or
-  list-length budget: include every distinct source-authorized obligation needed for correctness.
-  Consolidate same-owner contiguous requirements only when no semantics are lost; do not mirror
-  ledger rows, narrate citations, or repeat one obligation across fields.
+Apply these boundary rules in order:
+
+1. Preserve an explicit source-defined capability, deliverable, decision result, or accepted
+   artifact with its own independently meaningful outcome or acceptance boundary.
+2. Keep clauses together when they jointly define one observable transition or indivisible
+   contract and neither side has an independently meaningful accepted outcome. Conditions,
+   failures, bounds, authorization, implementation, contracts, proofs, fixtures, and checks stay
+   with the behavior they govern.
+3. Separate a direct producer from a consumer when both have independently meaningful source-backed
+   outcomes and the consumer requires the producer's artifact, state, decision, or guarantee.
+4. Separate source-defined horizons and independently resolvable requested results. Do not collect
+   unrelated questions into an omnibus research or design phase.
+5. Within one capability key, keep remaining work together unless an earlier rule requires
+   separation. Across different keys, keep work separate unless the source makes their behavior one
+   indivisible contract. Shared files, headings, APIs, modules, state access, vocabulary, or
+   implementation convenience do not determine a boundary.
+
+For these rules, an outcome is independently meaningful only when the source gives it an observable
+result or accepted artifact whose acceptance can be stated without borrowing the other candidate's
+result. A contract is indivisible only when one candidate governs the other's condition, failure,
+bound, authority, or evidence, or when neither candidate alone can state a source-backed
+input-to-result relation. If the source leaves both predicates ambiguous, attach a governing
+modifier to its governed behavior. For every remaining pair whose independently-meaningful or
+indivisible status is not source-decided, keep equal capability keys together and different keys
+separate. This fallback precedes any stylistic judgment and never uses structural size.
+
+Every phase owns at least one source-backed outcome. Policy alone cannot create a phase. Separate a
+cross-capability assurance artifact only when the source defines an independently accepted artifact,
+report, or gate consumed by multiple capabilities. A requested study becomes a production
+prerequisite only when the source requires production to await and consume its result.
+
+A phase signature is the sorted set of its owned canonical semantic keys plus its source-defined
+horizon. Sort semantic keys lexicographically by their NFC-normalized component tuple in this order:
+subject, predicate, observable input, result or failure, condition, exception, bound, ordering
+relation, authority scope, horizon, modality; break an otherwise identical ordering tie by canonical
+defining source key.
+
+After clustering, isolate a contradictory or semantically missing subset only when (a) its boundary
+is source-identifiable and it contains every side and governing premise of that contradiction, or
+every premise needed to expose that gap; (b) the unaffected remainder is a complete, coherent,
+reachable, non-vacuous source-backed contract; and (c) no condition, exception, bound, authority,
+evidence, or other governing requirement is split from the behavior it governs. The isolated subset
+need not be semantically coherent: it must be one boundary-coherent affected contract under the
+decomposition rules and is `blocked`. “Boundary-coherent” means every requirement in the subset
+shares one source-defined acceptance boundary after governing modifiers are attached; it does not
+mean the claims agree. Freeze the cluster's capability key before isolation; its
+nonempty unaffected remainder keeps that key and ID. Group gaps only when the same source decision
+resolves them. Otherwise keep the indivisible contract together with the appropriate non-ready
+classification.
+
+Derive each phase ID from its frozen capability key. When the key contains a selected explicit
+source term, use that term. For a tuple fallback, use a contiguous source term from its earliest
+canonical defining occurrence that unambiguously names the tuple's subject or result. Rank
+otherwise equivalent fallback candidates by earlier position, shorter span length, then lexical
+order. If no single term names the tuple, concatenate its nonempty components in subject,
+result-or-failure, horizon order. Do not stem, singularize, nominalize, translate, or substitute a
+synonym.
+
+Kebab-normalize an ID component with this total ASCII-safe transform: NFC-normalize, Unicode-
+lowercase, keep ASCII letters and digits, map every run of Unicode whitespace, ASCII `-`, or `_` to
+one separator, and map every other Unicode scalar to its own `u<lowercase-hex-scalar>` segment.
+Separate adjacent encoded segments and text with one `-`, then collapse and trim separators. Apply
+this transform to the selected base term or tuple components. If trimming would produce an empty
+component, encode every scalar of the nonempty NFC-lowercase input as its own `u<lowercase-hex-
+scalar>` segment instead, including whitespace and separators.
+
+Use the unqualified base ID when unique. For each collision set, traverse each phase's owned
+semantic keys in the sorted order above and, within each key, traverse nonempty components in this
+order: subject, predicate, observable input, result-or-failure, condition, exception, bound,
+ordering relation, authority scope, horizon, modality. Kebab-normalize them, discard empty results
+and duplicates while preserving first occurrence, and thereby form that phase's finite qualifier
+sequence. In round `n`, append qualifier `n` to every still-colliding phase that has one, then
+recompute all collision sets. If distinct phase signatures still collide after all
+components are exhausted, serialize each signature as a whitespace-free UTF-8 JSON array of its
+sorted semantic-key component arrays plus horizon, with every string NFC-normalized, and append its
+full lowercase SHA-256 hex digest. If distinct signatures have the same full digest, order them by
+their tuple of canonical defining source keys and append `-1`, `-2`, and so on by 1-based position;
+this digest-collision case is the sole permitted ordinal exception. Never add a `stage`, `phase`,
+`formal`, `verified`, readiness, or status prefix. Readiness, dependencies, invariants, citations,
+and prose never rename an unchanged phase signature.
+
+Oxide canonicalizes phases by dependency layer and then ID, product invariants by ID after
+`oxide-verification-policy`, dependency and applicable-invariant IDs by ID, and source records by
+canonical source key. Order authored list items by their supporting canonical source order unless
+the source explicitly requires a different logical order. Preserve every distinct obligation; do
+not use a length budget, mirror ledger rows mechanically, narrate citations, or copy one product
+disposition verbatim across fields.
 
 Represent the complete source-defined horizon. Under-specified future work belongs in a
 planned, deferred, or blocked phase without invented semantics. Permanent non-goals are exclusions; source-requested
@@ -88,42 +178,235 @@ specificity, convention, or convenience. A gap exists only when externally obser
 for a source-mandated input cannot be expressed faithfully, even as an abstract relation or
 precondition. An unspecified initializer, ownership derivation, encoding, algorithm, or internal
 limit is implementation freedom unless the source makes it observable. Isolate the smallest
-genuinely ambiguous obligation only when the remaining behavior stays complete, reachable, and
-non-vacuous; otherwise keep the cohesive behavior non-ready. Cite both sides of contradictions and
-block only their owner; do not spread status to adjacent work or dependents. Put a decision in
+source-identifiable affected contract that satisfies all three isolation conditions above; it may
+be internally contradictory and is `blocked`. Otherwise keep the cohesive behavior non-ready. Cite
+every side and premise of a contradiction and block only their one owner; do not spread status to
+adjacent work or dependents. Put a decision in
 top-level `unresolved` only when no faithful decomposition or dependency graph can be produced
 without resolving it. Otherwise keep the gap local to its phase.
 
 ## Source ownership and citations
 
-Each distinct material requirement has one phase owner and one canonical source record. A global
-invariant may cite its defining rule, but exactly one phase also cites it to establish it; others
-apply its ID. `unresolved` is explanation, not another owner.
+Each atomic requirement has exactly one phase owner. Select its canonical source handles once;
+copying a handle into a product invariant and its establishing phase does not create another owner.
+Assign ownership before prose with these rules:
 
-Promote a source-backed rule to a global invariant only when the source explicitly makes it an
-unchanged cross-component rule and at least two production phase contracts consume it. Otherwise
-keep it with its behavior owner. Its ID uses the phase-ID rule and its statement is the shortest
-self-contained source clause. Oxide orders `oxide-verification-policy` first and the rest by ID.
+- Behavior, conditions, failures, bounds, authority rules, and evidence obligations belong to the
+  capability contract they govern.
+- A prerequisite or ordering clause belongs to its consumer unless the source explicitly makes it
+  part of the producer's acceptance contract. Represent any cross-phase relation separately in the
+  dependency graph.
+- A deferral or non-goal belongs to the capability whose horizon it limits. A requested study
+  belongs to its source-defined accepted result; a question that blocks mandatory behavior belongs
+  to the smallest affected contract.
+- All sides of one contradiction belong to the same smallest affected contract.
+- If several owners still satisfy these rules, choose the one with the earliest canonical defining
+  source key. Citation placement, dependency use, and invariant applicability never create another
+  owner. `unresolved` is explanation, not ownership.
+
+Decide product-invariant promotion from the source-defined contract subjects identified before
+phase grouping. Promote a rule only when all of these are true:
+
+- The source explicitly gives one unchanged semantic signature, including modality, horizon,
+  conditions, exceptions, and meaning, to at least two independently source-defined production
+  contracts.
+- One self-contained source clause states the rule without abstraction, strengthening, or an
+  invented shared scope.
+- The rule is conflict-free, and promotion neither changes requirement ownership nor turns a
+  prerequisite, implementation technique, shared vocabulary, or assurance method into product
+  behavior.
+
+Otherwise keep the rule with its behavior owner. Freeze each promoted invariant's semantic key as
+the rule's NFC-normalized subject, predicate, observable input, result or failure, condition,
+exception, bound, ordering relation, authority scope, horizon, and modality, followed by its sorted
+explicit consumer-capability keys. From all sufficient self-contained defining clauses, select the
+one with the earliest canonical source key, then earlier position, shorter span length, and lexical
+order. Freeze the consumer set before phase ordering.
+
+Derive a product-invariant ID from that invariant key, never from a phase capability key. If the
+selected clause explicitly names its rule, guard, or authoritative state, select among those terms
+by earliest defining occurrence, then earlier position, shorter span length, and lexical order.
+Otherwise concatenate its nonempty subject, result-or-failure (using predicate when the result is
+implicit), and horizon components in that order. Apply the ASCII-safe kebab transform above. Resolve
+collisions among product invariants, and with the fixed reserved
+`oxide-verification-policy` ID, by traversing the invariant-key components in the same fixed order,
+then its consumer keys. If components are exhausted, serialize the invariant key as a UTF-8 JSON
+array without whitespace, with NFC-normalized strings, and append its full lowercase SHA-256 digest; for
+an identical full digest, order by selected defining source key and append a 1-based ordinal. The
+policy ID never changes.
+
+Choose the invariant's establishing owner from the first nonempty class: phases that establish its
+named authoritative state or guard, its direct producers, then its consumers. Within that class
+choose the phase with the earliest canonical defining source key. Its `statement` is the decoded
+literal text of the selected self-contained clause. The invariant and exactly that establishing
+phase cite the defining authority; other consumers apply only its ID.
+
+## Direct dependencies
+
+Build dependencies from the requirement-level graph before phase prose. Phase B lists phase A only
+when the source explicitly requires A before B, or B cannot implement or satisfy its own
+source-defined acceptance contract without an artifact, state, decision, transition, or guarantee
+owned by A. For every candidate edge, record privately the exact producer output and consumer
+requirement that witness it.
+
+Project witnessed edges onto phases and collapse edges internal to a phase. Every explicit
+cross-owner source ordering must appear either as an internal disposition or as graph reachability.
+Retain an explicitly immediate relation; otherwise remove transitively implied edges. Shared
+vocabulary, storage, types, files, source order, proof or test order, likely implementation order,
+and readiness create no source edge. Policy application creates no edge except the one assurance-
+carrier rule under Verification policy. Research gates production only when the source requires
+production to await and consume its result. If witnessed edges form a cycle, merge one indivisible
+contract when the decomposition rules permit it; otherwise report the graph-shaping source decision
+in top-level `unresolved`. Dependency completion controls execution eligibility, never another
+phase's semantic readiness.
+
+## Canonical stage-field projection
+
+After freezing structure and ownership, project each phase from its owned semantic keys. Preserve
+source nouns, predicates, modality, conditions, exceptions, failures, bounds, and horizon. Within
+every array, order items by their first supporting canonical semantic key unless the source mandates
+a different logical order. For multiple clauses supported by the same key, use this fixed order:
+result, condition, exception, failure, bound, horizon. Prose style, verification method, readiness,
+and field population never change ownership, IDs, or ordering.
+
+Define the phase label once: use its selected explicit capability term; otherwise use the first
+nonempty component in subject, result-or-failure, horizon order from the owned semantic key with the
+earliest canonical defining source key. If every such component is empty, the label is empty. Copy
+the selected source value exactly; never invent a label.
+
+- `outcome`: state the phase's accepted result with `[<phase label>: ]<subject> <modality>
+  <predicate> <result> [conditions] [exceptions] [failures] [bounds] [horizon]`, omitting absent
+  components and emitting the bracketed label and colon only when the phase label is nonempty. Join
+  multiple material result clauses with `; ` in canonical order. For a study or decision, the
+  result is its source-defined report, artifact, or decision. For a blocked contract with no
+  authorized result, use `[<phase label>: ]resolve <named missing observable result>` with the same
+  label rule and without guessing the resolution.
+- `included_scope`: for each owned indivisible product contract, use `[<subject>: ]<modality>
+  <predicate> <result> [conditions] [exceptions] [failures] [bounds] [horizon]`, omitting only absent
+  components, omitting the subject and colon together when subject is absent, and combining
+  governing modifiers in the fixed order above. This is the visible product disposition. Do not use
+  a citation, an implementation action, or an assurance method as a substitute.
+- `excluded_scope`: include only explicit source non-goals owned by the phase. Use `Not in
+  <horizon>: <source non-goal>` when its horizon is nonempty; use `Excluded: <source non-goal>` for a
+  permanent non-goal or absent horizon. Render in canonical source order. Cross-phase ownership is
+  represented by the owning phase and dependency graph, not as an invented exclusion. Use `[]` when
+  the source defines no non-goal for the phase.
+- `implementation_goals`: project the work that establishes each included contract. Use `Establish
+  <subject/result> [under source constraints]`; for a study or decision use `Produce <accepted
+  artifact/result> [under source method constraints]`; for a blocked semantic choice use `Resolve
+  <named choice> and state <affected contract>`. Preserve source-authored implementation constraints
+  and never invent a product result or technique.
+- `verification_goals`: project evidence, not another product disposition. Use `Verify <owned
+  property> by <logical method> against <source model or oracle>` for logical behavior; when the
+  source names neither a model nor an oracle, use the fixed fallback `against the owned source
+  contract`. That fallback is policy-authorized assurance phrasing, not a product model or oracle.
+  Use `Qualify
+  <owned claim> by <empirical method> under <source conditions> against <source threshold, oracle,
+  or characterization result>` for empirical behavior. Emit source-mandated evidence in canonical
+  source order, followed by policy-authorized logical methods in contract, refinement, coverage,
+  exact-tree order; preserve a source-mandated method order and emit a distinct evidence obligation
+  only once when it also satisfies a policy method. A verification goal's reference to an owned
+  property identifies the evidence target and does not create duplicate ownership or a second
+  product disposition. Never invent an oracle, threshold, workload, or environment.
+  For a blocked missing contract with no authorized property, use `Verify approval and source trace
+  of <named missing decision>`; do not fabricate the missing property.
+
+For source scoping, recognize ATX headings only. An ATX opener has at most three leading spaces,
+one through six `#` characters, then whitespace or end of line. Strip an optional closing `#` run
+only when whitespace precedes it. Keep empty ATX headings in hierarchy and section boundaries; do
+not treat Setext syntax as a heading. Ignore every apparent heading inside a matching CommonMark-style
+fence: an opener indented at most three spaces with at least three backticks or tildes remains open
+until a closer with the same character, at least the opener's length, and at most three leading
+spaces.
+
+An ATX heading's canonical semantic title removes its opener and valid closer and removes cosmetic
+Markdown presentation while preserving semantic words, punctuation, and code. Thus `# C#` remains
+`C#`, `# C #` becomes `C`, and `## **Rules**` becomes `Rules`.
+
+Compute that canonical semantic title exactly once from the scanner-extracted displayed title,
+including Unicode NFC normalization, then treat the result as opaque canonical identity. Never feed
+it back through ATX parsing, Markdown presentation removal, entity decoding, or backslash unescaping.
+Canonical identities such as `# Rules`, `#`, `&amp;`, and strings containing `\` retain those
+characters exactly. An ordinary anchor copies that identity verbatim; a lineage title segment
+percent-encodes that same NFC identity verbatim without another semantic projection. Exact ordinary
+canonical identity wins. Any legacy ATX, emphasis, or entity projection accepted by the runtime is
+a compatibility fallback only and is never planner output.
 
 Every source record must obey all of these rules:
 
 - `path`: exact relative manifest path, never ROADMAP.md or the Oxide policy.
-- `anchor`: complete displayed title of the containing heading, minus its Markdown marker and with
-  numbering, case, punctuation, and wording unchanged. The normalized anchor title must occur
-  exactly once in that file; for a repeated title use the nearest containing ancestor whose title
-  occurs exactly once.
-- `requirement`: literal contiguous source span supporting one atomic obligation. Preserve words,
-  punctuation, links, code, modality, conditions, exceptions, and numbers. Never reconstruct prose
-  from list or table fragments, paraphrase, splice, cross headings, or use ellipses. When authority
-  is noncontiguous, emit separate records and keep the roadmap claim within their combined
-  entailment. Structured-response escaping is encoding only: the decoded value preserves the
+- `anchor`: the entire `oxide://` namespace is reserved and locator-first. A value in that namespace
+  must be one of the exact canonical forms below; an unknown, incomplete, malformed, noncanonical,
+  or whitespace-padded reserved value fails closed and never falls back to title lookup. Choose
+  exactly one canonical anchor for each indexed source node, in this order:
+  - `oxide://document` selects only bytes before the first ATX heading, or the whole file when it has
+    no ATX heading. Use it for that document-root node and never for a heading.
+  - For a heading whose nonempty canonical semantic title occurs exactly once in the file and is not
+    in the reserved `oxide://` namespace, use that canonical semantic title itself as the ordinary
+    anchor. For example, the unique heading `## **Rules**` uses `Rules`, not `**Rules**`.
+  - For a heading whose nonempty canonical semantic title occurs exactly once in the file but is in
+    the reserved `oxide://` namespace, use
+    `oxide://literal/<percent-encoded-complete-title>`. The decoded complete title must exactly equal
+    the indexed displayed ATX title; no Markdown or whitespace normalization is allowed during that
+    comparison. The indexed displayed title is obtained by removing the ATX opener and separator,
+    stripping a closing `#` run only when whitespace precedes it, and trimming only surrounding
+    spaces or tabs; retain the remaining bytes, including internal Markdown presentation, exactly.
+    The literal locator remains the canonical
+    citation identity. Thus the unique heading `oxide://document` uses
+    `oxide://literal/oxide%3A%2F%2Fdocument`, while the unique heading `**oxide://document**` uses
+    `oxide://literal/%2A%2Aoxide%3A%2F%2Fdocument%2A%2A`.
+  - For every heading with an empty canonical semantic title or a canonical semantic title that
+    occurs more than once in the file, use
+    `oxide://heading/<occurrence>/<percent-encoded-title>[/<occurrence>/<percent-encoded-title>...]`.
+    It selects the target ATX heading's conventional section extent. Its pairs are the full
+    root-to-target lineage. Each occurrence is canonical positive decimal without leading zeroes
+    and 1-based among sibling headings with the same canonical semantic title. Each title segment
+    is that canonical semantic title, not its displayed Markdown. An empty title is an empty segment:
+    `oxide://heading/1/` addresses a root empty ATX heading, and a nested empty title can end a
+    lineage such as `oxide://heading/1/Parent/1/`.
+  Encode a URI title as one canonical UTF-8 URL path segment: leave only ASCII letters, digits, `-`,
+  `.`, `_`, and `~` unescaped and encode every other byte as uppercase `%HH`, including spaces, `/`,
+  `%`, and `#`. Emit the canonical URI directly; do not rely on runtime rewriting. A lineage segment
+  for `# C#` therefore uses `C%23`, while a lineage segment for `## **Rules**` uses `Rules`, not
+  `%2A%2ARules%2A%2A`.
+  These forms are exclusive: never use a lineage or literal locator for an ordinary unique heading;
+  never use an ordinary anchor for a repeated, empty, or reserved-title heading; never use a literal
+  locator for a repeated or empty heading; and never emit `oxide://literal/`. A runtime may accept
+  or migrate a schema-1 legacy anchor only for compatibility. In particular, requirement-aware
+  migration may interpret legacy `C` or `F` as the trailing-hash heading `C#` or `F#` and normalize
+  the closure identity accordingly; the planner always emits `C#` or `F#`, never those aliases. It
+  always emits the canonical form above, including a qualified lineage for a repeated title even
+  when no ancestor is unique.
+- `requirement`: literal contiguous source span supporting its assigned premise of one atomic
+  obligation. Preserve words, punctuation, links, code, modality, conditions, exceptions, and
+  numbers. Never reconstruct prose from list or table fragments, paraphrase, splice, cross headings,
+  or use ellipses. Structured-response escaping is encoding only: the decoded value preserves the
   selected source text.
 - A quotation supports only what it entails; distinct source authority gets a separate record.
 
-Before emitting each source record, isolate its heading scope, select the span, and verify canonical
-containment in that scope after structured-response encoding. Repair failures; never emit a
-best-effort paraphrase. When one cohesive contiguous span supports several obligations owned by the
-same phase, cite its smallest enclosing span once rather than splitting or repeating it.
+For a requirement with contiguous authority, enumerate the literal spans inside its selected
+document or heading scope that fully entail it. For an indivisible composite with noncontiguous
+authority, first enumerate its required premises in source-defined logical order, or canonical
+source order when no logical order is stated, then select one handle independently for each premise.
+Retain that premise mapping privately and emit the selected handles in canonical source-record
+order. Every handle must entail its assigned premise; no individual handle must entail the whole
+composite. The emitted ordered handle set must collectively entail the indivisible composite
+without importing an unstated bridge. Do not split that composite's ownership or roadmap
+disposition merely because its handles are noncontiguous.
+
+For every handle selection, rank sufficient literal spans by shorter span length, then earlier
+position, then lexical order. These are citation-identity tie-breaks, not output-size criteria.
+Select independently for different premises
+and requirements; coalesce records only when the same chosen indivisible handle supports premises
+owned by the same phase.
+
+Before emitting each source record, resolve its exact path and resolve its anchor to exactly one
+allowed document or heading scope using the locator-first grammar above. Confirm its decoded
+requirement is an exact contiguous substring wholly inside that scope and contains no heading line,
+and confirm that it entails its assigned premise. For noncontiguous authority, also confirm that the
+ordered handle set collectively entails the composite. Repair failures; never emit a best-effort
+citation. Keep `path`, `anchor`, and `requirement` from one frozen handle through deduplication and
+ownership assignment.
 
 Citation fidelity is semantic, not typographic: ignore soft wrapping, cosmetic indentation widths,
 heading-marker spelling, unordered-list glyph spelling, emphasis, comments, and table-rule styling.
@@ -134,21 +417,32 @@ differences in authority, modality, condition, exception, precedence, or meaning
 
 ## Readiness
 
-Roadmap status and phase readiness differ. `status = "ready"` means the complete faithful plan is
-approval-ready, even with planned/deferred phases; otherwise use `draft`. Phase readiness describes
-only the contractibility of that phase's source-defined semantics. It never reports whether code,
-proofs, checks, dependencies, or research have been completed. A dependency's readiness never
-changes a dependent phase's readiness; dependency completion controls later execution eligibility.
+Roadmap status and phase readiness answer different questions. Classify readiness only after
+capability clustering and eligible local gap isolation, using the phase's own source semantics:
 
-Use `ready` when the phase's own behavior, material inputs/outputs/errors/bounds, and
-source-entailed acceptance intent are precise enough to generate a contract. Use `planned` for a
-named local semantic decision or elaboration, `deferred` when the source postpones the capability,
-and `blocked` for a local contradiction or missing required product semantics. Isolate and name the
-smallest missing obligation in that phase's scope or goals. Unknown implementation detail, proof
-difficulty, empirical work, or an incomplete prerequisite alone does not prevent local readiness
-or approval of an otherwise complete roadmap.
+- `blocked`: a currently mandatory observable contract is contradictory or cannot be stated even as
+  an abstract relation, nondeterministic result set, or explicit precondition.
+- `deferred`: the source explicitly postpones the coherent capability or horizon.
+- `planned`: the source authorizes a bounded future decision, elaboration, or result whose work
+  product is not yet contractible and does not require a completed current product contract.
+- `ready`: the phase's behavior and material inputs, outputs, failures, relations, conditions, and
+  bounds are precise enough to state an abstract contract.
 
-`ready_for_approval` is true exactly when `status = "ready"` and `unresolved` is empty.
+A requested study is `ready` when its question, required inputs, procedure constraints, evidence
+artifact, or report contract is precise enough to perform even though its finding is unknown. A
+missing initializer, ownership derivation, representation, algorithm, implementation, proof,
+checker, test procedure, experiment result, dependency, or prerequisite completion does not reduce
+readiness unless the source makes the missing choice part of observable product semantics. Never
+propagate readiness through the graph.
+
+Use roadmap `status = "ready"` when the complete faithful plan is mechanically valid and
+approval-ready, even with faithfully localized planned, deferred, or blocked phases. Use `draft`
+when the roadmap is incomplete, unsupported, invalid, or needs a top-level unresolved decision
+before a faithful decomposition or graph can be represented. `ready_for_approval` is true exactly
+when `status = "ready"` and `unresolved` is empty. `complete_specification_corpus` reports only that
+every manifest source was processed; `faithful_to_specifications` reports that every product claim
+is authorized and every material obligation, gap, contradiction, horizon, and exclusion is
+represented without invention.
 
 ## Verification policy
 
@@ -156,30 +450,73 @@ Policy profile {{ policy_profile_json }} with digest {{ policy_digest_json }} ap
 phase. Use exactly one source-free universal invariant:
 
 - id: `oxide-verification-policy`
-- statement: `Production logic has meaningful contracts, component refinement, complete coverage,
-  and exact-tree composition; trusted effects remain narrow and policy-free.`
+- statement: `Production logic has meaningful contracts, component refinement, complete coverage, and exact-tree composition; trusted effects remain narrow and policy-free.`
 
-Attach it to every phase as a fail-closed guard for coverage, trust, and exact-tree assurance; this
-universal attachment does not turn empirical claims into formal theorems. Source-trace every
-product invariant. Give logical production work meaningful proof/refinement goals, and give
-empirical, research, or tooling phases source-backed experiment and qualification goals rather than
-fake proofs. Never claim Verus proves performance.
+Give it `sources = []` and attach it exactly once to every phase as a fail-closed guard for coverage,
+trust, refinement, and exact-tree assurance. This universal attachment creates no product behavior,
+ownership, phase, or empirical theorem. Source-trace every product invariant.
+
+For this policy projection, a phase is logical-production when at least one owned semantic key
+establishes a deterministic pure or authoritative input-to-result relation, or an ownership,
+concurrency, effect, persistence, or recovery transition. A phase is evidence-only when no such key
+exists and every owned accepted result is solely a study, report, proof, checker, measurement, or
+qualification artifact that creates no product behavior. A remaining empirical, environmental, or
+tooling-production phase is neither; if a phase meets the logical-production predicate as well, it
+is logical-production.
+
+After projecting the source-only dependency graph, if there are no logical-production phases,
+select no foundation owner, add no assurance-only edge, and add no unresolved item for a production
+foundation. Otherwise select the foundation owner as the lexicographically smallest ID among
+zero-indegree logical-production phases whose abstract input/result contract is coherent and not
+blocked. If every zero-indegree logical-production phase is blocked, select no executable foundation
+owner or assurance-only edge yet: keep those semantic blocks local and add no top-level unresolved
+item, because their execution ineligibility already prevents implementation from proliferating. Add
+policy-authorized verification goals to a selected owner
+for a pinned verification context, the public abstract model and proof conventions, and one real
+representative proof. Then add the foundation owner's ID to `dependencies` of every other
+logical-production phase as an assurance-only prerequisite. This is the sole policy-authorized edge
+and never changes product semantics, requirement ownership, or the source-only graph witnesses.
+Retain this direct assurance edge even when the source-only graph already provides reachability;
+source-edge transitive reduction occurs before this policy overlay.
+
+In every logical-production phase, require before broad implementation at least one real
+representative proof that exercises every category present there among pure authoritative logic,
+ownership, concurrency, effects, persistence, and recovery. Cover every applicable phase and
+present category; never choose a subjective “hardest” subset. Give all logical-production work
+behavior-specific contract, refinement, coverage, and exact-tree composition goals. Give empirical,
+environmental, research, or tooling work
+source-backed experiment and qualification goals that preserve every specified workload, fault,
+environment, threshold, oracle, and result field. Never claim Verus or another formal system proves
+performance or environmental behavior.
 
 {% if maintenance_mode %}
 ## Maintenance mode
 
-The approved ROADMAP.md is immutable except for this change to {{ maintenance_phase_ids_json }}:
+The approved ROADMAP.md may change only within {{ maintenance_phase_ids_json }}:
 
 {{ maintenance_request }}
 
-Preserve order, IDs, top-level fields, invariants, and unselected phases value-for-value. Do not add,
-remove, rename, reorder, or opportunistically rewrite phases. Report absent semantics as a gap and
-return the complete roadmap.
+The approved baseline structure is frozen. Preserve order, IDs, top-level fields, global invariants,
+and every unselected phase value-for-value. Do not add, remove, rename, or reorder phases. This
+preservation rule overrides every new-plan clustering, ID, stage ordering, invariant-selection,
+field-projection, recomputation, and canonicalization rule above.
+
+Apply the ledger, source-handle, recomputation, and final-audit rules only to the authorized changes
+inside the selected phase IDs. Recompute only selected phase fields and references stored in those
+selected phases that the request necessarily changes; never repair, normalize, or opportunistically
+rewrite an unselected phase or frozen top-level value. Audit frozen values by exact equality with the
+approved baseline. If the request requires a structural or unselected change, report that absent
+authority as a gap rather than making the change. If no faithful authorized selected-phase change
+exists, return the exact baseline roadmap value-for-value, including its `ready` status; set
+`ready_for_approval = false` and return a nonempty `unresolved` naming the unavailable authority.
+Never change the unchanged baseline's status to `draft`. This maintenance rule overrides the generic
+status rule above: the unchanged refusal is faithful and reviewable but is not approvable because it
+contains no selected-phase change. Return the complete roadmap.
 {% endif %}
 
 ## Response envelope
 
-Return six separate JSON fields: a concise user-facing `message`; booleans
+Return six separate JSON fields: a user-facing `message`; booleans
 `ready_for_approval`, `complete_specification_corpus`, and `faithful_to_specifications`;
 `unresolved` as concrete source decisions; and `roadmap` as the complete structured roadmap value.
 Oxide validates that value and deterministically generates the human-readable `ROADMAP.md`; do not
@@ -187,27 +524,47 @@ write Markdown or TOML inside the response.
 
 The roadmap has exactly `schema`, `title`, `status`, `specification_root`, `global_invariants`, and
 `stages`. Use integer schema `1`, title `Roadmap` for a new plan, and status `draft` or `ready`.
-Maintenance preserves the approved title. Each global invariant has exactly `id`, `statement`, and
-`sources`. Each source has exactly `path`, `anchor`, and `requirement`. Each stage has exactly
-`id`, `outcome`, `included_scope`, `excluded_scope`,
-`dependencies`, `source_specifications`, `applicable_global_invariants`, `implementation_goals`,
-`verification_goals`, and `readiness`. Add no priority, rationale, notes, or acceptance field. Use
-explicit empty arrays, unique IDs, and only `planned`, `ready`, `deferred`, or `blocked` readiness.
-For every stage, `included_scope`, `implementation_goals`, `verification_goals`, and
-`source_specifications` must each be nonempty. The structured-output schema enforces the shape;
-source authority still governs every value except the mandated verification-policy invariant.
+Set `specification_root` to {{ specification_directory_json }}. Maintenance preserves the approved
+title. Each global invariant has exactly `id`, `statement`, and `sources`. Each source has exactly
+`path`, `anchor`, and `requirement`. Each stage has exactly `id`, `outcome`, `included_scope`,
+`excluded_scope`, `dependencies`, `source_specifications`, `applicable_global_invariants`,
+`implementation_goals`, `verification_goals`, and `readiness`. Add no priority, rationale, notes, or
+acceptance field. Use unique IDs and only `planned`, `ready`, `deferred`, or `blocked` readiness.
+
+Within `roadmap`, the only arrays permitted to be empty are a phase's `excluded_scope` and
+`dependencies` and the `oxide-verification-policy` invariant's `sources`. Emit `[]` for an allowed
+empty field; policy `sources` must always be `[]`. `global_invariants` and `stages` must be nonempty;
+every non-policy invariant's `sources` must be nonempty; and every phase's
+`included_scope`, `source_specifications`, `applicable_global_invariants`, `implementation_goals`,
+and `verification_goals` must be nonempty. `unresolved` is outside `roadmap` and may be empty; it
+must be empty when `ready_for_approval` is true. Each phase applies `oxide-verification-policy`
+exactly once plus only the source-backed product invariants that constrain it.
+
+The structured-output schema enforces shape. Specifications govern every product-semantic value.
+The Oxide policy authorizes only the mandated invariant and its application plus assurance content
+in verification goals; those goals may target source-defined properties but never supply a product
+result, threshold, exception, workload, environment, or oracle absent from the specifications.
 
 Before returning, perform exactly this focused audit and repair failures privately:
 
-1. The roadmap value contains exactly the required fields and enum values.
-2. Every distinct material semantic requirement has one visible phase disposition, and every
-   roadmap product claim has source authority.
-3. Every citation resolves under canonical Markdown semantics, and exact semantic duplicates are
-   not emitted.
-4. IDs and references resolve; dependencies are direct and acyclic; phase readiness matches its
-   semantic closure.
-5. Approval booleans, unresolved decisions, verification-policy application, and roadmap status
-   agree.
+1. Shape: the response and roadmap contain exactly the required fields, types, enum values, array
+   cardinalities, `specification_root`, and resolvable references.
+2. Bijection: every material semantic key has exactly one owner and visible disposition; every
+   product claim has source authority; citations alone do not count as disposition.
+3. Stability: recomputed phase signatures, IDs, order, ownership, readiness, direct dependencies,
+   invariant placement, and narrative order match the deterministic rules without using draft prose
+   or structural size.
+4. Citations and graph: every frozen source handle has one exact ordinary, document, qualified, or
+   literal anchor resolution, every reserved locator is canonical, and every malformed reserved
+   value fails closed; each handle passes contiguous scope containment and entails its assigned
+   premise; every ordered noncontiguous handle set collectively entails its composite. Every source
+   edge has a direct producer/consumer witness, required source order is reachable, and implied
+   source edges are removed. Assurance-only edges exactly equal the foundation-owner-to-other-
+   logical-production set and remain direct despite source reachability. The combined graph is
+   acyclic.
+5. Assurance and approval: behavior-specific verification goals, the one universal policy
+   invariant, source-backed product invariants, local readiness, top-level unresolved decisions,
+   booleans, and roadmap status agree.
 
 Do not edit files yourself.
 

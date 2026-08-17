@@ -287,6 +287,7 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     (tmp_path / "ROADMAP.md").write_text("WITHHELD EVALUATION LABEL\n", encoding="utf-8")
 
     prompt = _plan_prompt(repository, "docs/specs")
+    normalized_prompt = " ".join(prompt.split())
 
     assert SPEC in prompt
     assert "Measure recovery latency." in prompt
@@ -294,22 +295,211 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert '"path":"docs/specs/RESEARCH.md"' in prompt
     assert "WITHHELD EVALUATION LABEL" not in prompt
     assert "Do not use shell, file, Git,\nnetwork, or other tools to reread it" in prompt
+    assert "Specifications alone authorize product behavior" in prompt
+    assert "policy authorizes the mandated universal invariant" in normalized_prompt
     assert "Stage 0 through Stage 3" not in prompt
-    assert "Never assume a particular stage count" in prompt
+    assert (
+        "Faithfulness, coverage, and structural determinism are quality criteria. Compactness, "
+        "concision, output size, phase count, and list length are not quality inputs."
+        in normalized_prompt
+    )
+    assert (
+        "desired narrative flow, and structural size are never boundary inputs" in normalized_prompt
+    )
     assert "complete source-defined horizon" in prompt
     assert "planned, deferred, or blocked phase" in prompt
     assert "Perform a second coverage pass over every source heading" in prompt
-    assert "normalized title's per-file\n   occurrence count" in prompt
-    assert "explicit source-defined capability or deliverable" in prompt
+    assert "per-file title counts, full root-to-target lineage" in normalized_prompt
+    assert "canonical source key consisting of its relative manifest path" in normalized_prompt
+    assert "zero-based `[start, end)` Unicode-scalar offsets" in normalized_prompt
+    assert "span length is its number of Unicode scalar values" in normalized_prompt
+    assert "position is its canonical source key" in normalized_prompt
+    assert "compare lexical values by Unicode code-point order" in normalized_prompt
+    assert "semantic tokens" not in normalized_prompt
+    assert "source tokens" not in normalized_prompt
+    assert "semantic position" not in normalized_prompt
+    assert "canonical semantic key" in prompt
+    assert "without using gaps or readiness" in prompt
+    assert "Derive a capability key for every requirement before grouping" in normalized_prompt
+    assert (
+        "`(subject, result-or-failure, horizon)` from the canonical semantic key"
+        in normalized_prompt
+    )
+    assert "If the source leaves both predicates ambiguous" in normalized_prompt
+    assert "keep equal capability keys together and different keys separate" in normalized_prompt
+    assert "A phase signature is the sorted set" in prompt
+    assert "sorted semantic-key component arrays plus horizon" in normalized_prompt
+    assert "nearest source-written qualifier" not in normalized_prompt
+    assert "total ASCII-safe transform" in normalized_prompt
+    assert (
+        "every other Unicode scalar to its own `u<lowercase-hex-scalar>` segment"
+        in normalized_prompt
+    )
+    assert "If trimming would produce an empty component" in normalized_prompt
+    assert "including whitespace and separators" in normalized_prompt
+    assert "traverse each phase's owned semantic keys" in normalized_prompt
+    assert "form that phase's finite qualifier sequence" in normalized_prompt
+    assert "In round `n`, append qualifier `n`" in normalized_prompt
+    assert "full lowercase SHA-256 hex digest" in normalized_prompt
+    assert "digest-collision case is the sole permitted ordinal exception" in normalized_prompt
+    assert "prose never rename an unchanged phase signature" in normalized_prompt
+    assert "boundary is source-identifiable" in normalized_prompt
+    assert "unaffected remainder is a complete, coherent, reachable" in normalized_prompt
+    assert "no condition, exception, bound, authority, evidence" in normalized_prompt
+    assert "isolated subset need not be semantically coherent" in normalized_prompt
+    assert "one boundary-coherent affected contract" in normalized_prompt
+    assert (
+        "every requirement in the subset shares one source-defined acceptance boundary"
+        in normalized_prompt
+    )
+    assert "it does not mean the claims agree" in normalized_prompt
+    assert "every side and premise of a contradiction" in normalized_prompt
     assert "externally observable behavior\nfor a source-mandated input" in prompt
-    assert "source defines an accepted artifact" in prompt
-    assert "do not become production\n  dependencies" in prompt
-    assert "at least two production phase contracts consume it" in prompt
-    assert "must each be nonempty" in prompt
+    assert "A prerequisite or ordering clause belongs to its consumer" in prompt
+    assert "at least two independently source-defined production contracts" in normalized_prompt
+    assert "Freeze each promoted invariant's semantic key" in normalized_prompt
+    assert (
+        "product-invariant ID from that invariant key, never from a phase capability key"
+        in normalized_prompt
+    )
+    assert "Resolve collisions among product invariants" in normalized_prompt
+    assert (
+        "serialize the invariant key as a UTF-8 JSON array without whitespace" in normalized_prompt
+    )
+    assert "order by selected defining source key" in normalized_prompt
+    assert "`statement` is the decoded literal text" in normalized_prompt
+    assert "exact producer output and consumer requirement that witness it" in normalized_prompt
+    assert "readiness create no source edge" in normalized_prompt
+    assert "Policy application creates no edge except" in normalized_prompt
+    assert "Classify readiness only after capability clustering" in normalized_prompt
+    assert "Never propagate readiness through the graph" in normalized_prompt
+    assert "Every handle must entail its assigned premise" in normalized_prompt
+    assert "no individual handle must entail the whole composite" in normalized_prompt
+    assert (
+        "ordered handle set must collectively entail the indivisible composite" in normalized_prompt
+    )
+    assert "For each atomic requirement, enumerate the literal spans" not in normalized_prompt
+    assert "exact contiguous substring wholly inside that scope" in normalized_prompt
+    assert "recognize ATX headings only" in normalized_prompt
+    assert "at most three leading spaces" in normalized_prompt
+    assert "one through six `#` characters, then whitespace or end of line" in normalized_prompt
+    assert "closing `#` run only when whitespace precedes it" in normalized_prompt
+    assert "Keep empty ATX headings in hierarchy and section boundaries" in normalized_prompt
+    assert "do not treat Setext syntax as a heading" in normalized_prompt
+    assert "inside a matching CommonMark-style fence" in normalized_prompt
+    assert "closer with the same character, at least the opener's length" in normalized_prompt
+    assert "`# C#` remains `C#`, `# C #` becomes `C`" in normalized_prompt
+    assert "canonical semantic title exactly once" in normalized_prompt
+    assert "including Unicode NFC normalization" in normalized_prompt
+    assert "treat the result as opaque canonical identity" in normalized_prompt
+    assert "Never feed it back through ATX parsing" in normalized_prompt
+    assert "entity decoding, or backslash unescaping" in normalized_prompt
+    assert r"`# Rules`, `#`, `&amp;`, and strings containing `\`" in prompt
+    assert "ordinary anchor copies that identity verbatim" in normalized_prompt
+    assert "same NFC identity verbatim without another semantic projection" in normalized_prompt
+    assert "Exact ordinary canonical identity wins" in normalized_prompt
+    assert "legacy ATX, emphasis, or entity projection" in normalized_prompt
+    assert "compatibility fallback only and is never planner output" in normalized_prompt
+    assert "entire `oxide://` namespace is reserved and locator-first" in normalized_prompt
+    assert "using the locator-first grammar above" in normalized_prompt
+    assert "ordinary-first grammar" not in prompt
+    assert (
+        "malformed, noncanonical, or whitespace-padded reserved value fails closed"
+        in normalized_prompt
+    )
+    assert "exactly one canonical anchor for each indexed source node" in normalized_prompt
+    assert "`oxide://document` selects only bytes before the first ATX heading" in normalized_prompt
+    assert "Use it for that document-root node and never for a heading" in normalized_prompt
+    assert (
+        "nonempty canonical semantic title occurs exactly once in the file and is not in the "
+        "reserved `oxide://` namespace" in normalized_prompt
+    )
+    assert "use that canonical semantic title itself as the ordinary anchor" in normalized_prompt
+    assert "unique heading `## **Rules**` uses `Rules`, not `**Rules**`" in normalized_prompt
+    assert (
+        "`oxide://heading/<occurrence>/<percent-encoded-title>"
+        "[/<occurrence>/<percent-encoded-title>...]`" in normalized_prompt
+    )
+    assert "full root-to-target lineage" in normalized_prompt
+    assert "canonical positive decimal without leading zeroes" in normalized_prompt
+    assert (
+        "1-based among sibling headings with the same canonical semantic title" in normalized_prompt
+    )
+    assert "Each title segment is that canonical semantic title" in normalized_prompt
+    assert "removes cosmetic Markdown presentation" in normalized_prompt
+    assert "preserving semantic words, punctuation, and code" in normalized_prompt
+    assert "`oxide://literal/<percent-encoded-complete-title>`" in prompt
+    assert (
+        "decoded complete title must exactly equal the indexed displayed ATX title"
+        in normalized_prompt
+    )
+    assert "no Markdown or whitespace normalization is allowed" in normalized_prompt
+    assert "trimming only surrounding spaces or tabs" in normalized_prompt
+    assert "including internal Markdown presentation, exactly" in normalized_prompt
+    assert "literal locator remains the canonical citation identity" in normalized_prompt
+    assert "`oxide://literal/oxide%3A%2F%2Fdocument`" in prompt
+    assert "`oxide://literal/%2A%2Aoxide%3A%2F%2Fdocument%2A%2A`" in prompt
+    assert "`oxide://heading/1/` addresses a root empty ATX heading" in normalized_prompt
+    assert "never emit `oxide://literal/`" in normalized_prompt
+    assert "literal locator for a repeated or empty heading" in normalized_prompt
+    assert (
+        "never use a lineage or literal locator for an ordinary unique heading" in normalized_prompt
+    )
+    assert (
+        "never use an ordinary anchor for a repeated, empty, or reserved-title heading"
+        in normalized_prompt
+    )
+    assert (
+        "runtime may accept or migrate a schema-1 legacy anchor only for compatibility"
+        in normalized_prompt
+    )
+    assert "requirement-aware migration may interpret legacy `C` or `F`" in normalized_prompt
+    assert "trailing-hash heading `C#` or `F#`" in normalized_prompt
+    assert "planner always emits `C#` or `F#`, never those aliases" in normalized_prompt
+    assert "always emits the canonical form above" in normalized_prompt
+    assert "Encode each complete displayed title" not in prompt
+    assert "encode every other byte as uppercase `%HH`" in normalized_prompt
+    assert "do not rely on runtime rewriting" in normalized_prompt
+    assert "`# C#` therefore uses `C%23`" in normalized_prompt
+    assert "`## **Rules**` uses `Rules`, not `%2A%2ARules%2A%2A`" in normalized_prompt
+    assert "even when no ancestor is unique" in normalized_prompt
+    assert "## Canonical stage-field projection" in prompt
+    assert "Define the phase label once" in normalized_prompt
+    assert (
+        "first nonempty component in subject, result-or-failure, horizon order" in normalized_prompt
+    )
+    assert "If every such component is empty, the label is empty" in normalized_prompt
+    assert "never invent a label" in normalized_prompt
+    assert "`outcome`: state the phase's accepted result" in normalized_prompt
+    assert "emitting the bracketed label and colon only when" in normalized_prompt
+    assert "`included_scope`: for each owned indivisible product contract" in normalized_prompt
+    assert "omitting the subject and colon together when subject is absent" in normalized_prompt
+    assert "`excluded_scope`: include only explicit source non-goals" in normalized_prompt
+    assert (
+        "`Excluded: <source non-goal>` for a permanent non-goal or absent horizon"
+        in normalized_prompt
+    )
+    assert "`implementation_goals`: project the work" in normalized_prompt
+    assert (
+        "`verification_goals`: project evidence, not another product disposition"
+        in normalized_prompt
+    )
+    assert "fixed fallback `against the owned source contract`" in normalized_prompt
+    assert (
+        "policy-authorized assurance phrasing, not a product model or oracle" in normalized_prompt
+    )
+    assert "Verify approval and source trace of <named missing decision>" in normalized_prompt
+    assert "do not fabricate the missing property" in normalized_prompt
+    assert (
+        "does not create duplicate ownership or a second product disposition" in normalized_prompt
+    )
+    assert "only arrays permitted to be empty" in normalized_prompt
+    assert "policy `sources` must always be `[]`" in normalized_prompt
+    assert "`global_invariants` and `stages` must be nonempty" in normalized_prompt
+    assert "every non-policy invariant's `sources` must be nonempty" in normalized_prompt
+    assert "`unresolved` is outside `roadmap` and may be empty" in normalized_prompt
+    assert "Use explicit empty arrays" not in prompt
     assert "standardized, human-readable projection" in prompt
-    assert "authored narrative lists" in prompt
-    assert "use one deterministic source or logical order" in " ".join(prompt.split())
-    assert "Oxide preserves that order" in prompt
     assert "canonicalizes phase and collection order" not in prompt
     assert "BEGIN OXIDE NORMATIVE VERIFICATION POLICY" in prompt
     assert POLICY_PROFILE in prompt
@@ -319,10 +509,46 @@ def test_plan_prompt_preloads_complete_frozen_corpus_without_repository_rereads(
     assert "docs/specs/VERIFICATION.md" not in prompt
     assert "`roadmap` as the complete structured roadmap value" in prompt
     assert "deterministically generates the human-readable `ROADMAP.md`" in prompt
+    assert 'Set `specification_root` to "docs/specs".' in prompt
     assert "applies to every\nphase" in prompt
-    assert "universal attachment does not turn empirical claims into formal theorems" in " ".join(
-        prompt.split()
+    policy_statement = (
+        "Production logic has meaningful contracts, component refinement, complete coverage, "
+        "and exact-tree composition; trusted effects remain narrow and policy-free."
     )
+    policy_lines = [
+        line for line in prompt.splitlines() if line.startswith("- statement: `Production logic")
+    ]
+    assert policy_lines == [f"- statement: `{policy_statement}`"]
+    assert "Give it `sources = []`" in prompt
+    assert "attach it exactly once to every phase" in normalized_prompt
+    assert "Specifications govern every product-semantic value" in normalized_prompt
+    assert "policy authorizes only the mandated invariant and its application" in normalized_prompt
+    assert (
+        "This universal attachment creates no product behavior, ownership, phase"
+        in normalized_prompt
+    )
+    assert "a phase is logical-production when" in normalized_prompt
+    assert "A phase is evidence-only when" in normalized_prompt
+    assert "smallest ID among zero-indegree logical-production phases" in normalized_prompt
+    assert "if there are no logical-production phases" in normalized_prompt
+    assert "add no assurance-only edge" in normalized_prompt
+    assert "If every zero-indegree logical-production phase is blocked" in normalized_prompt
+    assert "keep those semantic blocks local" in normalized_prompt
+    assert "pinned verification context" in normalized_prompt
+    assert "public abstract model and proof conventions" in normalized_prompt
+    assert "foundation owner's ID to `dependencies`" in normalized_prompt
+    assert "sole policy-authorized edge" in normalized_prompt
+    assert "Retain this direct assurance edge" in normalized_prompt
+    assert "source-edge transitive reduction occurs before this policy overlay" in normalized_prompt
+    assert "Every source edge has a direct producer/consumer witness" in normalized_prompt
+    assert "Assurance-only edges exactly equal" in normalized_prompt
+    assert (
+        "require before broad implementation at least one real representative proof"
+        in normalized_prompt
+    )
+    assert "exercises every category present there" in normalized_prompt
+    assert "Cover every applicable phase and present category" in normalized_prompt
+    assert "never choose a subjective “hardest” subset" in normalized_prompt
     assert "roadmap_markdown" not in prompt
     assert "fenced `toml`" not in prompt
 
@@ -370,6 +596,18 @@ def test_planning_prompt_template_injects_maintenance_values(tmp_path: Path) -> 
     assert "## Maintenance mode" in prompt
     assert '["stage-1"]' in prompt
     assert "Promote semantic search after its dependency is ready." in prompt
+    normalized_prompt = " ".join(prompt.split())
+    assert "approved baseline structure is frozen" in normalized_prompt
+    assert "preservation rule overrides every new-plan clustering" in normalized_prompt
+    assert "only to the authorized changes inside the selected phase IDs" in normalized_prompt
+    assert "Audit frozen values by exact equality with the approved baseline" in normalized_prompt
+    assert "return the exact baseline roadmap value-for-value" in normalized_prompt
+    assert "including its `ready` status" in normalized_prompt
+    assert "`ready_for_approval = false`" in normalized_prompt
+    assert "return a nonempty `unresolved`" in normalized_prompt
+    assert "Never change the unchanged baseline's status to `draft`" in normalized_prompt
+    assert "maintenance rule overrides the generic status rule" in normalized_prompt
+    assert "contains no selected-phase change" in normalized_prompt
 
 
 def test_packaged_prompt_templates_fail_closed_on_missing_values() -> None:
@@ -860,6 +1098,34 @@ def test_plan_maintenance_changes_only_the_selected_phase(tmp_path: Path) -> Non
     ]
     assert any("stage-1: readiness" in item for item in user.transcript)
     assert any("no dependent phase approvals invalidated" in item for item in user.transcript)
+
+
+def test_plan_maintenance_can_report_an_out_of_scope_request_without_repair(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    _approved_plan(repository)
+    unchanged = _plan_response(_roadmap(), ready=False)
+    unchanged["unresolved"] = ["The request requires changing an unselected phase."]
+    promoted = _roadmap().replace('readiness = "planned"', 'readiness = "ready"', 1)
+    user = ScriptedUser(
+        [
+            "Change an unselected phase.",
+            "Use a source-authorized selected-phase change.",
+            "/approve",
+        ]
+    )
+
+    run_plan_session(
+        repository / "docs" / "specs",
+        agent=ScriptedAgent([unchanged, _plan_response(promoted)]),
+        user=user,
+        user_identity={"name": "Test User", "email": "test@example.com"},
+        update_stage_ids=["stage-1"],
+    )
+
+    assert any("no selected phase fields changed" in item for item in user.transcript)
+    assert not any("asking it to repair" in item for item in user.transcript)
 
 
 def test_plan_maintenance_rejects_unselected_phase_changes(tmp_path: Path) -> None:
