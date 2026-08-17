@@ -13,7 +13,7 @@ sources = []
 id = "queue-core"
 outcome = "Jobs can be claimed in FIFO order with exclusive ownership."
 included_scope = ["FIFO dequeue", "Exclusive unacknowledged ownership"]
-excluded_scope = ["Crash recovery", "Retries"]
+excluded_scope = ["Crash recovery", "Retry policy"]
 dependencies = []
 source_specifications = [
   { path = "eval/examples/retry-queue/base/specs/PRODUCT.md", anchor = "Queue operations", requirement = "Jobs are dequeued in first-in, first-out order." },
@@ -26,16 +26,29 @@ readiness = "ready"
 
 [[stages]]
 id = "queue-recovery"
-outcome = "Crashed work is recovered and failed jobs terminate under the retry policy."
-included_scope = ["Crash recovery", "Three-attempt retry limit", "Dead-letter disposition"]
-excluded_scope = []
+outcome = "Crashed work becomes claimable again."
+included_scope = ["Crash recovery"]
+excluded_scope = ["Unspecified retry policy"]
 dependencies = ["queue-core"]
 source_specifications = [
   { path = "eval/examples/retry-queue/base/specs/PRODUCT.md", anchor = "Recovery", requirement = "After a worker crash, its unacknowledged job becomes available again during recovery." },
+]
+applicable_global_invariants = ["oxide-verification-policy"]
+implementation_goals = ["Implement recovery of unacknowledged work."]
+verification_goals = ["Prove recovery preserves exclusive ownership."]
+readiness = "ready"
+
+[[stages]]
+id = "retry-policy"
+outcome = "Failed jobs are attempted at most three times and then moved to a dead-letter queue."
+included_scope = ["Three-attempt retry limit", "Dead-letter disposition"]
+excluded_scope = []
+dependencies = ["queue-core"]
+source_specifications = [
   { path = "eval/examples/retry-queue/base/specs/PRODUCT.md", anchor = "Retry policy", requirement = "A failed job is attempted at most three times and is then moved to a dead-letter queue." },
 ]
 applicable_global_invariants = ["oxide-verification-policy"]
-implementation_goals = ["Implement recovery and the bounded retry transition."]
-verification_goals = ["Prove recovery preserves ownership and retry attempts cannot exceed three."]
+implementation_goals = ["Implement the bounded retry and dead-letter transition."]
+verification_goals = ["Prove retry attempts cannot exceed three before dead-letter disposition."]
 readiness = "ready"
 ```

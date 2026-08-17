@@ -53,18 +53,31 @@ verification_goals = ["Prove authorization is evaluated in the referenced causal
 readiness = "ready"
 
 [[stages]]
+id = "concurrent-insertion-precedence"
+outcome = "Concurrent same-gap insertions follow descending canonical group-dot order and then ascending member-local scalar offset."
+included_scope = ["Canonical concurrent same-gap insertion precedence"]
+excluded_scope = ["Other document materialization", "Peer exchange", "Snapshots"]
+dependencies = ["formal-foundations", "authorization-and-admission"]
+source_specifications = [
+  { path = "eval/examples/collaborative-document/base/specs/PRODUCT.md", anchor = "Concurrent text insertion", requirement = "Concurrent insertions into the same stable gap are ordered by descending canonical group-dot order and then ascending member-local scalar offset." },
+]
+applicable_global_invariants = ["oxide-verification-policy", "convergent-authority"]
+implementation_goals = ["Implement the source-defined concurrent insertion precedence."]
+verification_goals = ["Prove the total same-gap insertion order follows the canonical group-dot and scalar-offset keys."]
+readiness = "ready"
+
+[[stages]]
 id = "convergent-document-core"
 outcome = "Text, tree, move, deletion, and attribute operations materialize to one canonical document for every equal admitted set."
 included_scope = ["Stable text gaps", "Tree insertion and tombstones", "Acyclic concurrent moves", "Attribute conflicts", "Canonical materialization"]
 excluded_scope = ["Peer exchange", "Snapshots", "Rendering"]
-dependencies = ["formal-foundations", "authorization-and-admission"]
+dependencies = ["formal-foundations", "authorization-and-admission", "concurrent-insertion-precedence"]
 source_specifications = [
-  { path = "eval/examples/collaborative-document/base/specs/PRODUCT.md", anchor = "Concurrent text insertion", requirement = "Concurrent insertions into the same stable gap are ordered by descending canonical group-dot order and then ascending member-local scalar offset." },
   { path = "eval/examples/collaborative-document/base/specs/PRODUCT.md", anchor = "Strong convergence", requirement = "Any two qualified replicas with identical admitted-group sets and identical schema catalogs return identical canonical materialized bytes." },
 ]
 applicable_global_invariants = ["oxide-verification-policy", "convergent-authority"]
 implementation_goals = ["Implement pure and incremental sequence, tombstone, move, and attribute algorithms with one canonical materializer."]
-verification_goals = ["Prove permutation-independent gap order, deletion monotonicity, move-selection termination and acyclicity, attribute maximality, and kernel-wide materialization convergence."]
+verification_goals = ["Prove deletion monotonicity, move-selection termination and acyclicity, attribute maximality, and kernel-wide materialization convergence."]
 readiness = "ready"
 
 [[stages]]

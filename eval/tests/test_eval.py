@@ -25,6 +25,9 @@ from eval.scoring import (
     JUDGE_WEIGHT,
     METAMORPHIC_WEIGHT,
     EvaluationHarness,
+    _localized_structure_score,
+    _reference_supports_requirement,
+    _relative_source_identity,
     _repeat_consistency,
     _source_identity,
     evaluate_scenario,
@@ -330,6 +333,35 @@ def test_source_identity_ignores_only_cosmetic_markdown_presentation() -> None:
     )
 
 
+def test_parsed_source_identity_preserves_one_pass_canonical_values() -> None:
+    reference = {
+        "path": "docs/specs/PRODUCT.md",
+        "anchor": "&amp;",
+        "requirement": "AT&amp;amp;T must remain supported.",
+    }
+
+    assert _source_identity(reference, anchor_is_canonical=True) == (
+        "docs/specs/PRODUCT.md",
+        "&amp;",
+        "AT&amp;T must remain supported.",
+    )
+    assert _source_identity(reference, anchor_is_canonical=True) != _source_identity(
+        {**reference, "anchor": "&"}, anchor_is_canonical=True
+    )
+    assert _source_identity(reference, anchor_is_canonical=True) != _source_identity(
+        {**reference, "requirement": "AT&amp;T must remain supported."},
+        anchor_is_canonical=True,
+    )
+    assert _reference_supports_requirement(
+        reference,
+        SimpleNamespace(
+            path="docs/specs/PRODUCT.md",
+            anchor="&amp;amp;",
+            text="AT&amp;amp;T must remain supported.",
+        ),
+    )
+
+
 def test_cosmetic_source_formatting_does_not_create_repeat_run_drift() -> None:
     seed = SEED_PATH.read_text(encoding="utf-8")
     case = next(item for item in load_cases() if item.identifier == "durable-counter")
@@ -341,7 +373,6 @@ def test_cosmetic_source_formatting_does_not_create_repeat_run_drift() -> None:
         for item in repeated_roadmap["stages"][0]["source_specifications"]
         if item["anchor"] == "Updates" and item["requirement"].startswith("A client may add")
     )
-    source["anchor"] = "## Updates ##"
     source["requirement"] = "A client may add a signed 64-bit delta\nto a named counter."
     repetition = replace(baseline, roadmap=repeated_roadmap)
 
@@ -681,6 +712,470 @@ def test_variant_localizes_ambiguity_without_propagating_readiness() -> None:
     assert report.variant.requirement_readiness["claim-winner"] == ("blocked",)
     assert report.variant.requirement_readiness["semantic-nonauthority"] == ("ready",)
     assert report.metamorphic_score == 1.0
+
+
+def test_localized_block_allows_affected_phase_split_and_rename() -> None:
+    seed, harness = _harness()
+    case = harness.cases["agent-message-board"]
+
+    baseline = harness.evaluate(seed, case)
+
+    assert baseline.base.requirement_stages["claim-winner"] == ("claim-arbitration",)
+    assert baseline.variant.requirement_stages["claim-winner"] == ("claim-arbitration",)
+    assert _roadmap_stage(baseline.variant.roadmap, "typed-coordination")["readiness"] == "ready"
+    assert _roadmap_stage(baseline.variant.roadmap, "claim-arbitration")["readiness"] == "blocked"
+    assert baseline.metamorphic_score == 1.0
+
+    class RenamedAffectedPhaseRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "variant":
+                replacements = _replace_roadmap_string(
+                    response["roadmap"],
+                    "claim-arbitration",
+                    "claim-winner-resolution",
+                )
+                assert replacements >= 2
+            return response
+
+    renamed = EvaluationHarness(
+        REPOSITORY,
+        seed,
+        load_cases(),
+        RenamedAffectedPhaseRunner(),
+    ).evaluate(seed, case)
+
+    assert renamed.base.mechanical and renamed.variant.mechanical
+    assert renamed.variant.requirement_stages["claim-winner"] == ("claim-winner-resolution",)
+    assert renamed.metamorphic_score == 1.0
+    assert not any("metamorphic variant" in item for item in renamed.diagnostics)
+
+
+def test_affected_contract_unit_can_split_without_structural_penalty() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    base = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    variant = evaluate_scenario(REPOSITORY, seed, case.variant, FixturePlannerRunner())
+
+    assert variant.roadmap is not None
+    affected = _roadmap_stage(variant.roadmap, "claim-arbitration")
+    affected["id"] = "claim-winner-contract"
+    for stage in variant.roadmap["stages"]:
+        stage["dependencies"] = [
+            "claim-winner-contract" if item == "claim-arbitration" else item
+            for item in stage["dependencies"]
+        ]
+    split = copy.deepcopy(affected)
+    split["id"] = "claim-winner-proof"
+    variant.roadmap["stages"].append(split)
+
+    score, diagnostics = _localized_structure_score(case, base, variant)
+
+    assert score == 1.0
+    assert diagnostics == []
+
+
+@pytest.mark.parametrize(
+    "mutation,diagnostic",
+    [
+        ("rename", "renamed unaffected phases"),
+        ("dependency", "changed dependencies between unaffected phases"),
+        ("invariant", "changed invariant placement for unchanged sources"),
+    ],
+)
+def test_affected_stage_residual_group_is_not_exempt_from_structure(
+    mutation: str, diagnostic: str
+) -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    base = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    variant = evaluate_scenario(REPOSITORY, seed, case.variant, FixturePlannerRunner())
+
+    for report in (base, variant):
+        assert report.roadmap is not None
+        roadmap = report.roadmap
+        residual = _roadmap_stage(roadmap, "typed-coordination")
+        affected = _roadmap_stage(roadmap, "claim-arbitration")
+        residual["source_specifications"].extend(affected["source_specifications"])
+        roadmap["stages"].remove(affected)
+        for stage in roadmap["stages"]:
+            rewritten: list[str] = []
+            for dependency in stage["dependencies"]:
+                dependency = (
+                    "typed-coordination" if dependency == "claim-arbitration" else dependency
+                )
+                if dependency not in rewritten:
+                    rewritten.append(dependency)
+            stage["dependencies"] = rewritten
+
+    assert variant.roadmap is not None
+    if mutation == "rename":
+        replacements = _replace_roadmap_string(
+            variant.roadmap,
+            "typed-coordination",
+            "coordination-projection",
+        )
+        assert replacements >= 2
+    elif mutation == "dependency":
+        _roadmap_stage(variant.roadmap, "typed-coordination")["dependencies"].append(
+            "trusted-effects-and-capabilities"
+        )
+    else:
+        residual = _roadmap_stage(variant.roadmap, "typed-coordination")
+        source = next(
+            item
+            for item in residual["source_specifications"]
+            if item["anchor"] == "7.6 Projection replay"
+        )
+        variant.roadmap["global_invariants"].append(
+            {
+                "id": "projection-replay",
+                "statement": "Replaying the same canonical record sequence produces the same coordination projection.",
+                "sources": [copy.deepcopy(source)],
+            }
+        )
+        residual["applicable_global_invariants"].append("projection-replay")
+
+    score, diagnostics = _localized_structure_score(case, base, variant)
+
+    assert score == 0.0
+    assert any(diagnostic in item for item in diagnostics)
+
+
+def test_affected_only_invariant_source_does_not_exempt_unaffected_applications() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    base = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    variant = evaluate_scenario(REPOSITORY, seed, case.variant, FixturePlannerRunner())
+
+    for report, application in (
+        (base, "durable-delivery"),
+        (variant, "bounded-context-recovery"),
+    ):
+        assert report.roadmap is not None
+        affected_source = copy.deepcopy(
+            _roadmap_stage(report.roadmap, "claim-arbitration")["source_specifications"][0]
+        )
+        report.roadmap["global_invariants"].append(
+            {
+                "id": "claim-order-is-stable",
+                "statement": "Claim arbitration follows the canonical board order.",
+                "sources": [affected_source],
+            }
+        )
+        _roadmap_stage(report.roadmap, application)["applicable_global_invariants"].append(
+            "claim-order-is-stable"
+        )
+
+    score, diagnostics = _localized_structure_score(case, base, variant)
+
+    assert score == 0.0
+    assert any("changed invariant placement for unchanged sources" in item for item in diagnostics)
+
+
+def test_affected_only_contract_unit_keeps_incident_dependencies_observable() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    base = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    variant = evaluate_scenario(REPOSITORY, seed, case.variant, FixturePlannerRunner())
+
+    assert base.roadmap is not None and variant.roadmap is not None
+    base_consumer = _roadmap_stage(base.roadmap, "bounded-context-recovery")
+    variant_consumer = _roadmap_stage(variant.roadmap, "bounded-context-recovery")
+    assert "claim-arbitration" in base_consumer["dependencies"]
+    assert "claim-arbitration" in variant_consumer["dependencies"]
+    variant_consumer["dependencies"].remove("claim-arbitration")
+
+    score, diagnostics = _localized_structure_score(case, base, variant)
+
+    assert score == 0.0
+    assert any("changed dependencies between unaffected phases" in item for item in diagnostics)
+
+
+def test_variant_only_contract_unit_keeps_incident_dependencies_observable() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    base = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    variant = evaluate_scenario(REPOSITORY, seed, case.variant, FixturePlannerRunner())
+
+    assert variant.roadmap is not None
+    affected = _roadmap_stage(variant.roadmap, "claim-arbitration")
+    delta_source = next(
+        source
+        for source in affected["source_specifications"]
+        if source["path"].endswith("/CLAIM-CONFLICT.md")
+    )
+    affected["source_specifications"].remove(delta_source)
+    delta_only = copy.deepcopy(affected)
+    delta_only["id"] = "claim-conflict-override"
+    delta_only["dependencies"] = ["durable-delivery"]
+    delta_only["source_specifications"] = [delta_source]
+    variant.roadmap["stages"].append(delta_only)
+
+    score, diagnostics = _localized_structure_score(case, base, variant)
+
+    assert score == 0.0
+    assert any("changed dependencies between unaffected phases" in item for item in diagnostics)
+
+
+def test_enclosing_affected_citation_does_not_mask_unchanged_structure() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    base = evaluate_scenario(REPOSITORY, seed, case.base, FixturePlannerRunner())
+    variant = evaluate_scenario(REPOSITORY, seed, case.variant, FixturePlannerRunner())
+    claim_section = """\
+A Claim competes for exclusive ownership of one claim key and claim generation.
+
+Its payload contains claim key, claim generation, subject task keys, requested owner principal, requested owner session generation, and expected predecessor token.
+
+Claim generation starts at zero.
+
+For one claim key and generation, the valid Claim with the lowest BoardSeq is the winner.
+
+All later valid Claims for that same key and generation remain evidence but are losers.
+
+The winner is unique because BoardSeq is unique.
+
+The requested owner session must be current at the Claim's BoardSeq.
+
+A Claim does not expire by wall-clock time.
+""".strip()
+
+    for report in (base, variant):
+        assert report.roadmap is not None
+        source = next(
+            item
+            for item in _roadmap_stage(report.roadmap, "claim-arbitration")["source_specifications"]
+            if item["anchor"] == "4.4 Claim"
+        )
+        source["requirement"] = claim_section
+    assert variant.roadmap is not None
+    replacements = _replace_roadmap_string(
+        variant.roadmap,
+        "claim-arbitration",
+        "claim-winner-resolution",
+    )
+    assert replacements >= 2
+
+    score, diagnostics = _localized_structure_score(case, base, variant)
+
+    assert score == 0.0
+    assert any("renamed unaffected phases" in item for item in diagnostics)
+
+
+@pytest.mark.parametrize(
+    "mutation,diagnostic",
+    [
+        ("source", "changed unaffected source coverage"),
+        ("owner", "repartitioned unchanged source ownership"),
+        ("rename", "renamed unaffected phases"),
+        ("dependency", "changed dependencies between unaffected phases"),
+        ("invariant", "changed invariant placement for unchanged sources"),
+        ("narrative", "rewrote unchanged phase narrative"),
+    ],
+)
+def test_localized_block_penalizes_unaffected_structural_drift(
+    mutation: str, diagnostic: str
+) -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class StructuralDriftRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier != "variant":
+                return response
+            roadmap = response["roadmap"]
+            foundation = _roadmap_stage(roadmap, "formal-board-foundation")
+            source = next(
+                item
+                for item in foundation["source_specifications"]
+                if item["anchor"] == "3.3 State invariants"
+            )
+            if mutation == "source":
+                foundation["source_specifications"].remove(source)
+            elif mutation == "owner":
+                foundation["source_specifications"].remove(source)
+                _roadmap_stage(roadmap, "trusted-effects-and-capabilities")[
+                    "source_specifications"
+                ].append(source)
+            elif mutation == "rename":
+                replacements = _replace_roadmap_string(
+                    roadmap,
+                    "durable-delivery",
+                    "subscription-delivery",
+                )
+                assert replacements >= 2
+            elif mutation == "dependency":
+                capacity = _roadmap_stage(roadmap, "capacity-and-agent-utility")
+                capacity["dependencies"].append("durable-delivery")
+            elif mutation == "invariant":
+                roadmap["global_invariants"].append(
+                    {
+                        "id": "record-id-uniqueness",
+                        "statement": "Every RecordId maps to exactly one canonical record.",
+                        "sources": [copy.deepcopy(source)],
+                    }
+                )
+                for phase_id in ("formal-board-foundation", "atomic-global-publication"):
+                    _roadmap_stage(roadmap, phase_id)["applicable_global_invariants"].append(
+                        "record-id-uniqueness"
+                    )
+            else:
+                _roadmap_stage(roadmap, "durable-delivery")["outcome"] = (
+                    "Subscriptions use a newly rewritten unrelated delivery outcome."
+                )
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, StructuralDriftRunner())
+    report = harness.evaluate(seed, harness.cases["agent-message-board"])
+
+    assert report.base.mechanical and report.variant.mechanical
+    assert report.deterministic_score == 1.0
+    assert report.metamorphic_score < 1.0
+    if mutation == "rename":
+        assert report.metamorphic_score == 0.5
+    assert any(diagnostic in item for item in report.diagnostics)
+
+
+def test_localized_block_penalizes_unrepresented_source_readiness_drift() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class ReadinessDriftRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "variant":
+                response["roadmap"] = _replace_phase_readiness(
+                    response["roadmap"],
+                    "verified-foundations",
+                    "ready",
+                    "blocked",
+                )
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, ReadinessDriftRunner())
+    report = harness.evaluate(seed, harness.cases["transactional-reservation"])
+
+    assert report.base.mechanical and report.variant.mechanical
+    assert not any(
+        "verified-foundations" in stages for stages in report.variant.requirement_stages.values()
+    )
+    assert report.deterministic_score == 1.0
+    assert report.metamorphic_score < 1.0
+    assert any(
+        "changed readiness of unchanged source obligations" in item for item in report.diagnostics
+    )
+
+
+def test_localized_source_identity_is_relative_to_each_scenario_root() -> None:
+    case = next(item for item in load_cases() if item.identifier == "agent-message-board")
+    fixture = FixturePlannerRunner()
+    base = fixture.run("prompt", case.base)["roadmap"]
+    variant = fixture.run("prompt", case.variant)["roadmap"]
+    base_source = next(
+        item
+        for item in _roadmap_stage(base, "formal-board-foundation")["source_specifications"]
+        if item["anchor"] == "3.3 State invariants"
+    )
+    variant_source = next(
+        item
+        for item in _roadmap_stage(variant, "formal-board-foundation")["source_specifications"]
+        if item["anchor"] == "3.3 State invariants"
+    )
+
+    assert base_source["path"] != variant_source["path"]
+    assert _relative_source_identity(base_source, case.base) == _relative_source_identity(
+        variant_source, case.variant
+    )
+
+
+def test_evaluator_rejects_a_foreign_roadmap_specification_root() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+
+    class ForeignRootRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            response["roadmap"]["specification_root"] = "eval/examples/private-notes/base/specs"
+            return response
+
+    report = evaluate_scenario(REPOSITORY, seed, case.base, ForeignRootRunner())
+
+    assert not report.mechanical
+    assert report.score == 0.05
+    assert report.metrics == {"response_shape": 1.0, "mechanical_validity": 0.0}
+    assert report.diagnostics == [
+        (
+            "roadmap qualification failed: specification_root does not match the evaluated "
+            "scenario: expected 'eval/examples/durable-counter/base/specs', received "
+            "'eval/examples/private-notes/base/specs'"
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation,diagnostic,expected_score",
+    [
+        ("rename", "renamed unaffected phases", 0.5),
+        ("dependency", "changed dependencies between unaffected phases", 1.0 / 3.0),
+        ("narrative", "rewrote unchanged phase narrative", 0.5),
+    ],
+)
+def test_equivalent_formatting_penalizes_unrelated_structural_drift(
+    mutation: str, diagnostic: str, expected_score: float
+) -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class EquivalentDriftRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier != "variant":
+                return response
+            roadmap = response["roadmap"]
+            if mutation == "rename":
+                replacements = _replace_roadmap_string(
+                    roadmap,
+                    "http-adapter",
+                    "http-transport",
+                )
+                assert replacements == 1
+            elif mutation == "dependency":
+                _roadmap_stage(roadmap, "http-adapter")["dependencies"] = []
+            else:
+                _roadmap_stage(roadmap, "http-adapter")["outcome"] = (
+                    "A rewritten HTTP outcome replaces the unchanged deferred contract."
+                )
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, EquivalentDriftRunner())
+    report = harness.evaluate(seed, harness.cases["durable-counter"])
+
+    assert report.base.mechanical and report.variant.mechanical
+    assert report.metamorphic_score == pytest.approx(expected_score)
+    assert any(diagnostic in item for item in report.diagnostics)
+
+
+def test_equivalent_narrative_comparison_ignores_cosmetic_markdown() -> None:
+    seed = SEED_PATH.read_text(encoding="utf-8")
+    cases = load_cases()
+
+    class CosmeticNarrativeRunner(FixturePlannerRunner):
+        def run(self, prompt, scenario):
+            response = super().run(prompt, scenario)
+            if scenario.identifier == "variant":
+                _roadmap_stage(response["roadmap"], "counter-core")["included_scope"][0] = (
+                    "**Signed** updates"
+                )
+            return response
+
+    harness = EvaluationHarness(REPOSITORY, seed, cases, CosmeticNarrativeRunner())
+    report = harness.evaluate(seed, harness.cases["durable-counter"])
+
+    assert report.base.mechanical and report.variant.mechanical
+    assert report.metamorphic_score == 1.0
+    assert not any("metamorphic variant" in item for item in report.diagnostics)
 
 
 def test_approval_ready_response_requires_empty_top_level_unresolved() -> None:

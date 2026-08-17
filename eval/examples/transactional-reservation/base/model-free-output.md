@@ -97,19 +97,38 @@ verification_goals = ["Use Verus linear authority and atomic specifications to p
 readiness = "ready"
 
 [[stages]]
-id = "reservation-lifecycle"
-outcome = "Logical time, expiration, confirmation, and cancellation implement one deterministic reservation lifecycle."
-included_scope = ["Monotone logical-time admission", "Deadline indexing and due-hold reconciliation", "Confirm, cancel, and expire mutual exclusion", "Atomic capacity movement and release"]
-excluded_scope = ["Payment capture and refund observations", "Wall-clock accuracy promises"]
+id = "expiration-boundary"
+outcome = "Confirmation is not permitted at logical time equal to the hold deadline."
+included_scope = ["The exact expiration-boundary rule"]
+excluded_scope = ["Other reservation lifecycle transitions"]
 dependencies = ["inventory-allocation"]
 source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "At logical time equal to `expires_at`, confirmation is no longer permitted." },
+]
+applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
+implementation_goals = ["Implement the source-defined strict expiration boundary."]
+verification_goals = ["Prove confirmation is rejected at and after the exact hold deadline."]
+readiness = "ready"
+
+[[stages]]
+id = "reservation-lifecycle"
+outcome = "Logical-time admission, expiration publication, terminal-transition exclusion, and cancellation implement the contractible reservation lifecycle."
+included_scope = ["Monotone logical-time admission and clock-regression rejection", "Deterministic EXPIRE_DUE ordering and authoritative candidate reconciliation", "Recorded expiration and atomic capacity release", "Expired-reservation visibility", "Terminal-transition mutual exclusion", "Atomic cancellation release"]
+excluded_scope = ["Exact-deadline confirmation semantics", "Payment capture and refund observations", "Wall-clock accuracy promises"]
+dependencies = ["inventory-allocation"]
+source_specifications = [
+  { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "`EXPIRE_DUE` may publish expiration for one or more due holds in deterministic reservation-identifier order." },
+  { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "A foreground mutation targeting a due `held` reservation must either publish its expiration within the same serialized authority boundary or observe the terminal transition won by a concurrent contender before returning." },
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "Exactly one effective terminal transition may leave `held` for a reservation." },
+  { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "Availability may conservatively continue to count a due reservation until expiration is published, but it may never treat deadline passage as an unrecorded release." },
+  { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "Expiration releases every held line atomically." },
+  { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "An expired reservation remains visible with its original lines and deadline." },
+  { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "6. Hold lifetime", requirement = "Clock observations that move backward relative to the kernel's last admitted logical time return `clock_regression` and cannot change state." },
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "8. Cancellation", requirement = "Cancellation releases all capacity-consuming lines atomically." },
 ]
 applicable_global_invariants = ["oxide-verification-policy", "capacity-conservation", "tenant-noninterference", "single-linearization"]
-implementation_goals = ["Implement admitted logical time and ordinary expiration commands over revalidated index candidates.", "Implement confirmation and cancellation as guarded whole-reservation transitions."]
-verification_goals = ["Prove monotone logical time, the strict expiration boundary, mutual exclusion of confirm/cancel/expire, and exact movement or release of every line aggregate.", "Exercise deterministic races one tick before, at, and after expiration and reject a deadline index treated as authority."]
+implementation_goals = ["Implement admitted logical time, clock-regression rejection, and ordinary EXPIRE_DUE commands over revalidated deadline-index candidates.", "Publish expiration and cancellation as recorded guarded whole-reservation transitions while preserving expired-reservation visibility."]
+verification_goals = ["Prove monotone logical time, clock-regression stuttering, deterministic EXPIRE_DUE order and reconciliation, and mutual exclusion of confirm/cancel/expire without choosing the exact-deadline confirmation rule.", "Prove deadline passage alone never releases capacity, recorded expiration releases every line atomically, cancelled capacity is released exactly, and expired records remain visible."]
 readiness = "ready"
 
 [[stages]]
@@ -117,7 +136,7 @@ id = "payment-settlement"
 outcome = "Authorization, capture, reconciliation, and refunds preserve single-use and bounded monetary authority."
 included_scope = ["Authorization binding and validation", "Prepared payment-effect authority and reconciliation", "Settlement and append-only refund facts", "Refund-complete cancellation guard"]
 excluded_scope = ["Exactly-once payment-network claims", "Partial settlement"]
-dependencies = ["reservation-lifecycle", "trusted-effect-boundaries"]
+dependencies = ["expiration-boundary", "reservation-lifecycle", "trusted-effect-boundaries"]
 source_specifications = [
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "7. Confirmation", requirement = "One authorization cannot confirm two reservations." },
   { path = "eval/examples/transactional-reservation/base/specs/PRODUCT.md", anchor = "10. Refunds", requirement = "The sum of authoritative refunds cannot exceed the settlement amount." },

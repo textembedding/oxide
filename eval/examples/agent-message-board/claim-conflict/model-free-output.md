@@ -59,19 +59,32 @@ readiness = "ready"
 
 [[stages]]
 id = "typed-coordination"
-outcome = "Typed claims, decisions, corrections, blockers, results, and handoffs converge to deterministic authority while retaining all evidence."
-included_scope = ["Coordination schema validation", "Claim and Decision arbitration", "Correction and Retraction projection", "Handoff and Result closure", "Session fencing"]
+outcome = "Typed decisions, corrections, blockers, results, and handoffs converge to deterministic authority while retaining all evidence."
+included_scope = ["Coordination schema validation", "Non-claim coordination projections", "Correction and Retraction projection", "Handoff and Result closure", "Session fencing"]
 excluded_scope = ["Wall-clock claim expiry", "Truth inference from prose"]
 dependencies = ["atomic-global-publication"]
 source_specifications = [
-  { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "4.4 Claim", requirement = "For one claim key and generation, the valid Claim with the lowest BoardSeq is the winner." },
-  { path = "eval/examples/agent-message-board/claim-conflict/specs/CLAIM-CONFLICT.md", anchor = "Winner selection", requirement = "When two valid Claims compete for one claim key and generation, the lexicographically smallest requested owner principal is authoritative, even when its BoardSeq is greater." },
   { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "7.4 Crash and replacement", requirement = "A replacement cannot become authoritative while the old session remains unfenced." },
   { path = "eval/examples/agent-message-board/claim-conflict/specs/DEVELOPMENT.md", anchor = "7.6 Projection replay", requirement = "Replaying the same canonical record sequence produces the same coordination projection." },
 ]
 applicable_global_invariants = ["oxide-verification-policy"]
-implementation_goals = ["Implement pure typed coordination validation and projection over immutable records.", "Implement exact predecessor tokens and session fences for safe ownership replacement."]
-verification_goals = ["Resolve and approve the contradictory BoardSeq-versus-principal claim winner semantics before generating an authoritative coordination contract; then use Verus to prove the approved unique-winner rule, generation closure, fencing, access-label preservation, and deterministic replay."]
+implementation_goals = ["Implement pure non-claim coordination validation and projection over immutable records.", "Implement exact predecessor tokens and session fences for safe ownership replacement."]
+verification_goals = ["Use Verus to prove settled coordination generation closure, fencing, access-label preservation, and deterministic replay without selecting a claim winner rule."]
+readiness = "ready"
+
+[[stages]]
+id = "claim-arbitration"
+outcome = "Claim arbitration remains blocked until one authoritative winner rule is approved."
+included_scope = ["The contradictory BoardSeq-versus-principal claim winner rules"]
+excluded_scope = ["Privately selecting either rule", "Unrelated typed coordination behavior"]
+dependencies = ["atomic-global-publication"]
+source_specifications = [
+  { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "4.4 Claim", requirement = "For one claim key and generation, the valid Claim with the lowest BoardSeq is the winner." },
+  { path = "eval/examples/agent-message-board/claim-conflict/specs/CLAIM-CONFLICT.md", anchor = "Winner selection", requirement = "When two valid Claims compete for one claim key and generation, the lexicographically smallest requested owner principal is authoritative, even when its BoardSeq is greater." },
+]
+applicable_global_invariants = ["oxide-verification-policy"]
+implementation_goals = ["Obtain one approved claim-winner rule before implementing authoritative arbitration."]
+verification_goals = ["After approval, prove one unique deterministic claim winner and reject the superseded rule; no arbitration proof is admissible while both clauses remain authoritative."]
 readiness = "blocked"
 
 [[stages]]
@@ -95,7 +108,7 @@ id = "bounded-context-recovery"
 outcome = "Fresh agents recover bounded exact, lexical, semantic, causal, and unresolved-work context without granting retrieval hints authority."
 included_scope = ["Exact and lexical candidate indexes", "Semantic adapter integration", "Causal closure", "Bounded context selector", "Resolved and unresolved-work views", "Iterative query frontier"]
 excluded_scope = ["Semantic relevance as a theorem", "Exhaustive one-shot retrieval"]
-dependencies = ["atomic-global-publication", "trusted-effects-and-capabilities", "typed-coordination"]
+dependencies = ["atomic-global-publication", "trusted-effects-and-capabilities", "typed-coordination", "claim-arbitration"]
 source_specifications = [
   { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "9.2 Authority boundary", requirement = "Semantic similarity never creates a causal link, claim, decision, correction, authorization, or task dependency." },
   { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "9.3 Context selection", requirement = "The final selected union is returned strictly by ascending BoardSeq." },
@@ -127,7 +140,7 @@ id = "checkpoint-retention-recovery"
 outcome = "Cut-consistent checkpoints, safe compaction, and fail-closed replay recover the same retained public board after crashes."
 included_scope = ["Checkpoint capture and validation", "Retention classes", "Compaction eligibility", "Genesis and suffix replay", "Integrity failure", "Derived index rebuild"]
 excluded_scope = ["Silent corruption repair", "Retention promises absent from configuration"]
-dependencies = ["typed-coordination", "durable-delivery", "bounded-context-recovery", "live-shard-movement"]
+dependencies = ["typed-coordination", "claim-arbitration", "durable-delivery", "bounded-context-recovery", "live-shard-movement"]
 source_specifications = [
   { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "12.1 Checkpoint", requirement = "Restoring a checkpoint followed by replay above its cut produces the same logical state as full replay." },
   { path = "eval/examples/agent-message-board/claim-conflict/specs/PRODUCT.md", anchor = "13.2 Recovery result", requirement = "Recovery either produces one state observationally equivalent to pre-crash acknowledged history or fails closed before serving traffic." },
@@ -143,7 +156,7 @@ id = "whole-program-assurance"
 outcome = "Every public operation refines the abstract board through a closed production and trusted-effect boundary on the exact prospective tree."
 included_scope = ["Public handler composition", "Coverage manifest", "Cheat rejection", "Exact-tree proof", "Real-adapter boundary fixtures", "Proof sensitivity"]
 excluded_scope = ["Empirical throughput and semantic relevance"]
-dependencies = ["typed-coordination", "durable-delivery", "bounded-context-recovery", "live-shard-movement", "checkpoint-retention-recovery"]
+dependencies = ["typed-coordination", "claim-arbitration", "durable-delivery", "bounded-context-recovery", "live-shard-movement", "checkpoint-retention-recovery"]
 source_specifications = [
   { path = "eval/examples/agent-message-board/claim-conflict/specs/DEVELOPMENT.md", anchor = "14.3 Composition theorem", requirement = "The whole-program theorem connects every public handler to one abstract transition or observation over `BoardState`." },
   { path = "eval/examples/agent-message-board/claim-conflict/specs/DEVELOPMENT.md", anchor = "15.3 Exact-tree gate", requirement = "Authoritative merge requires the complete composition proof on the exact prospective production tree." },

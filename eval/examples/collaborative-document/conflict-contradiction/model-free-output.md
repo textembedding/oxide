@@ -53,7 +53,7 @@ verification_goals = ["Prove authorization is evaluated in the referenced causal
 readiness = "ready"
 
 [[stages]]
-id = "insertion-precedence-resolution"
+id = "concurrent-insertion-precedence"
 outcome = "One concurrent-insertion precedence rule is approved before conflict selection is implemented."
 included_scope = ["Conflicting same-gap insertion precedence"]
 excluded_scope = ["Document materialization", "Peer exchange", "Snapshots"]
@@ -69,16 +69,16 @@ readiness = "blocked"
 
 [[stages]]
 id = "convergent-document-core"
-outcome = "Qualified replicas with the same admitted groups and schemas materialize identical document bytes."
+outcome = "Text, tree, move, deletion, and attribute operations materialize to one canonical document for every equal admitted set."
 included_scope = ["Stable text gaps", "Tree insertion and tombstones", "Acyclic concurrent moves", "Attribute conflicts", "Canonical materialization"]
 excluded_scope = ["Peer exchange", "Snapshots", "Rendering"]
-dependencies = ["formal-foundations", "authorization-and-admission", "insertion-precedence-resolution"]
+dependencies = ["formal-foundations", "authorization-and-admission", "concurrent-insertion-precedence"]
 source_specifications = [
   { path = "eval/examples/collaborative-document/conflict-contradiction/specs/PRODUCT.md", anchor = "Strong convergence", requirement = "Any two qualified replicas with identical admitted-group sets and identical schema catalogs return identical canonical materialized bytes." },
 ]
 applicable_global_invariants = ["oxide-verification-policy", "convergent-authority"]
-implementation_goals = ["Implement canonical document materialization against the approved insertion-precedence contract."]
-verification_goals = ["Prove canonical convergence for equal admitted-group sets and schema catalogs."]
+implementation_goals = ["Implement pure and incremental sequence, tombstone, move, and attribute algorithms with one canonical materializer."]
+verification_goals = ["Prove deletion monotonicity, move-selection termination and acyclicity, attribute maximality, and kernel-wide materialization convergence."]
 readiness = "ready"
 
 [[stages]]

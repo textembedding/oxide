@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from jinja2 import Environment, TemplateError, meta
@@ -20,6 +20,7 @@ from oxide.roadmap import (
     parse_roadmap,
     proposed_stage_binding,
     render_roadmap_value,
+    validate_source_anchor,
 )
 
 from .cases import EvaluationCase, RequirementOracle, Scenario
@@ -62,11 +63,11 @@ class ScenarioReport:
         source_owners: dict[tuple[str, str, str], list[str]] = {}
         for invariant in self.roadmap["global_invariants"]:
             for source in invariant["sources"]:
-                identity = _source_identity(source)
+                identity = _source_identity(source, anchor_is_canonical=True)
                 source_owners.setdefault(identity, []).append(f"invariant:{invariant['id']}")
         for stage in self.roadmap["stages"]:
             for source in stage["source_specifications"]:
-                identity = _source_identity(source)
+                identity = _source_identity(source, anchor_is_canonical=True)
                 source_owners.setdefault(identity, []).append(f"stage:{stage['id']}")
         return {
             "stage_ids": tuple(stage["id"] for stage in self.roadmap["stages"]),
@@ -182,7 +183,9 @@ _GENERIC_GOAL_TOKENS = {
 }
 
 
-def _source_identity(reference: dict[str, str]) -> tuple[str, str, str]:
+def _source_identity(
+    reference: dict[str, str], *, anchor_is_canonical: bool = False
+) -> tuple[str, str, str]:
     """Return the strict semantic identity of one source citation.
 
     Source paths name authority and therefore remain byte-for-byte exact. Heading
@@ -194,7 +197,11 @@ def _source_identity(reference: dict[str, str]) -> tuple[str, str, str]:
     """
     return (
         reference["path"],
-        canonical_source_anchor(reference["anchor"]),
+        (
+            validate_source_anchor(reference["anchor"])
+            if anchor_is_canonical
+            else canonical_source_anchor(reference["anchor"])
+        ),
         canonical_source_text(reference["requirement"]),
     )
 
@@ -294,10 +301,23 @@ def _reference_supports_requirement(
     """
     return (
         reference["path"] == requirement.path
-        and canonical_source_anchor(reference["anchor"])
+        and validate_source_anchor(reference["anchor"])
         == canonical_source_anchor(requirement.anchor)
         and canonical_source_text(requirement.text)
         in canonical_source_text(reference["requirement"])
+    )
+
+
+def _reference_exactly_matches_requirement(
+    reference: dict[str, str], requirement: RequirementOracle
+) -> bool:
+    """Identify only the atomic affected handle, not a broader enclosing citation."""
+    return (
+        reference["path"] == requirement.path
+        and validate_source_anchor(reference["anchor"])
+        == canonical_source_anchor(requirement.anchor)
+        and canonical_source_text(reference["requirement"])
+        == canonical_source_text(requirement.text)
     )
 
 
@@ -432,6 +452,21 @@ def evaluate_scenario(
             [f"roadmap qualification failed: {error}"],
             response,
         )
+    if roadmap["specification_root"] != scenario.specification_directory:
+        return ScenarioReport(
+            scenario.identifier,
+            0.05,
+            {"response_shape": 1.0, "mechanical_validity": 0.0},
+            [
+                (
+                    "roadmap qualification failed: specification_root does not match "
+                    f"the evaluated scenario: expected {scenario.specification_directory!r}, "
+                    f"received {roadmap['specification_root']!r}"
+                )
+            ],
+            response,
+            roadmap,
+        )
     qualification_errors: list[str] = []
     for stage in roadmap["stages"]:
         try:
@@ -552,11 +587,11 @@ def evaluate_scenario(
     source_owners: dict[tuple[str, str, str], list[str]] = {}
     for invariant in roadmap["global_invariants"]:
         for source in invariant["sources"]:
-            identity = _source_identity(source)
+            identity = _source_identity(source, anchor_is_canonical=True)
             source_owners.setdefault(identity, []).append(f"invariant:{invariant['id']}")
     for stage in roadmap["stages"]:
         for source in stage["source_specifications"]:
-            identity = _source_identity(source)
+            identity = _source_identity(source, anchor_is_canonical=True)
             source_owners.setdefault(identity, []).append(f"phase:{stage['id']}")
     ownership_values: list[float] = []
     for identity, owners in source_owners.items():
@@ -632,7 +667,12 @@ def _metamorphic(
         ]
         if not all(checks):
             diagnostics.append("format-only source changes altered the semantic plan")
-        return _mean([float(value) for value in checks]), diagnostics
+        semantic_equivalence = _mean([float(value) for value in checks])
+        structural_locality, structural_diagnostics = _localized_structure_score(
+            case, base, variant
+        )
+        diagnostics.extend(structural_diagnostics)
+        return _mean([semantic_equivalence, structural_locality]), diagnostics
 
     affected_checks: list[bool] = []
     for identifier in case.affected_requirements:
@@ -669,7 +709,273 @@ def _metamorphic(
         diagnostics.append(
             "the semantic gap was not isolated to its smallest affected readiness unit"
         )
-    return _mean([float(value) for value in checks]), diagnostics
+    semantic_localization = _mean([float(value) for value in checks])
+    structural_locality, structural_diagnostics = _localized_structure_score(case, base, variant)
+    diagnostics.extend(structural_diagnostics)
+    return _mean([semantic_localization, structural_locality]), diagnostics
+
+
+def _scenario_source_paths(scenario: Scenario) -> set[str]:
+    root = scenario.directory / "specs"
+    return {path.relative_to(root).as_posix() for path in root.rglob("*.md") if path.is_file()}
+
+
+def _relative_source_identity(
+    reference: dict[str, str], scenario: Scenario
+) -> tuple[str, str, str]:
+    source = PurePosixPath(reference["path"])
+    root = PurePosixPath(scenario.specification_directory)
+    try:
+        relative = source.relative_to(root).as_posix()
+    except ValueError:
+        # Mechanical qualification rejects escaped planning sources. Keeping the
+        # full path here still makes a malformed cross-scenario binding differ.
+        relative = source.as_posix()
+    return (
+        relative,
+        validate_source_anchor(reference["anchor"]),
+        canonical_source_text(reference["requirement"]),
+    )
+
+
+def _localized_structure_view(
+    case: EvaluationCase,
+    report: ScenarioReport,
+    scenario: Scenario,
+    shared_paths: set[str],
+) -> dict[str, Any]:
+    """Describe unchanged source-owned structure without relying on phase names."""
+    assert report.roadmap is not None
+    affected_oracles = tuple(
+        requirement
+        for requirement in scenario.requirements
+        if requirement.identifier in case.affected_requirements
+    )
+
+    def eligible_identity(reference: dict[str, str]) -> tuple[str, str, str] | None:
+        identity = _relative_source_identity(reference, scenario)
+        if identity[0] not in shared_paths or any(
+            _reference_exactly_matches_requirement(reference, oracle) for oracle in affected_oracles
+        ):
+            return None
+        return identity
+
+    stage_groups: dict[str, tuple[tuple[str, str, str], ...]] = {}
+    affected_units: dict[str, bool] = {}
+    source_stage_owners: dict[tuple[str, str, str], list[str]] = {}
+    all_sources: set[tuple[str, str, str]] = set()
+    for stage in report.roadmap["stages"]:
+        affected_units[stage["id"]] = any(
+            _relative_source_identity(reference, scenario)[0] not in shared_paths
+            or any(
+                _reference_supports_requirement(reference, oracle) for oracle in affected_oracles
+            )
+            for reference in stage["source_specifications"]
+        )
+        identities = tuple(
+            sorted(
+                {
+                    identity
+                    for reference in stage["source_specifications"]
+                    if (identity := eligible_identity(reference)) is not None
+                }
+            )
+        )
+        stage_groups[stage["id"]] = identities
+        all_sources.update(identities)
+        for identity in identities:
+            source_stage_owners.setdefault(identity, []).append(stage["id"])
+
+    invariant_sources: dict[str, tuple[tuple[str, str, str], ...]] = {}
+    for invariant in report.roadmap["global_invariants"]:
+        identities = tuple(
+            sorted(
+                {
+                    identity
+                    for reference in invariant["sources"]
+                    if (identity := eligible_identity(reference)) is not None
+                }
+            )
+        )
+        invariant_sources[invariant["id"]] = identities
+        all_sources.update(identities)
+
+    stage_by_id = {stage["id"]: stage for stage in report.roadmap["stages"]}
+    owner_partition = tuple(
+        sorted(
+            (
+                identity,
+                tuple(
+                    sorted(
+                        stage_groups[stage_id] for stage_id in source_stage_owners.get(identity, ())
+                    )
+                ),
+            )
+            for identity in all_sources
+        )
+    )
+    source_readiness = tuple(
+        sorted(
+            (
+                identity,
+                tuple(
+                    sorted(
+                        stage_by_id[stage_id]["readiness"]
+                        for stage_id in source_stage_owners.get(identity, ())
+                    )
+                ),
+            )
+            for identity in all_sources
+        )
+    )
+    return {
+        "affected_sentinel": ("affected", tuple(sorted(case.affected_requirements))),
+        "affected_units": affected_units,
+        "all_sources": tuple(sorted(all_sources)),
+        "invariant_sources": invariant_sources,
+        "owner_partition": owner_partition,
+        "roadmap": report.roadmap,
+        "source_readiness": source_readiness,
+        "stage_groups": stage_groups,
+    }
+
+
+def _stable_phase_ids(
+    view: dict[str, Any],
+) -> tuple[tuple[tuple[tuple[str, str, str], ...], str], ...]:
+    return tuple(
+        sorted((group, stage_id) for stage_id, group in view["stage_groups"].items() if group)
+    )
+
+
+def _stable_dependencies(
+    view: dict[str, Any],
+) -> tuple[tuple[Any, Any], ...]:
+    groups = view["stage_groups"]
+    affected_units = view["affected_units"]
+    affected_sentinel = view["affected_sentinel"]
+
+    def endpoint(stage_id: str) -> tuple[str, Any] | None:
+        group = groups[stage_id]
+        if group:
+            return ("unaffected", group)
+        if affected_units[stage_id]:
+            return affected_sentinel
+        return None
+
+    edges: set[tuple[Any, Any]] = set()
+    for stage in view["roadmap"]["stages"]:
+        consumer = endpoint(stage["id"])
+        if consumer is None:
+            continue
+        for dependency in stage["dependencies"]:
+            producer = endpoint(dependency)
+            if producer is not None and (
+                producer[0] == "unaffected" or consumer[0] == "unaffected"
+            ):
+                edges.add((producer, consumer))
+    return tuple(sorted(edges))
+
+
+def _stable_invariants(view: dict[str, Any]) -> tuple[Any, ...]:
+    groups = view["stage_groups"]
+    values: list[Any] = []
+    for invariant in view["roadmap"]["global_invariants"]:
+        sources = view["invariant_sources"][invariant["id"]]
+        applications = tuple(
+            sorted(
+                {
+                    group
+                    for stage in view["roadmap"]["stages"]
+                    if invariant["id"] in stage["applicable_global_invariants"]
+                    and (group := groups[stage["id"]])
+                }
+            )
+        )
+        if invariant["id"] != _OXIDE_POLICY_ID and not sources and not applications:
+            continue
+        values.append(
+            (
+                invariant["id"],
+                canonical_source_text(invariant["statement"]),
+                sources,
+                applications,
+            )
+        )
+    return tuple(sorted(values))
+
+
+def _stable_narrative(view: dict[str, Any]) -> tuple[Any, ...]:
+    groups = view["stage_groups"]
+    return tuple(
+        sorted(
+            (
+                group,
+                canonical_source_text(stage["outcome"]),
+                tuple(canonical_source_text(item) for item in stage["included_scope"]),
+                tuple(canonical_source_text(item) for item in stage["excluded_scope"]),
+                tuple(canonical_source_text(item) for item in stage["implementation_goals"]),
+                tuple(canonical_source_text(item) for item in stage["verification_goals"]),
+            )
+            for stage in view["roadmap"]["stages"]
+            if (group := groups[stage["id"]])
+        )
+    )
+
+
+def _localized_structure_score(
+    case: EvaluationCase, base: ScenarioReport, variant: ScenarioReport
+) -> tuple[float, list[str]]:
+    """Require a localized source delta while permitting its phase to split or rename."""
+    if base.roadmap is None or variant.roadmap is None:
+        return 0.0, ["localized structural comparison requires two valid roadmaps"]
+    shared_paths = _scenario_source_paths(case.base) & _scenario_source_paths(case.variant)
+    base_view = _localized_structure_view(case, base, case.base, shared_paths)
+    variant_view = _localized_structure_view(case, variant, case.variant, shared_paths)
+    comparisons = (
+        (
+            "metamorphic variant changed unaffected source coverage",
+            base_view["all_sources"],
+            variant_view["all_sources"],
+        ),
+        (
+            "metamorphic variant repartitioned unchanged source ownership",
+            base_view["owner_partition"],
+            variant_view["owner_partition"],
+        ),
+        (
+            "metamorphic variant changed readiness of unchanged source obligations",
+            base_view["source_readiness"],
+            variant_view["source_readiness"],
+        ),
+        (
+            "metamorphic variant renamed unaffected phases",
+            _stable_phase_ids(base_view),
+            _stable_phase_ids(variant_view),
+        ),
+        (
+            "metamorphic variant changed dependencies between unaffected phases",
+            _stable_dependencies(base_view),
+            _stable_dependencies(variant_view),
+        ),
+        (
+            "metamorphic variant changed invariant placement for unchanged sources",
+            _stable_invariants(base_view),
+            _stable_invariants(variant_view),
+        ),
+        (
+            "metamorphic variant rewrote unchanged phase narrative",
+            _stable_narrative(base_view),
+            _stable_narrative(variant_view),
+        ),
+    )
+    checks = [before == after for _diagnostic, before, after in comparisons]
+    diagnostics = [
+        diagnostic
+        for (diagnostic, _before, _after), passed in zip(comparisons, checks, strict=True)
+        if not passed
+    ]
+    return float(all(checks)), diagnostics
 
 
 def _repeat_consistency(

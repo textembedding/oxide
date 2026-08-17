@@ -13,19 +13,19 @@ sources = []
 id = "note-core"
 outcome = "Accounts can create notes and search titles exactly."
 included_scope = ["Create notes", "Creation-ordered exact title search"]
-excluded_scope = ["Body access pending conflict resolution", "Semantic retrieval"]
+excluded_scope = ["Body access", "Semantic retrieval"]
 dependencies = []
 source_specifications = [
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Core operations", requirement = "An authenticated account can create a note with a title and body." },
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Core operations", requirement = "Exact title search returns matching notes in creation order." },
 ]
 applicable_global_invariants = ["oxide-verification-policy"]
-implementation_goals = ["Implement note creation and ordered exact title search without choosing body-access semantics."]
-verification_goals = ["Use Verus to prove creation-order refinement for the conflict-independent core."]
+implementation_goals = ["Implement note creation and ordered exact title search."]
+verification_goals = ["Use Verus to prove creation-order refinement."]
 readiness = "ready"
 
 [[stages]]
-id = "body-access-resolution"
+id = "body-access-control"
 outcome = "Resolve the contradiction between owning-account privacy and access without authentication."
 included_scope = ["Conflicting note-body access requirements"]
 excluded_scope = []
@@ -44,7 +44,7 @@ id = "semantic-retrieval"
 outcome = "Add semantic retrieval after relevance and privacy criteria are specified."
 included_scope = ["Semantic full-text retrieval"]
 excluded_scope = []
-dependencies = ["note-core", "body-access-resolution"]
+dependencies = ["note-core", "body-access-control"]
 source_specifications = [
   { path = "eval/examples/private-notes/contradiction/specs/PRODUCT.md", anchor = "Future retrieval", requirement = "Semantic full-text retrieval is deferred until its relevance and privacy criteria are specified." },
 ]
