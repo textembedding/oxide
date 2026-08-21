@@ -11,12 +11,38 @@ from .identity import qualify_run_directory
 from .scoring import EvaluationHarness
 
 OBJECTIVE = """\
-Improve the general-purpose Oxide planning prompt. Maximize exact source fidelity,
-complete requirement disposition, honest readiness, dependency correctness, meaningful
-verification planning, stable capability decomposition across repeated runs, concise canonical
-roadmap structure, and robustness to formatting changes, missing acceptance criteria, and
-contradictory specifications. Do not optimize for a fixed roadmap, stage count, product, or
-fixture vocabulary. Preserve the Jinja variable contract and maintenance-mode behavior.
+Improve Oxide's general-purpose Jinja planning prompt for unseen specification corpora.
+
+Treat these priorities as lexicographic: a lower-priority gain must never weaken a
+higher-priority invariant, and success on one corpus must not compensate for failure on another.
+
+1. Preserve the drop-in contract: the exact Jinja variable set and each variable's meaning and
+   control-flow role, schema-valid response behavior, frozen-bundle-only authority, qualified
+   source records, mandated Oxide verification-policy behavior, and maintenance-mode preservation
+   semantics.
+2. Preserve source semantics completely: give every material requirement exactly one visible,
+   source-backed disposition; invent no product behavior; use exact sufficient citations; and
+   derive cohesive capability ownership, direct witnessed dependencies, phase-local readiness,
+   honest top-level approval and unresolved state, localized gaps and contradictions, and
+   role-appropriate verification from source semantics.
+3. Make the semantic projection invariant and repeatable: semantically equivalent corpora retain
+   capability boundaries, IDs, ownership, dependency graph, readiness, approval disposition,
+   invariant placement, and material field content. A localized semantic change affects only its
+   owning contract and unavoidable incident relations. Apply deterministic tie-breakers only after
+   semantic correctness is fixed.
+4. Make the rendered roadmap clear and reviewable. Compactness, concision, prompt or roadmap
+   length, list length, citation count, and phase count are not quality objectives. Never omit,
+   merge, split, or rewrite source-authorized work to make an output smaller; remove only
+   unsupported filler, true duplicate ownership, and verbatim duplicate phase-owned narrative.
+
+Generalize every mutation as a source-semantic rule for unseen products, corpus sizes, layouts,
+and wording. Replace obsolete or conflicting rules instead of layering case exceptions. Never
+encode or target case names, products, fixture paths or vocabulary, rubric identifiers, hidden
+labels, expected IDs or stage counts, metric names or weights, diagnostic wording, judge phrasing,
+or known answer patterns. Do not game coverage or consistency with broad citations, keyword
+signals, boilerplate verification, constant decompositions, or evaluator blind spots. Keep
+specification semantics authoritative and Oxide's verification policy separate from product
+behavior.
 """
 
 

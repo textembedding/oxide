@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from eval.cases import load_cases
-from eval.gepa_harness import optimize_prompt
+from eval.gepa_harness import OBJECTIVE, optimize_prompt
 from eval.identity import EvaluationIdentityError, build_manifest, qualify_run_directory
 from eval.runners import (
     CodexPlannerRunner,
@@ -42,6 +42,27 @@ def _harness() -> tuple[str, EvaluationHarness]:
     seed = SEED_PATH.read_text(encoding="utf-8")
     cases = load_cases()
     return seed, EvaluationHarness(REPOSITORY, seed, cases, FixturePlannerRunner())
+
+
+def test_gepa_objective_prioritizes_correctness_without_compactness_incentives() -> None:
+    objective = " ".join(OBJECTIVE.split()).lower()
+
+    assert "treat these priorities as lexicographic" in objective
+    assert "a lower-priority gain must never weaken a higher-priority invariant" in objective
+    assert "success on one corpus must not compensate for failure on another" in objective
+    assert "each variable's meaning and control-flow role" in objective
+    assert "exactly one visible, source-backed disposition" in objective
+    assert "honest top-level approval and unresolved state" in objective
+    assert "make the semantic projection invariant and repeatable" in objective
+    assert "approval disposition" in objective
+    assert (
+        "compactness, concision, prompt or roadmap length, list length, citation count, and phase count are not quality objectives"
+        in objective
+    )
+    assert "concise canonical roadmap structure" not in objective
+    assert "maximize" not in objective
+    assert "verbatim duplicate phase-owned narrative" in objective
+    assert "do not game coverage or consistency" in objective
 
 
 def _roadmap_stage(roadmap: dict, phase_id: str) -> dict:
