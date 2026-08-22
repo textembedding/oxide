@@ -18,6 +18,7 @@ from eval.runners import (
     CodexQualityJudge,
     FixturePlannerRunner,
     _judge_source_bundle,
+    _judge_trace_payload,
 )
 from eval.scoring import (
     CONSISTENCY_WEIGHT,
@@ -176,6 +177,58 @@ def test_judge_sees_complete_base_corpus_once_plus_only_variant_delta() -> None:
     assert "VARIANT SOURCE specs/CLAIM-CONFLICT.md" in bundle
 
 
+def test_judge_trace_retains_metadata_and_provenance_without_repeated_narrative() -> None:
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+    response = FixturePlannerRunner().run("rendered prompt", case.base)
+    response["ready_for_approval"] = False
+    response["complete_specification_corpus"] = False
+    response["faithful_to_specifications"] = False
+    response["unresolved"] = ["TRACE-ONLY-UNRESOLVED"]
+    response["message"] = "RETAINED-TOP-LEVEL-MESSAGE"
+    stage = response["roadmap"]["stages"][0]
+    narrative = {
+        "outcome": "OMITTED-OUTCOME",
+        "included_scope": ["OMITTED-INCLUDED-SCOPE"],
+        "excluded_scope": ["OMITTED-EXCLUDED-SCOPE"],
+        "dependencies": [],
+        "applicable_global_invariants": stage["applicable_global_invariants"],
+        "implementation_goals": ["OMITTED-IMPLEMENTATION-GOAL"],
+        "verification_goals": ["OMITTED-VERIFICATION-GOAL"],
+        "readiness": "blocked",
+    }
+    stage.update(narrative)
+
+    trace = _judge_trace_payload(response)
+    serialized = json.dumps(trace, ensure_ascii=False, sort_keys=True)
+
+    assert trace["ready_for_approval"] is False
+    assert trace["complete_specification_corpus"] is False
+    assert trace["faithful_to_specifications"] is False
+    assert trace["unresolved"] == ["TRACE-ONLY-UNRESOLVED"]
+    assert trace["message"] == "RETAINED-TOP-LEVEL-MESSAGE"
+    assert trace["roadmap"]["global_invariants"] == [
+        {"id": item["id"], "sources": item["sources"]}
+        for item in response["roadmap"]["global_invariants"]
+    ]
+    assert trace["roadmap"]["stages"] == [
+        {"id": item["id"], "source_specifications": item["source_specifications"]}
+        for item in response["roadmap"]["stages"]
+    ]
+    source_requirement = stage["source_specifications"][0]["requirement"]
+    assert source_requirement in serialized
+    assert "TRACE-ONLY-UNRESOLVED" in serialized
+    assert "RETAINED-TOP-LEVEL-MESSAGE" in serialized
+    for value in (
+        "OMITTED-OUTCOME",
+        "OMITTED-INCLUDED-SCOPE",
+        "OMITTED-EXCLUDED-SCOPE",
+        "OMITTED-IMPLEMENTATION-GOAL",
+        "OMITTED-VERIFICATION-GOAL",
+        "blocked",
+    ):
+        assert value not in serialized
+
+
 def test_judge_is_told_readiness_is_local_and_does_not_propagate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -227,6 +280,82 @@ def test_judge_is_told_readiness_is_local_and_does_not_propagate(
     assert source_requirement not in base_human
     assert source_requirement in prompt.split("BASE REQUIRED TRACE PAYLOAD", 1)[1]
     assert 'Affected requirements: ["claim-winner"]' in prompt
+
+
+def test_judge_prompt_avoids_repeating_large_rendered_narrative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from eval import runners
+
+    captured: dict[str, str] = {}
+
+    class RecordingSession:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def start(self, prompt, schema):
+            del schema
+            captured["prompt"] = prompt
+            return {
+                "faithfulness": 4,
+                "coverage": 4,
+                "decomposition": 4,
+                "readability": 4,
+                "reason": "qualified",
+            }
+
+    monkeypatch.setattr(runners, "CodexSessionAgent", RecordingSession)
+    case = next(item for item in load_cases() if item.identifier == "durable-counter")
+    fixture = FixturePlannerRunner()
+    base_response = fixture.run("rendered prompt", case.base)
+    variant_response = fixture.run("rendered prompt", case.variant)
+    narrative_markers: list[str] = []
+    for response, label in ((base_response, "BASE"), (variant_response, "VARIANT")):
+        stage = response["roadmap"]["stages"][0]
+        padding = "x" * 70_000
+        for field in (
+            "included_scope",
+            "excluded_scope",
+            "implementation_goals",
+            "verification_goals",
+        ):
+            marker = f"{label}-{field.upper().replace('_', '-')}-"
+            narrative_markers.append(marker)
+            stage[field] = [marker + padding]
+
+    CodexQualityJudge(REPOSITORY).score(case, base_response, variant_response)
+
+    prompt = captured["prompt"]
+    full_payload_size = sum(
+        len(json.dumps(response, ensure_ascii=False, sort_keys=True))
+        for response in (base_response, variant_response)
+    )
+    trace_payload_size = sum(
+        len(json.dumps(_judge_trace_payload(response), ensure_ascii=False, sort_keys=True))
+        for response in (base_response, variant_response)
+    )
+    old_prompt_size = len(prompt) + full_payload_size - trace_payload_size
+    full_payload_bytes = sum(
+        len(json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        for response in (base_response, variant_response)
+    )
+    trace_payload_bytes = sum(
+        len(
+            json.dumps(_judge_trace_payload(response), ensure_ascii=False, sort_keys=True).encode(
+                "utf-8"
+            )
+        )
+        for response in (base_response, variant_response)
+    )
+    prompt_bytes = len(prompt.encode("utf-8"))
+    old_prompt_bytes = prompt_bytes + full_payload_bytes - trace_payload_bytes
+    for marker in narrative_markers:
+        assert prompt.count(marker) == 1
+    assert old_prompt_size > 1_048_576
+    assert old_prompt_bytes > 1_048_576
+    assert len(prompt) < 750_000
+    assert prompt_bytes < 750_000
+    assert len(prompt) < old_prompt_size * 0.70
 
 
 def test_judge_materially_influences_score_without_displacing_hard_guards() -> None:

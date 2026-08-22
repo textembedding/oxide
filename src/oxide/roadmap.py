@@ -79,7 +79,6 @@ _GLOBAL_INVARIANT_VALUE_SCHEMA: dict[str, Any] = {
         "statement": {"type": "string", "minLength": 1},
         "sources": {
             "type": "array",
-            "uniqueItems": True,
             "items": _SOURCE_REFERENCE_VALUE_SCHEMA,
         },
     },
@@ -106,41 +105,34 @@ _STAGE_VALUE_SCHEMA: dict[str, Any] = {
         "included_scope": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "excluded_scope": {
             "type": "array",
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "dependencies": {
             "type": "array",
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "source_specifications": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": _SOURCE_REFERENCE_VALUE_SCHEMA,
         },
         "applicable_global_invariants": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "implementation_goals": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "verification_goals": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1},
         },
         "readiness": {
@@ -171,13 +163,11 @@ ROADMAP_VALUE_SCHEMA: dict[str, Any] = {
         "global_invariants": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": _GLOBAL_INVARIANT_VALUE_SCHEMA,
         },
         "stages": {
             "type": "array",
             "minItems": 1,
-            "uniqueItems": True,
             "items": _STAGE_VALUE_SCHEMA,
         },
     },

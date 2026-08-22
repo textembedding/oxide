@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -141,25 +142,61 @@ def test_roadmap_title_must_remain_nonempty_for_legacy_artifact_compatibility() 
         render_roadmap_value(roadmap)
 
 
-def test_structured_roadmap_schema_rejects_arrays_rejected_as_duplicates_at_runtime() -> None:
-    properties = ROADMAP_VALUE_SCHEMA["properties"]
-    assert properties["global_invariants"]["uniqueItems"] is True
-    assert properties["stages"]["uniqueItems"] is True
+def test_structured_roadmap_schema_has_no_unsupported_unique_items_keywords() -> None:
+    def assert_no_unique_items(value: object) -> None:
+        if isinstance(value, dict):
+            assert "uniqueItems" not in value
+            for item in value.values():
+                assert_no_unique_items(item)
+        elif isinstance(value, list):
+            for item in value:
+                assert_no_unique_items(item)
 
-    invariant = properties["global_invariants"]["items"]
-    assert invariant["properties"]["sources"]["uniqueItems"] is True
+    assert_no_unique_items(ROADMAP_VALUE_SCHEMA)
 
-    stage = properties["stages"]["items"]
-    for field in (
-        "included_scope",
-        "excluded_scope",
-        "dependencies",
-        "source_specifications",
-        "applicable_global_invariants",
-        "implementation_goals",
-        "verification_goals",
-    ):
-        assert stage["properties"][field]["uniqueItems"] is True
+
+def test_structured_roadmap_render_rejects_duplicate_stage_ids() -> None:
+    roadmap = parse_roadmap(_unordered_roadmap())
+    duplicate = deepcopy(roadmap["stages"][0])
+    duplicate["outcome"] = "A different outcome cannot reuse the same phase identity."
+    roadmap["stages"].append(duplicate)
+
+    with pytest.raises(RoadmapError, match="roadmap stage 6 is malformed or duplicate"):
+        render_roadmap_value(roadmap)
+
+
+def test_structured_roadmap_render_rejects_duplicate_invariant_ids() -> None:
+    roadmap = parse_roadmap(_unordered_roadmap())
+    duplicate = deepcopy(roadmap["global_invariants"][-1])
+    duplicate["statement"] = "A different statement cannot reuse the same invariant identity."
+    roadmap["global_invariants"].append(duplicate)
+
+    with pytest.raises(RoadmapError, match="global invariant 4 is malformed or duplicate"):
+        render_roadmap_value(roadmap)
+
+
+def test_structured_roadmap_render_rejects_duplicate_string_list_items() -> None:
+    roadmap = parse_roadmap(_unordered_roadmap())
+    stage = roadmap["stages"][0]
+    stage["included_scope"].append(stage["included_scope"][0])
+
+    with pytest.raises(RoadmapError, match=r"stage a-base\.included_scope contains duplicates"):
+        render_roadmap_value(roadmap)
+
+
+@pytest.mark.parametrize("owner", ["stage", "invariant"])
+def test_structured_roadmap_render_rejects_duplicate_source_references(owner: str) -> None:
+    roadmap = parse_roadmap(_unordered_roadmap())
+    if owner == "stage":
+        field = "stage a-base.source_specifications"
+        sources = roadmap["stages"][0]["source_specifications"]
+    else:
+        field = "global invariant alpha.sources"
+        sources = roadmap["global_invariants"][1]["sources"]
+    sources.append(deepcopy(sources[0]))
+
+    with pytest.raises(RoadmapError, match=rf"{field} contains duplicate source requirements"):
+        render_roadmap_value(roadmap)
 
 
 def test_structured_roadmap_rejects_malformed_reserved_anchor_before_rendering() -> None:

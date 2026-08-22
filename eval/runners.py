@@ -132,6 +132,42 @@ def _judge_human_roadmap(response: dict[str, Any], label: str) -> str:
     return human_view.replace(ROADMAP_VIEW_MARKER, "").strip()
 
 
+def _judge_trace_payload(response: dict[str, Any]) -> dict[str, Any]:
+    """Retain judge-only metadata and complete provenance without repeated roadmap prose."""
+    payload = {
+        key: response[key]
+        for key in (
+            "message",
+            "ready_for_approval",
+            "complete_specification_corpus",
+            "faithful_to_specifications",
+            "unresolved",
+        )
+        if key in response
+    }
+    roadmap = response.get("roadmap")
+    if not isinstance(roadmap, dict):
+        return payload
+
+    def provenance(value: object, source_field: str) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [
+            {
+                "id": item.get("id"),
+                source_field: item.get(source_field),
+            }
+            for item in value
+            if isinstance(item, dict)
+        ]
+
+    payload["roadmap"] = {
+        "global_invariants": provenance(roadmap.get("global_invariants"), "sources"),
+        "stages": provenance(roadmap.get("stages"), "source_specifications"),
+    }
+    return payload
+
+
 @dataclass
 class CodexQualityJudge:
     repository: Path
@@ -174,10 +210,10 @@ Interpret roadmap state with these rules:
   presented as proof. Product sources remain the sole authority for product behavior, so policy
   obligations never become source citations or invented semantics.
 - The RENDERED HUMAN ROADMAP sections below are the views people read. Score readability from those
-  views. The REQUIRED TRACE PAYLOAD sections contain mandatory verbatim source citations and
-  structured provenance for mechanical qualification. Use that payload to judge faithfulness and
-  coverage, but never lower readability merely because the trace payload is long or repeats source
-  language that is absent from the rendered human view.
+  views. The REQUIRED TRACE PAYLOAD sections contain top-level response metadata and mandatory
+  verbatim source citations keyed to invariant and phase identities. Use that payload to judge
+  faithfulness and coverage, but never lower readability merely because the trace payload is long
+  or repeats source language that is absent from the rendered human view.
 
 1. faithfulness: goals and exclusions do not smuggle in product behavior absent from sources;
 2. coverage: every material requirement, deferral, non-goal, and research question has one
@@ -200,13 +236,13 @@ BASE RENDERED HUMAN ROADMAP
 {_judge_human_roadmap(base_response, "BASE")}
 
 BASE REQUIRED TRACE PAYLOAD
-{json.dumps(base_response, ensure_ascii=False, sort_keys=True)}
+{json.dumps(_judge_trace_payload(base_response), ensure_ascii=False, sort_keys=True)}
 
 VARIANT RENDERED HUMAN ROADMAP
 {_judge_human_roadmap(variant_response, "VARIANT")}
 
 VARIANT REQUIRED TRACE PAYLOAD
-{json.dumps(variant_response, ensure_ascii=False, sort_keys=True)}
+{json.dumps(_judge_trace_payload(variant_response), ensure_ascii=False, sort_keys=True)}
 """
         result = _retry_infrastructure(
             lambda: CodexSessionAgent(
